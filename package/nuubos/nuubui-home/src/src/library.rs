@@ -62,6 +62,8 @@ struct LibGame {
     last: i64,
     time: i64,
     available: bool,
+    /* On the games card (libraryd field 9 = 2). */
+    on_sd2: bool,
 }
 
 #[derive(Clone, Default)]
@@ -187,6 +189,7 @@ fn parse_game(value: &str) -> Option<LibGame> {
         last: f[5].parse().unwrap_or(0),
         time: f[6].parse().unwrap_or(0),
         available: f[7] == "1",
+        on_sd2: f.get(8) == Some(&"2"),
     })
 }
 
@@ -311,7 +314,7 @@ fn last_played_day(ui: &HomeWindow, last: i64) -> String {
 fn game_detail(ui: &HomeWindow, g: &LibGame, system_name: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !g.available {
-        parts.push(tr(ui, 205, "Unavailable"));
+        parts.push(if g.on_sd2 { tr(ui, 974, "Insert the SD2 card with this game") } else { tr(ui, 205, "Unavailable") });
     }
     parts.push(system_name.to_owned());
     if g.last > 0 {
@@ -499,6 +502,10 @@ fn system_lookup(snap: &LibSnapshot, id: &str) -> (String, f32, Color) {
 }
 
 fn game_card(ui: &HomeWindow, snap: &LibSnapshot, g: &LibGame, load: bool) -> HomeCard {
+    SD2_GAMES.with(|s| {
+        let mut s = s.borrow_mut();
+        if g.on_sd2 { s.insert(g.id.clone()); } else { s.remove(&g.id); }
+    });
     let (system_name, system_aspect, accent) = system_lookup(snap, &g.system);
     let cover = if load { request_cover(ui, &g.cover, false) } else { None };
     let aspect = match &cover {
@@ -523,6 +530,20 @@ fn game_card(ui: &HomeWindow, snap: &LibSnapshot, g: &LibGame, load: bool) -> Ho
         available: g.available,
         focused: false,
         ..Default::default()
+    }
+}
+
+thread_local! {
+    /* Games of the snapshot on screen that live on the games card. */
+    static SD2_GAMES: RefCell<std::collections::HashSet<String>> = RefCell::new(Default::default());
+}
+
+/* "Insert the SD2 card…" for a missing games-card game, else the usual. */
+fn unavailable_text(ui: &HomeWindow, id: &str) -> String {
+    if SD2_GAMES.with(|s| s.borrow().contains(id)) {
+        tr(ui, 974, "Insert the SD2 card with this game")
+    } else {
+        tr(ui, 434, "This game is not available")
     }
 }
 
@@ -924,7 +945,7 @@ fn press_game(ui: &HomeWindow, card: &HomeCard) {
         let Some(ui) = weak.upgrade() else { return };
         if !held.available {
             play_ui_sound("error");
-            show_notice(&ui, tr(&ui, 434, "This game is not available"));
+            show_notice(&ui, unavailable_text(&ui, held.key.as_str()));
             return;
         }
         play_ui_sound("menu_confirm");
@@ -1010,7 +1031,7 @@ fn launch_session(ui: &HomeWindow, running: bool) {
 pub fn launch_with_mode(ui: &HomeWindow, id: &str, available: bool, mode: &str) {
     if !available {
         play_ui_sound("error");
-        show_notice(ui, tr(ui, 434, "This game is not available"));
+        show_notice(ui, unavailable_text(ui, id));
         return;
     }
     if GAME_RUNNING.load(Ordering::SeqCst) {

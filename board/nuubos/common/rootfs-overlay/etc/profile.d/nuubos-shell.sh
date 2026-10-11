@@ -51,9 +51,5 @@ ninfo()
 
 nstorage()
 {
-    if [ -r /run/nuubos/storage/tf2.status ]; then
-        cat /run/nuubos/storage/tf2.status
-    else
-        echo "nuubOS storage state unavailable"
-    fi
+    /usr/sbin/nuubos-storagectl status
 }

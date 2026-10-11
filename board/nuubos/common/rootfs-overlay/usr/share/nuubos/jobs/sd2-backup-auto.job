@@ -1,0 +1,7 @@
+# Automatic backup of SD1 to the games card (after a game, daily): silent
+COMMAND=/usr/sbin/nuubos-sd2-backup run auto
+SCOPE=device
+CANCEL=1
+RETRY=0
+ARGS=0
+NOTIFY=0

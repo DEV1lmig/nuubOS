@@ -399,7 +399,8 @@ static int cmd_roots(void)
 			/* Only mounted volumes (a different device than the parent). */
 			if (stat(path, &a) != 0 || stat(dirs[i], &b) != 0 || a.st_dev == b.st_dev)
 				continue;
-			print_root(i == 0 ? "media" : "share", path);
+			/* The games card (nuubos-storagectl) is a location of its own. */
+			print_root(i == 1 ? "share" : strcmp(e->d_name, "sd2") ? "media" : "sd2", path);
 		}
 		closedir(d);
 	}

@@ -241,7 +241,11 @@ fn parse_details(reply: &str, d: &mut Details) {
             }
             "system_name" => d.system_name = value.into(),
             "sessions" => d.sessions = value.parse().unwrap_or(0),
-            "path" => d.path = value.into(),
+            /* Games-card games are "sd2:<path>" (libraryd): shown as SD2 › <path>. */
+            "path" => d.path = match value.strip_prefix("sd2:") {
+                Some(rest) => format!("SD2 › {rest}"),
+                None => value.into(),
+            },
             "member" => {
                 let f: Vec<&str> = value.split('\t').collect();
                 if f.len() >= 3 {
@@ -382,7 +386,7 @@ fn duration(ui: &HomeWindow, seconds: i64) -> String {
     }
 }
 
-fn days_ago(ui: &HomeWindow, last: i64) -> String {
+pub(crate) fn days_ago(ui: &HomeWindow, last: i64) -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let days = (now - last).max(0) / 86400;
     match days {
@@ -770,6 +774,11 @@ fn details_move(ui: &HomeWindow, action: &str) {
 
 pub(crate) fn render(ui: &HomeWindow) {
     let view = ui.get_settings_view();
+    /* Before Files: Backup Content (59) sits inside its range. */
+    if view == crate::storageui::STORAGE_VIEW || view == crate::storageui::CONTENT_VIEW {
+        crate::storageui::render(ui);
+        return;
+    }
     if (58..=62).contains(&view) {
         crate::filesui::render(ui);
         return;
@@ -985,6 +994,7 @@ pub fn open_start_sheet(ui: &HomeWindow, card: &crate::HomeCard) {
     START_CARD.with(|c| *c.borrow_mut() = Some(card.clone()));
     thread::spawn(move || {
         let reply = emulation(&format!("STATES\t{id}"), true);
+        let hardcore = reply.lines().any(|l| l == "hardcore=1");
         let mut states: Vec<(i32, i64, String)> = reply
             .lines()
             .filter_map(|l| l.strip_prefix("state="))
@@ -1016,6 +1026,7 @@ pub fn open_start_sheet(ui: &HomeWindow, card: &crate::HomeCard) {
             ui.set_start_sheet_has_cover(card.has_cover);
             ui.set_start_sheet_cover(if card.has_cover { card.cover.clone() } else { Image::default() });
             ui.set_start_sheet_items(ModelRc::from(Rc::new(VecModel::from(items))));
+            ui.set_start_sheet_hardcore(hardcore);
             ui.set_start_sheet_index(0);
             ui.set_start_sheet_scroll(0);
             ui.set_start_sheet_open(true);
@@ -1947,9 +1958,16 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
                 let st = st.borrow();
                 if key == "ra-enabled" { ("enabled", !st.ra_enabled) } else { ("hardcore", !st.ra_hardcore) }
             });
-            tool_then(ui, "/usr/bin/nuubos-achievementsctl",
-                vec!["set".into(), active_user(), field.into(), if on { "1".into() } else { "0".into() }],
-                None, |ui, _| refresh_achievements(ui));
+            /* Turning Hardcore on first explains what it takes away. */
+            if field == "hardcore" && on {
+                ui.set_settings_dialog_title(tr(ui, 907, "Turn On Hardcore Mode?").into());
+                ui.set_settings_dialog_body(tr(ui, 908, "Achievements are earned as on the original console, with no help. While Hardcore Mode is on, save states and fast-forward are off: every game starts from the beginning and only the game's own saves are kept. RetroArch also blocks cheats, rewind and slow motion. You can turn it off at any time.").into());
+                ui.set_settings_dialog_confirm(tr(ui, 909, "Turn On").into());
+                ui.set_settings_dialog_index(0);
+                ui.set_settings_dialog_open(true);
+                return;
+            }
+            set_achievements(ui, field, on);
         }
         (54, "ra-signout") => {
             if arm_or(ui, "ra-signout") {
@@ -2031,6 +2049,10 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
 
 /* Input on Settings pages 52-62 (from handle_settings_action). */
 pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
+    if view == crate::storageui::STORAGE_VIEW || view == crate::storageui::CONTENT_VIEW {
+        crate::storageui::handle_page(ui, view, action);
+        return;
+    }
     if (58..=62).contains(&view) {
         crate::filesui::handle_page(ui, view, action);
         return;
@@ -2057,6 +2079,30 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
         "menu_confirm" => {
             let key = focused_key(ui);
             page_confirm(ui, view, &key);
+        }
+        _ => {}
+    }
+}
+
+fn set_achievements(ui: &HomeWindow, field: &str, on: bool) {
+    tool_then(ui, "/usr/bin/nuubos-achievementsctl",
+        vec!["set".into(), active_user(), field.into(), if on { "1".into() } else { "0".into() }],
+        None, |ui, _| refresh_achievements(ui));
+}
+
+/* Settings confirmation dialog (only Turn On Hardcore Mode for now):
+ * left/right/up/down move between Cancel and the action, Back cancels. */
+pub fn dialog_action(ui: &HomeWindow, action: &str) {
+    match action {
+        "menu_left" | "menu_right" | "menu_up" | "menu_down" => {
+            ui.set_settings_dialog_index(1 - ui.get_settings_dialog_index());
+        }
+        "menu_back" => ui.set_settings_dialog_open(false),
+        "menu_confirm" => {
+            ui.set_settings_dialog_open(false);
+            if ui.get_settings_dialog_index() == 1 {
+                set_achievements(ui, "hardcore", true);
+            }
         }
         _ => {}
     }

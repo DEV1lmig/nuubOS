@@ -166,7 +166,11 @@ fn load(ui: &HomeWindow) {
             for l in run_tool(FILESCTL, &["roots"], None).lines() {
                 let f: Vec<&str> = l.strip_prefix("root=").unwrap_or("").split('\t').collect();
                 if f.len() >= 2 {
-                    let title = if f[0] == "userdata" { String::new() } else { f[1].rsplit('/').next().unwrap_or("").to_owned() };
+                    /* Named on the UI thread: Internal Storage, SD2. */
+                    let title = match f[0] {
+                        "userdata" | "sd2" => String::new(),
+                        _ => f[1].rsplit('/').next().unwrap_or("").to_owned(),
+                    };
                     entries.push(Entry { key: format!("dir:{}", f[1]), title, detail: String::new(), folder: true });
                 }
             }
@@ -212,7 +216,11 @@ fn load(ui: &HomeWindow) {
                 let mut st = st.borrow_mut();
                 for e in entries.iter_mut() {
                     if e.key.starts_with("dir:") && e.title.is_empty() {
-                        e.title = tr(&ui, 610, "Internal Storage");
+                        e.title = if e.key == "dir:/media/sd2" {
+                            tr(&ui, 64, "SD2")
+                        } else {
+                            tr(&ui, 610, "Internal Storage")
+                        };
                     }
                 }
                 st.entries = entries;

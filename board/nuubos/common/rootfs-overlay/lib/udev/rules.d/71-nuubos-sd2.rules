@@ -1,0 +1,5 @@
+# nuubOS: the games card in the TF2 slot (MMC2 at 4022000.mmc), owned by
+# nuubos-storagectl (docs/dev/platform.md "SD2 = games card"). Disk events
+# only: the tool picks the partition itself.
+SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="mmcblk*", DEVPATH=="*/4022000.mmc/*", ACTION=="add", RUN+="/usr/sbin/nuubos-storagectl hotplug add %k"
+SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="mmcblk*", DEVPATH=="*/4022000.mmc/*", ACTION=="remove", RUN+="/usr/sbin/nuubos-storagectl hotplug remove %k"

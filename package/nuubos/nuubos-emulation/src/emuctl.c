@@ -35,7 +35,8 @@ static void usage(void)
 		"  states [GAME_ID]               save states (running game or GAME_ID)\n"
 		"  settings                       emulation settings of the active user\n"
 		"  set KEY VALUE\n"
-		"  pre-power sleep|restart|poweroff\n");
+		"  pre-power sleep|restart|poweroff\n"
+		"  storage-lost MOUNT_POINT       the games card went away\n");
 }
 
 int main(int argc, char **argv)
@@ -78,6 +79,8 @@ int main(int argc, char **argv)
 			 argv[2], argv[3], argv[4], argv[5]);
 	} else if (!strcmp(verb, "game-reset") && argc == 3) {
 		snprintf(command, sizeof(command), "GAME_RESET\t%s\n", argv[2]);
+	} else if (!strcmp(verb, "storage-lost") && argc == 3) {
+		snprintf(command, sizeof(command), "STORAGE_LOST\t%s\n", argv[2]);
 	} else if (!strcmp(verb, "pre-power") && argc == 3) {
 		snprintf(command, sizeof(command), "PRE_POWER\t%s\n", argv[2]);
 	} else if (argc == 2) {

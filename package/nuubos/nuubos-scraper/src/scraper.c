@@ -138,6 +138,9 @@ struct game_info {
 	char title[256];
 	char rel[PATH_MAX];
 	char stem[512];
+	/* Absolute ROM file and the ROM folder of its card (SD1 or SD2). */
+	char file[PATH_MAX];
+	char root[PATH_MAX];
 };
 
 struct account {
@@ -404,6 +407,9 @@ static void stem_of(const char *rel, char *out, size_t size)
 	const char *base = strrchr(rel, '/');
 	char *dot;
 
+	/* Games card paths are "sd2:<path>" (libraryd). */
+	if (!base && !strncmp(rel, "sd2:", 4))
+		base = rel + 3;
 	copy_text(out, size, base ? base + 1 : rel);
 	dot = strrchr(out, '.');
 	if (dot && dot != out)
@@ -494,6 +500,10 @@ static bool game_details(const char *id, struct game_info *g)
 				copy_text(g->title, sizeof(g->title), f[2]);
 		} else if (!strncmp(line, "path=", 5)) {
 			copy_text(g->rel, sizeof(g->rel), line + 5);
+		} else if (!strncmp(line, "file=", 5)) {
+			copy_text(g->file, sizeof(g->file), line + 5);
+		} else if (!strncmp(line, "root=", 5)) {
+			copy_text(g->root, sizeof(g->root), line + 5);
 		}
 	}
 	stem_of(g->rel, g->stem, sizeof(g->stem));
@@ -1358,7 +1368,7 @@ static enum outcome sky_lookup(int provider, const struct system_map *s, struct 
 	argv[argc++] = "-s";
 	argv[argc++] = (char *)provider_ids[provider];
 	argv[argc++] = "-i";
-	argv[argc++] = ROMS_ROOT;
+	argv[argc++] = (char *)items[0].g->root;
 	argv[argc++] = "--flags";
 	argv[argc++] = "unattend,nowheels,nomarquees,notextures";
 	/* Another language: Skyscraper's cache holds the text of the last
@@ -1402,7 +1412,7 @@ static enum outcome sky_lookup(int provider, const struct system_map *s, struct 
 	argv[argc++] = "-f";
 	argv[argc++] = "pegasus";
 	argv[argc++] = "-i";
-	argv[argc++] = ROMS_ROOT;
+	argv[argc++] = (char *)items[0].g->root;
 	argv[argc++] = "-g";
 	argv[argc++] = outdir;
 	argv[argc++] = "-o";
@@ -1763,6 +1773,7 @@ static void scrape_batch(int provider, const struct game_info *games, size_t cou
 	const struct system_map *s;
 	size_t n = 0;
 	const char *query = NULL;
+	bool mixed = false;
 
 	for (size_t i = 0; i < count; i++) {
 		enum outcome o;
@@ -1793,7 +1804,10 @@ static void scrape_batch(int provider, const struct game_info *games, size_t cou
 		}
 		memset(&items[n], 0, sizeof(items[n]));
 		items[n].g = &games[i];
-		snprintf(items[n].file, sizeof(items[n].file), ROMS_ROOT "/%s", games[i].rel);
+		/* The card went away since the list was made. */
+		if (!games[i].file[0] || !games[i].root[0])
+			continue;
+		snprintf(items[n].file, sizeof(items[n].file), "%s", games[i].file);
 		if (olds[n].search[0])
 			query = olds[n].search;
 		n++;
@@ -1801,8 +1815,12 @@ static void scrape_batch(int provider, const struct game_info *games, size_t cou
 	if (provider == PROV_LIBRETRO || n == 0)
 		return;
 	s = system_of(games[0].system);
-	/* A search name applies to its own game: such games go alone. */
-	if (n > 1 && query) {
+	/* A search name applies to its own game, and Skyscraper takes one ROM
+	 * folder per run: such games, and a batch spread over both cards, go
+	 * alone. */
+	for (size_t i = 1; i < n && !mixed; i++)
+		mixed = strcmp(items[i].g->root, items[0].g->root) != 0;
+	if (n > 1 && (query || mixed)) {
 		for (size_t i = 0; i < n && !cancelled && !stop_reason[0]; i++) {
 			struct sky_item one = items[i];
 			struct metadata old = olds[i];

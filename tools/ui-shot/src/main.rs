@@ -180,6 +180,15 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
         shot(win, w, h, "qm_game_slot_dropdown");
     }
     qm.set_game_slot_dropdown_open(false);
+    /* Hardcore session: no state rows. */
+    qm.set_game_hardcore(true);
+    for (name, sel) in [("qm_game_hardcore", 8), ("qm_game_hardcore_quit", 14)] {
+        qm.set_selected_index(sel);
+        for (w, h) in sizes {
+            shot(win, w, h, name);
+        }
+    }
+    qm.set_game_hardcore(false);
     /* Audio output dropdown over a game: the row is near the bottom, the
      * dropdown opens above it. */
     qm.set_selected_index(3);
@@ -315,8 +324,7 @@ fn main() {
     ui.set_bluetooth_enabled(true);
     ui.set_connectivity_wifi_active(true);
     ui.set_wifi_current_ssid("CasaBaf-5G".into());
-    ui.set_system_storage_active("TF1".into());
-    ui.set_system_storage_health("OK".into());
+    ui.set_system_storage_summary("SD1 • SD2".into());
     ui.set_system_version("0.5".into());
     ui.set_system_build("2026.10".into());
     ui.set_system_device_model("Anbernic RG40XX-V".into());
@@ -502,7 +510,12 @@ fn main() {
             ui.set_gen_rows(gen(&[(&s(ui, 588), "alice", "", false, -1), (&s(ui, 112), "", "", false, 1),
                 (&s(ui, 585), "", &s(ui, 586), false, 0), (&s(ui, 567), "", "", false, -1)]));
         })),
+        ("achievements_hardcore", Box::new(|ui| {
+            ui.set_settings_dialog_title(s(ui, 907).into()); ui.set_settings_dialog_body(s(ui, 908).into());
+            ui.set_settings_dialog_confirm(s(ui, 909).into()); ui.set_settings_dialog_index(1); ui.set_settings_dialog_open(true);
+        })),
         ("web", Box::new(|ui| {
+            ui.set_settings_dialog_open(false);
             ui.set_details_active(true); ui.set_details_has_cover(false); ui.set_settings_view(67); ui.set_gen_index(0); ui.set_gen_scroll(0);
             ui.set_details_shell_title(s(ui, 678).into()); ui.set_details_title(s(ui, 678).into()); ui.set_details_subtitle("".into());
             ui.set_details_description(s(ui, 698).into()); ui.set_gen_section(s(ui, 678).into()); ui.set_gen_select(true); ui.set_gen_notice("".into());
@@ -522,7 +535,65 @@ fn main() {
         ("safe_screen", Box::new(|ui| { ui.set_recovery_notice("".into()); ui.set_recovery_armed(-1); ui.set_recovery_stage(0); ui.set_active_user_id("u".into()); ui.set_safe_index(0); ui.set_safe_screen_open(true); })),
         ("safe_screen_armed", Box::new(|ui| { ui.set_safe_index(5); ui.set_recovery_armed(5); ui.set_recovery_stage(0); })),
         ("safe_screen_notice", Box::new(|ui| { ui.set_safe_index(2); ui.set_recovery_armed(-1); ui.set_recovery_stage(0); ui.set_recovery_notice("Support bundle saved: nuubos-support-20261008-070500.tar.gz".into()); })),
+        /* Settings → System → Storage (storageui.rs pages 64 and 59). */
+        ("storage", Box::new(|ui| {
+            ui.set_safe_screen_open(false); ui.set_recovery_notice("".into());
+            ui.set_settings_open(true); ui.set_details_active(false);
+            ui.set_settings_selected_index(6); ui.set_settings_view(64); ui.set_gen_index(2); ui.set_gen_scroll(0);
+            ui.set_gen_section(s(ui, 19).to_uppercase().into()); ui.set_gen_select(true);
+            ui.set_gen_split(6); ui.set_gen_split_label(s(ui, 931).into());
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 912), &s(ui, 914).replace("{0}", "41.1 GB").replace("{1}", "60.2 GB"), &s(ui, 913), false, -1),
+                (&s(ui, 64), &s(ui, 914).replace("{0}", "214.3 GB").replace("{1}", "255.8 GB"), "SANDISK", false, -1),
+                (&s(ui, 924), "", "", false, -1),
+                (&s(ui, 926), "", &s(ui, 927), false, -1),
+                (&s(ui, 928), "", &s(ui, 929), false, -1),
+                (&s(ui, 625), "", "", true, -1),
+                (&s(ui, 69), "", &s(ui, 933).replace("{0}", &s(ui, 402)), false, 1),
+                (&s(ui, 936), &s(ui, 937), "", true, -1),
+                (&s(ui, 88), "", "", false, -1),
+                (&s(ui, 940), "", &s(ui, 941), true, -1)]));
+        })),
+        ("storage_backup", Box::new(|ui| { ui.set_gen_index(8); ui.set_gen_scroll(5); })),
+        ("storage_format_armed", Box::new(|ui| {
+            ui.set_gen_index(4); ui.set_gen_scroll(0);
+            let rows = ui.get_gen_rows();
+            if let Some(mut r) = rows.row_data(4) { r.armed = true; r.detail = s(ui, 930).into(); rows.set_row_data(4, r); }
+        })),
+        ("storage_empty", Box::new(|ui| {
+            ui.set_gen_index(1); ui.set_gen_scroll(0); ui.set_gen_split(3);
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 912), &s(ui, 914).replace("{0}", "41.1 GB").replace("{1}", "60.2 GB"), &s(ui, 913), false, -1),
+                (&s(ui, 64), &s(ui, 916), "", false, -1),
+                (&s(ui, 625), "", "", true, -1),
+                (&s(ui, 69), "", &s(ui, 935), false, 1),
+                (&s(ui, 936), &s(ui, 937), "", true, -1),
+                (&s(ui, 88), "", "", false, -1)]));
+        })),
+        ("storage_content", Box::new(|ui| {
+            ui.set_settings_view(59); ui.set_gen_index(6); ui.set_gen_scroll(0); ui.set_gen_split(0);
+            ui.set_gen_section(s(ui, 936).to_uppercase().into());
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 945), "", &s(ui, 946), false, 1),
+                (&s(ui, 947), "", "", false, 1), (&s(ui, 948), "", "", false, 1),
+                (&s(ui, 949), "", &s(ui, 950), false, 1), (&s(ui, 951), "", "", false, 1),
+                (&s(ui, 576), "", "", false, 1), (&s(ui, 953), "", &s(ui, 954), false, 0)]));
+        })),
+        ("storage_prompt", Box::new(|ui| {
+            ui.set_settings_view(64); ui.set_gen_index(0); ui.set_gen_split(6);
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 912), &s(ui, 914).replace("{0}", "41.1 GB").replace("{1}", "60.2 GB"), &s(ui, 913), false, -1),
+                (&s(ui, 64), &s(ui, 914).replace("{0}", "63.8 GB").replace("{1}", "63.9 GB"), "SD64", false, -1),
+                (&s(ui, 924), "", "", false, -1), (&s(ui, 926), "", &s(ui, 927), false, -1),
+                (&s(ui, 928), "", &s(ui, 929), false, -1), (&s(ui, 625), "", "", true, -1)]));
+            ui.set_settings_choice_open(true);
+            ui.set_settings_choice_title(format!("{} • SD64", s(ui, 955)).into());
+            let o = vec![SettingsChoiceEntry { value: "prepare".into(), label: s(ui, 926).into() },
+                SettingsChoiceEntry { value: "keep".into(), label: s(ui, 956).into() }];
+            ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o)))); ui.set_settings_choice_index(0);
+        })),
         ("dropdown", Box::new(|ui| {
+            ui.set_settings_choice_open(false);
             ui.set_safe_screen_open(false); ui.set_recovery_notice("".into());
             ui.set_settings_view(19); ui.set_settings_choice_open(true); ui.set_settings_choice_title("Sleep After".into());
             let o: Vec<SettingsChoiceEntry> = ["Off","1 min","2 min","5 min","10 min","15 min","30 min","60 min"].iter().map(|s| SettingsChoiceEntry{ value: (*s).into(), label: (*s).into() }).collect();
@@ -852,7 +923,11 @@ fn main() {
         ui.set_start_sheet_items(ModelRc::default());
         ui.set_start_sheet_index(0); ui.set_start_sheet_scroll(0); ui.set_start_sheet_open(true);
     })));
+    scenes.push(("start_game_hardcore", Box::new(|ui| {
+        ui.set_start_sheet_hardcore(true);
+    })));
     scenes.push(("home_find", Box::new(move |ui| {
+        ui.set_start_sheet_hardcore(false);
         ui.set_home_sheet_open(false);
         ui.set_start_sheet_open(false);
         ui.set_find_open(true); ui.set_find_zone(1); ui.set_find_query("mario".into());

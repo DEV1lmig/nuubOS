@@ -6,8 +6,9 @@
 #   eject NAME               flush and unmount; ERR busy while files are open
 #
 # USB volumes are file sources/targets (File Manager, backups), never a ROM
-# location: the Game Library reads only USERDATA. Mounted nodev,nosuid,
-# noexec. NUUBOS_MEDIA_ROOT overrides /media for the host test.
+# location. Mounted nodev,nosuid,noexec. /media/sd2 is the games card in the
+# TF2 slot, owned by nuubos-storagectl: listed here too, its eject goes
+# there. NUUBOS_MEDIA_ROOT overrides /media for the host test.
 
 MEDIA="${NUUBOS_MEDIA_ROOT:-/media}"
 
@@ -24,8 +25,11 @@ volume_name()
 {
     label="$(blkid -o value -s LABEL "/dev/$1" 2>/dev/null | tr -c 'A-Za-z0-9._-' '_' | sed 's/_*$//' | cut -c1-32)"
     case "$label" in ''|.*) label="$1" ;; esac
+    # "sd2" is the games card's; a taken name (mounted, or a folder that
+    # is not an empty leftover) gets a number.
     name="$label"; n=2
-    while [ -e "$MEDIA/$name" ] && ! grep -qs " $MEDIA/$name " /proc/mounts; do
+    while [ "$name" = sd2 ] || grep -qs " $MEDIA/$name " /proc/mounts ||
+          { [ -e "$MEDIA/$name" ] && ! rmdir "$MEDIA/$name" 2>/dev/null; }; do
         name="$label-$n"; n=$((n + 1))
     done
     printf '%s\n' "$name"
@@ -84,6 +88,7 @@ eject()
 {
     name="$1"
     case "$name" in */*|.*|'') echo "ERR name"; return 1 ;; esac
+    [ "$name" = sd2 ] && [ -z "${NUUBOS_MEDIA_ROOT:-}" ] && { /usr/sbin/nuubos-storagectl sd2 eject; return; }
     mp="$MEDIA/$name"
     grep -qs " $mp " /proc/mounts || { echo "ERR not-mounted"; return 1; }
     sync

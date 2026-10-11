@@ -1494,13 +1494,18 @@ static void notification(const char *line)
 	else if ((strcmp(event, "headphones.connected") == 0 ||
 		  strcmp(event, "wifi.connected") == 0 ||
 		  strcmp(event, "media.connected") == 0 ||
+		  strcmp(event, "storage.sd2.inserted") == 0 ||
 		  strcmp(event, "stream.paired") == 0) && on(SIG_CONNECTIONS))
 		start_signal(SHAPE_LINK, event, accent(), 1, 1300, 0, 0, 0);
 	else if ((strcmp(event, "controller.disconnected") == 0 ||
 		  strcmp(event, "headphones.disconnected") == 0 ||
-		  strcmp(event, "media.removed") == 0) && on(SIG_CONNECTIONS))
+		  strcmp(event, "media.removed") == 0 ||
+		  strcmp(event, "storage.sd2.removed") == 0 ||
+		  strcmp(event, "storage.sd2.ejected") == 0) && on(SIG_CONNECTIONS))
 		start_signal(SHAPE_UNLINK, event, scale(ROLE_NEUTRAL, 0.7f), 1, 950, 0, 0, 0);
-	else if (strcmp(event, "wifi.lost") == 0 && on(SIG_CONNECTIONS))
+	else if ((strcmp(event, "wifi.lost") == 0 ||
+		  strcmp(event, "storage.sd2.readonly") == 0 ||
+		  strcmp(event, "storage.sd2.unreadable") == 0) && on(SIG_CONNECTIONS))
 		start_signal(SHAPE_UNLINK, event, ROLE_WARNING, 2, 950, 0, 0, 0);
 	else if (strcmp(event, "stream.pair.failed") == 0 && on(SIG_CONNECTIONS))
 		start_signal(SHAPE_PULSE, event, ROLE_ERROR, 3, 1200, 2, 0, 0);
@@ -1519,11 +1524,12 @@ static void notification(const char *line)
 	else if ((strcmp(event, "game.state.failed") == 0 ||
 		  strcmp(event, "game.screenshot.failed") == 0 ||
 		  strcmp(event, "game.failed") == 0 ||
+		  strcmp(event, "game.storage_lost") == 0 ||
 		  strcmp(event, "stream.failed") == 0) && on(SIG_GAMES))
 		start_signal(SHAPE_PULSE, event, ROLE_ERROR, 3, 1200, 2, 0, 0);
 
 	/* Tasks. */
-	else if ((strcmp(event, "job") == 0 || strcmp(event, "storage.job") == 0) &&
+	else if (strcmp(event, "job") == 0 &&
 		 done && on(SIG_TASKS)) {
 		if (strcmp(state, "succeeded") == 0)
 			start_signal(SHAPE_FILL, "job.succeeded", ROLE_SUCCESS, 1, 1700, 0, 0, 1.0f);

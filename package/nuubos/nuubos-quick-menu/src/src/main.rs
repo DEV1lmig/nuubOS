@@ -1715,6 +1715,10 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
                 "restore-user" => tr(ui, 635, "Restore"),
                 "update-download" => tr(ui, 660, "Downloading update"),
                 "scrape-game" | "scrape-bulk" => tr(ui, 571, "Getting metadata"),
+                "sd2-backup" => tr(ui, 967, "Backup to SD2"),
+                "sd2-restore" => tr(ui, 940, "Restore from SD2"),
+                "sd2-format" => tr(ui, 969, "Formatting SD2"),
+                "sd2-prepare" => tr(ui, 973, "Creating game folders"),
                 _ => return None,
             };
             let failure = match n.text("reason") {
@@ -1724,6 +1728,10 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
                 "network" => tr(ui, 494, "Check the network connection"),
                 "unavailable" => tr(ui, 570, "The metadata service is not available in this build"),
                 "space" => tr(ui, 493, "Not enough free space"),
+                "conflict" => tr(ui, 943, "Restore it, or keep it aside and start a new backup"),
+                "card" => tr(ui, 935, "Insert an SD2 card to back up"),
+                "game" => tr(ui, 977, "Close the game first"),
+                "busy" => tr(ui, 628, "In use; close what uses it first"),
                 _ => tr(ui, 93, "Failed"),
             };
             let (icon, severity, detail) = match n.text("state") {
@@ -1746,6 +1754,13 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
             n.int("slot")
                 .map(|slot| format_arg(&tr(ui, 423, "Slot {0}"), &slot.to_string()))
                 .unwrap_or_default(),
+            -1,
+        ),
+        "game.hardcore" => (
+            ICON_FAILED,
+            SEVERITY_WARNING,
+            tr(ui, 910, "Not available in Hardcore Mode"),
+            String::new(),
             -1,
         ),
         "game.state.empty" => (
@@ -1862,21 +1877,16 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
             String::new(),
             -1,
         ),
-        "storage.job" => {
-            let title = match n.text("action") {
-                "backup" => tr(ui, 97, "Back Up to SD1"),
-                "move-back" => tr(ui, 96, "Move to SD1"),
-                "adopt" => tr(ui, 95, "Move to SD2"),
-                _ => return None,
-            };
-            let (icon, severity, detail) = match n.text("state") {
-                "running" => (ICON_STORAGE, SEVERITY_INFO, tr(ui, 91, "Running")),
-                "succeeded" => (ICON_DONE, SEVERITY_SUCCESS, tr(ui, 92, "Completed")),
-                "failed" => (ICON_FAILED, SEVERITY_ERROR, tr(ui, 93, "Failed")),
-                _ => return None,
-            };
-            (icon, severity, title, detail, -1)
-        }
+        /* The games card in the TF2 slot (nuubos-storagectl). */
+        "storage.sd2.inserted" => (ICON_STORAGE, SEVERITY_INFO, tr(ui, 932, "SD2 inserted"), n.text("name").to_owned(), -1),
+        "storage.sd2.removed" => (ICON_STORAGE, SEVERITY_INFO, tr(ui, 939, "SD2 removed"),
+            tr(ui, 975, "Its games come back when you insert it again"), -1),
+        "storage.sd2.ejected" => (ICON_DONE, SEVERITY_SUCCESS, tr(ui, 923, "SD2 ejected: safe to remove"), String::new(), -1),
+        "storage.sd2.readonly" => (ICON_STORAGE, SEVERITY_WARNING, tr(ui, 944, "SD2 is read-only"), n.text("name").to_owned(), -1),
+        "storage.sd2.unreadable" => (ICON_FAILED, SEVERITY_WARNING, tr(ui, 957, "SD2 can't be read"),
+            tr(ui, 952, "You can format it in Settings › System › Storage"), -1),
+        "storage.sd2.formatted" => (ICON_DONE, SEVERITY_SUCCESS, tr(ui, 971, "SD2 formatted"), String::new(), -1),
+        "game.storage_lost" => (ICON_STORAGE, SEVERITY_WARNING, tr(ui, 961, "SD2 removed: game saved and closed"), String::new(), -1),
         _ => return None,
     };
 
@@ -2538,6 +2548,8 @@ struct GameSnapshot {
     overlay: bool,
     overlay_items: String,
     fps: f32,
+    /* RetroAchievements hardcore: no save states (EPIC-017). */
+    hardcore: bool,
 }
 
 fn parse_game_snapshot(reply: &str) -> GameSnapshot {
@@ -2551,6 +2563,7 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
             Some(("overlay", value)) => snapshot.overlay = value == "1",
             Some(("overlay_items", value)) => snapshot.overlay_items = value.to_owned(),
             Some(("fps", value)) => snapshot.fps = value.parse().unwrap_or(0.0),
+            Some(("hardcore", value)) => snapshot.hardcore = value == "1",
             _ => {}
         }
     }
@@ -2747,6 +2760,11 @@ fn apply_game_snapshot(ui: &QuickMenuWindow, snapshot: &GameSnapshot) {
         ui.set_game_confirm_index(-1);
     }
     ui.set_game_section_visible(snapshot.running);
+    ui.set_game_hardcore(snapshot.running && snapshot.hardcore);
+    if ui.get_game_hardcore() && (9..=11).contains(&ui.get_selected_index()) {
+        ui.set_selected_index(8);
+        ui.set_game_slot_dropdown_open(false);
+    }
     ui.set_game_overlay_on(snapshot.overlay);
     ui.set_game_slot_label(
         format_arg(&tr(ui, 423, "Slot {0}"), &snapshot.slot.to_string()).into(),
@@ -3261,7 +3279,10 @@ fn keyboard_action(ui: &QuickMenuWindow, kb: &mut WebKeyboard, action: &str) -> 
 fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
     let mut indices = Vec::new();
     if ui.get_game_section_visible() {
-        indices.extend_from_slice(&[8, 9, 10, 11]);
+        indices.push(8);
+        if !ui.get_game_hardcore() {
+            indices.extend_from_slice(&[9, 10, 11]);
+        }
         if ui.get_players_visible() {
             indices.push(PLAYERS_ROW);
         }

@@ -54,9 +54,9 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "Usage: nuubos-systemctl status | set-profile <auto|battery-saver> | "
                 "set-auto-battery <0-50> | set-charge-limit <80-100> | set-sleep <min> | "
-                "set-storage-backup-policy <off|daily|weekly|monthly> | "
-                "set-storage-mode <single|auto|dual> | storage-backup-now | "
-                "storage-move-back | storage-adopt <tf2-cid> | sleep | restart | poweroff | activity | reset-system-settings\n");
+                "storage-changed | set-storage-backup <0|1> | set-storage-backup-item <item> <0|1> | "
+                "sd2 <eject|ignore|use> | storage-backup-archive | "
+                "sleep | restart | poweroff | activity | reset-system-settings\n");
         close(fd);
         return 2;
     }
@@ -73,26 +73,21 @@ int main(int argc, char **argv)
         snprintf(command, sizeof(command), "SET CHARGE_LIMIT %s\n", argv[2]);
     else if (!strcmp(argv[1], "set-sleep") && argc == 3)
         snprintf(command, sizeof(command), "SET SLEEP %s\n", argv[2]);
-    else if (!strcmp(argv[1], "set-storage-backup-policy") && argc == 3) {
-        char value[32];
+    else if (!strcmp(argv[1], "storage-changed") && argc == 2)
+        snprintf(command, sizeof(command), "STORAGE CHANGED\n");
+    else if (!strcmp(argv[1], "set-storage-backup") && argc == 3)
+        snprintf(command, sizeof(command), "SET STORAGE BACKUP %s\n", argv[2]);
+    else if (!strcmp(argv[1], "set-storage-backup-item") && argc == 4)
+        snprintf(command, sizeof(command), "SET STORAGE BACKUP_ITEM %s %s\n", argv[2], argv[3]);
+    else if (!strcmp(argv[1], "sd2") && argc == 3 &&
+             (!strcmp(argv[2], "eject") || !strcmp(argv[2], "ignore") || !strcmp(argv[2], "use"))) {
+        char value[16];
         snprintf(value, sizeof(value), "%s", argv[2]);
         for (char *p = value; *p; p++)
-            if (*p >= 'a' && *p <= 'z')
-                *p = (char)(*p - 'a' + 'A');
-        snprintf(command, sizeof(command), "SET STORAGE BACKUP_POLICY %s\n", value);
-    } else if (!strcmp(argv[1], "set-storage-mode") && argc == 3) {
-        char value[32];
-        snprintf(value, sizeof(value), "%s", argv[2]);
-        for (char *p = value; *p; p++)
-            if (*p >= 'a' && *p <= 'z')
-                *p = (char)(*p - 'a' + 'A');
-        snprintf(command, sizeof(command), "SET STORAGE MODE %s\n", value);
-    } else if (!strcmp(argv[1], "storage-backup-now") && argc == 2)
-        snprintf(command, sizeof(command), "START STORAGE BACKUP\n");
-    else if (!strcmp(argv[1], "storage-move-back") && argc == 2)
-        snprintf(command, sizeof(command), "START STORAGE MOVE_BACK\n");
-    else if (!strcmp(argv[1], "storage-adopt") && argc == 3)
-        snprintf(command, sizeof(command), "START STORAGE ADOPT %s\n", argv[2]);
+            *p = (char)(*p - 'a' + 'A');
+        snprintf(command, sizeof(command), "STORAGE SD2 %s\n", value);
+    } else if (!strcmp(argv[1], "storage-backup-archive") && argc == 2)
+        snprintf(command, sizeof(command), "STORAGE BACKUP ARCHIVE\n");
     else if (!strcmp(argv[1], "sleep") && argc == 2)
         snprintf(command, sizeof(command), "ACTION SLEEP\n");
     else if (!strcmp(argv[1], "restart") && argc == 2)
@@ -113,6 +108,13 @@ int main(int argc, char **argv)
         perror("write systemd command");
         close(fd);
         return 1;
+    }
+
+    /* storage-changed comes from the storage tools, which nuubos-systemd
+     * itself may be running and waiting for: never wait for its reply. */
+    if (!strcmp(argv[1], "storage-changed")) {
+        close(fd);
+        return 0;
     }
 
     if (shutdown(fd, SHUT_WR) < 0) {

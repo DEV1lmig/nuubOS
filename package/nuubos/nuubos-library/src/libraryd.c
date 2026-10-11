@@ -78,6 +78,12 @@
 #define METADATA_ROOT CATALOG_DIR "/metadata"
 #define SYSTEM_APPS_DIR SHARE_ROOT "/applications"
 #define USER_APPS_DIR USERDATA_ROOT "/applications"
+/* Games card (docs/dev/platform.md "SD2 = games card"): nuubos-storagectl
+ * publishes its ROM folder; its games are catalogued as "sd2:<path>".
+ * ':' never occurs in a USERDATA path (exFAT forbids it). */
+#define SD2_STATUS RUN_ROOT "/storage/sd2.status"
+#define SD2_PREFIX "sd2:"
+#define SD2_PREFIX_LEN 4
 
 /* v2: paths relative to roms/, identity = system + file name + size,
  * absolute cover paths. Older catalogs are rebuilt by the first scan. */
@@ -300,6 +306,21 @@ static uint64_t fnv1a64(const char *a, const char *b)
 	return h;
 }
 
+static bool rel_on_sd2(const char *rel)
+{
+	return !strncmp(rel, SD2_PREFIX, SD2_PREFIX_LEN);
+}
+
+/* File name part of a catalog path ("gba/x.gba", "sd2:x.gba" -> "x.gba"). */
+static const char *rel_name(const char *rel)
+{
+	const char *base = strrchr(rel, '/');
+
+	if (base)
+		return base + 1;
+	return rel_on_sd2(rel) ? rel + SD2_PREFIX_LEN : rel;
+}
+
 /*
  * Fast discovery identity (EPIC-012): system + file name + size. Moving a
  * ROM to another folder keeps its identity (and the users' history);
@@ -307,10 +328,9 @@ static uint64_t fnv1a64(const char *a, const char *b)
  */
 static void game_id_for(int sys, const char *rel, long long size, char out[17])
 {
-	const char *base = strrchr(rel, '/');
 	char key[600];
 
-	snprintf(key, sizeof(key), "%s\x1f%lld", base ? base + 1 : rel, size);
+	snprintf(key, sizeof(key), "%s\x1f%lld", rel_name(rel), size);
 	snprintf(out, 17, "%016llx",
 		 (unsigned long long)fnv1a64(systems[sys].id, key));
 }
@@ -358,6 +378,62 @@ static bool pathf(char *out, size_t size, const char *fmt, ...)
 	n = vsnprintf(out, size, fmt, ap);
 	va_end(ap);
 	return n >= 0 && (size_t)n < size;
+}
+
+/* ROM folder of the games card while it is mounted, else "". Written by
+ * the main thread only while no scan runs (start_scan). */
+static char sd2_roms[PATH_MAX];
+
+/* Absolute path of a catalog path; false while its card is missing. */
+static bool rom_path(char *out, size_t size, const char *rel)
+{
+	if (rel_on_sd2(rel))
+		return sd2_roms[0] && pathf(out, size, "%s/%s", sd2_roms, rel + SD2_PREFIX_LEN);
+	return pathf(out, size, ROMS_ROOT "/%s", rel);
+}
+
+/* The games card's ROM folder: a "roms" folder at its root in any case
+ * (roms, ROMS, Roms), else the root itself (system folders at the root,
+ * ArkOS layout); none while it is not mounted. */
+static void refresh_sd2_root(void)
+{
+	char line[PATH_MAX];
+	char mount[PATH_MAX] = "";
+	char roms[PATH_MAX] = "";
+	bool mounted = false;
+	FILE *fp = fopen(SD2_STATUS, "r");
+
+	if (fp) {
+		while (fgets(line, sizeof(line), fp)) {
+			line[strcspn(line, "\r\n")] = '\0';
+			if (!strncmp(line, "SD2_STATE=", 10))
+				mounted = !strcmp(line + 10, "ready") || !strcmp(line + 10, "readonly");
+			else if (!strncmp(line, "SD2_PATH=", 9))
+				copy_text(mount, sizeof(mount), line + 9);
+		}
+		fclose(fp);
+	}
+	if (mounted && mount[0] == '/') {
+		DIR *dir = opendir(mount);
+		struct dirent *de;
+
+		copy_text(roms, sizeof(roms), mount);
+		while (dir && (de = readdir(dir)) != NULL) {
+			char path[PATH_MAX];
+			struct stat st;
+
+			if (strcasecmp(de->d_name, "roms") || !pathf(path, sizeof(path), "%s/%s", mount, de->d_name) ||
+			    stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+				continue;
+			copy_text(roms, sizeof(roms), path);
+			break;
+		}
+		if (dir)
+			closedir(dir);
+	}
+	if (strcmp(roms, sd2_roms))
+		log_msg("games card: %s", roms[0] ? roms : "none");
+	copy_text(sd2_roms, sizeof(sd2_roms), roms);
 }
 
 static void mkdir_p(const char *path)
@@ -615,14 +691,13 @@ static int system_by_extension(const char *name)
  * derived identity only; metadata providers enrich it later (EPIC-015). */
 static char *title_from_rel(const char *rel)
 {
-	const char *base = strrchr(rel, '/');
 	char stem[512];
 	char out[512];
 	size_t o = 0;
 	int depth = 0;
 	char *dot;
 
-	copy_text(stem, sizeof(stem), base ? base + 1 : rel);
+	copy_text(stem, sizeof(stem), rel_name(rel));
 	dot = strrchr(stem, '.');
 	if (dot && dot != stem)
 		*dot = '\0';
@@ -711,6 +786,8 @@ static bool join_relative(const char *desc_rel, const char *name, char *out, siz
 		snprintf(dir, sizeof(dir), "%.*s", (int)(slash - desc_rel), desc_rel);
 		return pathf(out, size, "%s/%s", dir, name);
 	}
+	if (rel_on_sd2(desc_rel))
+		return name[0] && pathf(out, size, SD2_PREFIX "%s", name);
 	return pathf(out, size, "%s", name) && out[0] != '\0';
 }
 
@@ -724,7 +801,7 @@ static size_t descriptor_entries(const char *rel, char entries[][PATH_MAX], size
 	size_t n = 0;
 	FILE *fp;
 
-	if ((!cue && !m3u) || !pathf(path, sizeof(path), ROMS_ROOT "/%s", rel))
+	if ((!cue && !m3u) || !rom_path(path, sizeof(path), rel))
 		return 0;
 	fp = fopen(path, "r");
 	if (!fp)
@@ -797,7 +874,7 @@ static int sniff_system(const char *rel)
 		}
 		return sys;
 	}
-	if (!pathf(path, sizeof(path), ROMS_ROOT "/%s", rel))
+	if (!rom_path(path, sizeof(path), rel))
 		return -1;
 	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
@@ -819,7 +896,7 @@ static bool skip_directory(const char *name)
 {
 	static const char *const skipped[] = {
 		"media", "images", "videos", "manuals", "covers", "boxart",
-		"snap", "snaps", "screenshots", "bios", NULL
+		"snap", "snaps", "screenshots", "bios", "music", "nuubos-backup", NULL
 	};
 
 	if (name[0] == '.')
@@ -845,24 +922,24 @@ static bool regular_file(const char *path)
 static char *find_cover(int sys, const char *rel)
 {
 	static const char *const exts[] = { "png", "jpg", "jpeg", NULL };
-	const char *base = strrchr(rel, '/');
+	const char *name = rel_name(rel);
 	char stem[512];
-	char dir[PATH_MAX];
+	char cover_rel[PATH_MAX];
 	char path[PATH_MAX];
 	char *dot;
 
-	copy_text(stem, sizeof(stem), base ? base + 1 : rel);
+	copy_text(stem, sizeof(stem), name);
 	dot = strrchr(stem, '.');
 	if (dot && dot != stem)
 		*dot = '\0';
-	snprintf(dir, sizeof(dir), "%.*s", base ? (int)(base - rel) : 0, rel);
 	for (int i = 0; exts[i]; i++)
 		if (pathf(path, sizeof(path), COVERS_ROOT "/%s/%s.%s", systems[sys].id, stem, exts[i]) &&
 		    regular_file(path))
 			return xstrdup(path);
 	for (int i = 0; exts[i]; i++)
-		if (pathf(path, sizeof(path), ROMS_ROOT "/%s%smedia/covers/%s.%s", dir,
-			  dir[0] ? "/" : "", stem, exts[i]) &&
+		if (pathf(cover_rel, sizeof(cover_rel), "%.*smedia/covers/%s.%s",
+			  (int)(name - rel), rel, stem, exts[i]) &&
+		    rom_path(path, sizeof(path), cover_rel) &&
 		    regular_file(path))
 			return xstrdup(path);
 	return NULL;
@@ -893,7 +970,7 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 	DIR *dir;
 	struct dirent *de;
 
-	if (!pathf(path, sizeof(path), ROMS_ROOT "%s%s", sub[0] ? "/" : "", sub))
+	if (!(sub[0] ? rom_path(path, sizeof(path), sub) : pathf(path, sizeof(path), ROMS_ROOT)))
 		return;
 	dir = opendir(path);
 	if (!dir)
@@ -906,8 +983,10 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 
 		if (de->d_name[0] == '.' || !tsv_safe(de->d_name))
 			continue;
-		if (!pathf(rel, sizeof(rel), "%s%s%s", sub, sub[0] ? "/" : "", de->d_name) ||
-		    !pathf(full, sizeof(full), ROMS_ROOT "/%s", rel) ||
+		/* "" and "sd2:" are the roots of the two cards. */
+		if (!pathf(rel, sizeof(rel), "%s%s%s", sub,
+			   sub[0] && strcmp(sub, SD2_PREFIX) ? "/" : "", de->d_name) ||
+		    !rom_path(full, sizeof(full), rel) ||
 		    stat(full, &st) != 0)
 			continue;
 		if (S_ISDIR(st.st_mode)) {
@@ -956,14 +1035,13 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 /* Year, players and genre of a game's metadata file (scan thread). */
 static void read_meta_index(struct scan_item *it)
 {
-	const char *base = strrchr(it->rel, '/');
 	char stem[512];
 	char path[PATH_MAX];
 	char line[1024];
 	char *dot;
 	FILE *fp;
 
-	copy_text(stem, sizeof(stem), base ? base + 1 : it->rel);
+	copy_text(stem, sizeof(stem), rel_name(it->rel));
 	dot = strrchr(stem, '.');
 	if (dot && dot != stem)
 		*dot = '\0';
@@ -1017,6 +1095,8 @@ static void *scan_main(void *arg)
 	if (!ctx.out)
 		abort();
 	walk(&ctx, "", 0, -1);
+	if (sd2_roms[0])
+		walk(&ctx, SD2_PREFIX, 0, -1);
 
 	/* Files referenced by a .m3u/.cue belong to that logical game. */
 	qsort(ctx.refs.items, ctx.refs.count, sizeof(char *), ref_compare);
@@ -1254,6 +1334,7 @@ static void start_scan(void)
 		rescan_pending = true;
 		return;
 	}
+	refresh_sd2_root();
 	if (pthread_create(&scan_thread, NULL, scan_main, NULL) != 0) {
 		log_msg("scan thread failed: %s", strerror(errno));
 		return;
@@ -1556,10 +1637,11 @@ static void append_game(struct strbuf *b, const char *key, const struct game *g)
 
 	sb_append(b, "%s=%s\t%s\t%s\t", key, g->id, s->id, g->title);
 	sb_append(b, "%s", g->cover ? g->cover : "");
-	/* Field 9 (the former favorite flag) stays for older clients: 0. */
-	sb_append(b, "\t%d\t%lld\t%lld\t%d\t0\t%d\t%d\t%s\n", s->aspect,
+	/* Field 9 (the former favorite flag): where the game is, 0 = SD1, 2 = SD2. */
+	sb_append(b, "\t%d\t%lld\t%lld\t%d\t%d\t%d\t%d\t%s\n", s->aspect,
 		  h ? h->last : 0LL, h ? h->time : 0LL,
-		  g->available ? 1 : 0, g->year, g->players, g->genre ? g->genre : "");
+		  g->available ? 1 : 0, rel_on_sd2(g->rel) ? 2 : 0, g->year, g->players,
+		  g->genre ? g->genre : "");
 }
 
 static int history_compare(const void *a, const void *b)
@@ -1942,10 +2024,9 @@ static void build_filters(struct strbuf *b)
 
 static void rom_stem(const char *rel, char *out, size_t size)
 {
-	const char *base = strrchr(rel, '/');
 	char *dot;
 
-	copy_text(out, size, base ? base + 1 : rel);
+	copy_text(out, size, rel_name(rel));
 	dot = strrchr(out, '.');
 	if (dot && dot != out)
 		*dot = '\0';
@@ -2048,9 +2129,15 @@ static void build_details(struct strbuf *b, const struct game *g)
 {
 	const struct history_entry *h = history_for(g->id, false);
 
+	char file[PATH_MAX];
+
 	append_game(b, "game", g);
 	sb_append(b, "system_name=%s\nsessions=%d\npath=%s\nsize=%lld\nadded=%lld\n",
 		  systems[g->sys].name, h ? h->sessions : 0, g->rel, g->size, g->added);
+	/* Absolute file and the ROM folder of its card, while the card is there. */
+	if (rom_path(file, sizeof(file), g->rel))
+		sb_append(b, "file=%s\nroot=%s\n", file,
+			  rel_on_sd2(g->rel) ? sd2_roms : ROMS_ROOT);
 	for (size_t i = 0; i < collection_count; i++)
 		sb_append(b, "member=%s\t%s\t%d\n", collections[i].id, collections[i].name,
 			  id_list_has(collections[i].games, collections[i].count, g->id) ? 1 : 0);
@@ -2110,7 +2197,7 @@ static const char *delete_game(long idx)
 	for (size_t k = n; k-- > 0;) {
 		if (referenced_elsewhere(owned[k], g))
 			continue;
-		if (!pathf(path, sizeof(path), ROMS_ROOT "/%s", owned[k]))
+		if (!rom_path(path, sizeof(path), owned[k]))
 			continue;
 		if (unlink(path) != 0 && errno != ENOENT) {
 			log_msg("delete %s: %s", path, strerror(errno));
@@ -2119,7 +2206,7 @@ static const char *delete_game(long idx)
 	}
 	if (failed)
 		return "io";
-	if (!pathf(path, sizeof(path), ROMS_ROOT "/%s", g->rel) ||
+	if (!rom_path(path, sizeof(path), g->rel) ||
 	    (unlink(path) != 0 && errno != ENOENT)) {
 		log_msg("delete %s: %s", path, strerror(errno));
 		return "io";
@@ -2244,12 +2331,15 @@ static void handle_command(struct client *c, char *line)
 			reply(c, "ERR game\n");
 			return;
 		}
-		if (!games[idx].available) {
+		char path[PATH_MAX];
+
+		/* The card may have gone since the last scan. */
+		if (!games[idx].available || !rom_path(path, sizeof(path), games[idx].rel) ||
+		    !regular_file(path)) {
 			reply(c, "ERR unavailable\n");
 			return;
 		}
-		sb_append(&b, "OK %s\t%s/%s\n", systems[games[idx].sys].id,
-			  ROMS_ROOT, games[idx].rel);
+		sb_append(&b, "OK %s\t%s\n", systems[games[idx].sys].id, path);
 		send_text(c, b.data, b.len);
 		free(b.data);
 	} else if (!strcmp(line, "SEARCH")) {

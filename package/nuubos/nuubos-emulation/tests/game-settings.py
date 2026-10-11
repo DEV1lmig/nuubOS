@@ -136,12 +136,25 @@ try:
     sess = open(t + '/last-session.cfg').read()
     check('aspect in session', 'aspect_ratio_index = "0"' in sess and 'video_smooth = "false"' in sess and 'video_shader_enable = "false"' in sess)
     check('achievements in session', 'cheevos_token = "tok123"' in sess and 'cheevos_hardcore_mode_enable = "true"' in sess)
+    # Hardcore: no save states, no fast-forward, no state at start or quit.
+    check('hardcore no states', 'savestate_auto_save = "false"' in sess and 'savestate_auto_load = "false"' in sess
+          and '--entryslot' not in open(t + '/args').read())
+    check('hardcore in status', 'hardcore=1\n' in cmd('emud.sock', 'STATUS'))
+    seen = len(notes)
+    for line in ('SAVE_STATE', 'LOAD_STATE', 'SLOT\t+1', 'FAST_FORWARD'):
+        check('hardcore refuses ' + line, cmd('emud.sock', line) == 'ERR hardcore\n')
+    check('hardcore notified', wait(lambda: sum('game.hardcore' in n for n in notes[seen:]) == 4))
+    check('hardcore STATES', 'hardcore=1\n' in cmd('emud.sock', 'STATES') and 'state=' not in cmd('emud.sock', 'STATES'))
 
     check('HDMI render height', open(t + '/render-height').read() == '360\n')
     check('screenshot accepted', cmd('emud.sock', 'SCREENSHOT').startswith('OK'))
     check('screenshot confirmed', wait(lambda: any('game.screenshot.saved' in n for n in notes)))
     check('quit', cmd('emud.sock', 'QUIT').startswith('OK'))
     check('idle again', wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS')))
+    hsdir = '%s/users/%s/states/snes/' % (ud, user)
+    check('hardcore quit saves no state', not os.listdir(hsdir))
+    check('hardcore STATES by game', 'hardcore=1\n' in cmd('emud.sock', 'STATES\t' + game))
+    check('hardcore refuses slot launch', cmd('emud.sock', 'LAUNCH\t%s\tslot:0' % game) == 'ERR hardcore\n')
     open(t + '/hdmi-enabled', 'w').write('disabled\n')
     ucfg = open('%s/users/%s/appdata/retroarch/retroarch.cfg' % (ud, user)).read()
     check('user aspect restored', 'aspect_ratio_index = "22"' in ucfg)
@@ -149,6 +162,8 @@ try:
     check('token not left in USERDATA', 'tok123' not in ucfg)
     check('absent keys removed', 'cheevos_hardcore_mode_enable' not in ucfg and 'video_scale_integer' not in ucfg)
     check('unrelated keys kept', 'menu_driver = "ozone"' in ucfg)
+    open(state + '/' + user + '/secrets/retroachievements.conf', 'w').write(
+        'USERNAME=alice\nTOKEN=tok123\nENABLED=1\nHARDCORE=0\n')
 
     check('reset', cmd('emud.sock', 'GAME_RESET\t' + game).startswith('OK'))
     check('reset removes file', not os.path.exists('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)))
@@ -181,7 +196,7 @@ try:
     def idle_state():
         return wait(lambda: 'state_busy=0' in cmd('emud.sock', 'STATUS'))
     sdir = '%s/users/%s/states/snes/' % (ud, user)
-    # The quit above saved into a rotating slot: start from no states.
+    # Start from no states.
     for f in os.listdir(sdir): os.remove(sdir + f)
     check('launch new', launch('new'))
     check('panel renders native', wait(lambda: open(t + '/render-height').read() == '\n'))

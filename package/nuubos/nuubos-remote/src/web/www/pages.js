@@ -986,7 +986,11 @@ async function raPage() {
     nodes: [group(ra.user
       ? [row({ key: 'user', title: C(584, 'RetroAchievements'), value: ra.user, detail: C(588, 'Signed in') }),
         row({ key: 'en', title: C(112, 'Enabled'), toggle: on01(ra.enabled), set: (v) => act('ra.set', { key: 'enabled', v }) }),
-        row({ key: 'hc', title: C(585, 'Hardcore Mode'), detail: C(586, 'No save states or fast-forward; achievements count double'), toggle: on01(ra.hardcore), set: (v) => act('ra.set', { key: 'hardcore', v }) }),
+        row({ key: 'hc', title: C(585, 'Hardcore Mode'), detail: C(586, 'No save states or fast-forward; achievements count double'), toggle: on01(ra.hardcore), set: async (v) => {
+          /* Turning it on first explains what it takes away. */
+          if (v && !(await form(C(907, 'Turn On Hardcore Mode?'), [], { text: C(908, 'Achievements are earned as on the original console, with no help. While Hardcore Mode is on, save states and fast-forward are off: every game starts from the beginning and only the game\'s own saves are kept. RetroArch also blocks cheats, rewind and slow motion. You can turn it off at any time.'), ok: C(909, 'Turn On') }))) return;
+          await act('ra.set', { key: 'hardcore', v });
+        } }),
         row({ key: 'out', title: C(567, 'Sign Out'), arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('ra.logout') })]
       : row({ key: 'in', title: C(587, 'Sign In'), detail: C(591, 'Your password is used once and never stored'), on: async () => {
         const v = await form(C(584, 'RetroAchievements'), [{ name: 'name', label: C(285, 'Username') }, { name: 'password', label: C(172, 'Password'), type: 'password' }], { text: C(591, 'Your password is used once and never stored'), ok: C(587, 'Sign In') });
@@ -1098,7 +1102,7 @@ page('system', 'settings', () => C(8, 'System'), async (path) => {
   const [s, jobs] = await Promise.all([get('system'), get('jobs')]);
   const report = rows(jobs.job).filter((j) => j[1] === 'support-bundle').pop();
   const nodes = [section(C(732, 'STORAGE & SOFTWARE'), 'device'), group(
-    row({ key: 'storage', title: C(19, 'Storage'), value: s['storage.active'] || '', chevron: true, on: () => go('system/storage') }),
+    row({ key: 'storage', title: C(19, 'Storage'), value: ['ready', 'readonly'].includes(s['storage.sd2.state']) ? C(912, 'SD1') + ' • ' + C(64, 'SD2') : C(912, 'SD1'), chevron: true, on: () => go('system/storage') }),
     row({ key: 'update', title: C(651, 'Software Update'), value: 'nuubOS ' + (s['nuubos.version'] || ''), chevron: true, on: () => go('system/update') }),
     row({ key: 'info', title: C(20, 'System Information'), chevron: true, on: () => go('system/info') })),
   section(C(733, 'TROUBLESHOOTING'), 'device'), group(
@@ -1111,22 +1115,47 @@ page('system', 'settings', () => C(8, 'System'), async (path) => {
 });
 
 async function storagePage() {
-  const [s, roots] = await Promise.all([get('system', {}, true), get('roots', {}, true)]);
-  const r = rows(roots.root).find((x) => x[1] === '/userdata');
-  const policy = { OFF: C(54, 'Off'), DAILY: C(70, 'Daily'), WEEKLY: C(71, 'Weekly'), MONTHLY: C(72, 'Monthly') };
-  const tf2 = s['storage.tf2_state'];
+  const s = await get('system', {}, true);
+  const n = (k) => Number(s[k]) || 0;
+  const space = (free, total) => C(914, '{0} free of {1}').replace('{0}', sizeText(free)).replace('{1}', sizeText(total));
+  const st = s['storage.sd2.state'] || '';
+  const slot = s['storage.sd2.slot'] === '1';
+  const mounted = st === 'ready' || st === 'readonly';
+  const sd2 = {
+    ready: [space(n('storage.sd2.free'), n('storage.sd2.total')), s['storage.sd2.label'] || C(915, 'Games card')],
+    readonly: [C(918, 'Read-only'), C(919, 'The card has errors: games can be played, nothing can be written to it')],
+    checking: [C(917, 'Checking…'), ''],
+    unreadable: [C(920, 'Unreadable'), C(921, 'No supported file system (exFAT, FAT32, ext4)')],
+    ejected: [C(922, 'Ejected'), C(627, 'Safe to remove')],
+    ignored: [C(978, 'Not in use'), C(980, 'nuubOS leaves this card alone until you choose to use it')],
+  }[st] || [C(916, 'No card'), ''];
+  const items = (s['storage.backup.items'] || '').split(',');
+  const itemRows = [['saves', 947, 'Saves'], ['states', 948, 'Save States'], ['library', 949, 'Game Library'],
+    ['screenshots', 951, 'Screenshots & Recordings'], ['bios', 576, 'BIOS Files'], ['covers', 953, 'Covers & Metadata']]
+    .map(([k, id, en]) => row({ key: 'it-' + k, title: C(id, en), toggle: items.includes(k),
+      set: (v) => act('storage.backup.item', { item: k, v: v ? '1' : '0' }) }));
+  const last = n('storage.backup.last');
   return {
-    title: C(19, 'Storage'), back: 'system', topics: ['system'],
+    title: C(19, 'Storage'), back: 'system', topics: ['system', 'jobs'],
     nodes: [group(
-      row({ key: 'active', title: C(62, 'Active Storage'), value: s['storage.active'] === 'TF2' ? C(64, 'SD2') : 'SD1', detail: s['storage.health'] || '' }),
-      r ? row({ key: 'ud', title: C(63, 'User Data'), value: C(622, '{0} free', sizeText(r[3])) + ' / ' + sizeText(r[2]) }) : null,
-      row({ key: 'sd2', title: C(64, 'SD2'), value: tf2 === 'ABSENT' ? C(65, 'Not inserted') : tf2 === 'READY' || tf2 === 'ACTIVE' ? C(66, 'Ready') : tf2 === 'AVAILABLE' ? C(68, 'Not yet managed by nuubOS') : tf2 || '' }),
-      tf2 === 'AVAILABLE' && s['storage.tf2_cid'] ? row({ key: 'adopt', title: C(78, 'Use SD2 for User Data'), danger: true, arm: { prompt: C(86, 'Press again • SD2 will be erased') },
-        on: () => act('storage.adopt', { cid: s['storage.tf2_cid'] }) }) : null,
-      s['storage.active'] === 'TF2' ? row({ key: 'policy', title: C(69, 'Automatic Backup'), value: policy[s['storage.backup_policy']] || '', chevron: true,
-        on: () => pickAndAct(C(69, 'Automatic Backup'), Object.entries(policy).map(([value, label]) => ({ value, label })), s['storage.backup_policy'], 'storage.policy') }) : null,
-      s['storage.active'] === 'TF2' ? row({ key: 'bk', title: C(97, 'Back Up to SD1'), on: () => act('storage.backup') }) : null,
-      s['storage.active'] === 'TF2' ? row({ key: 'mb', title: C(77, 'Move User Data to SD1'), arm: { prompt: C(87, 'Press again • sync & switch to SD1') }, on: () => act('storage.moveback') }) : null),
+      row({ key: 'sd1', title: C(912, 'SD1'), value: space(n('storage.userdata_free'), n('storage.userdata_total')), detail: C(913, 'System and saves') }),
+      slot ? row({ key: 'sd2', title: C(64, 'SD2'), value: sd2[0], detail: sd2[1] }) : null,
+      slot && mounted ? row({ key: 'eject', title: C(924, 'Eject SD2'), on: () => act('storage.eject') }) : null,
+      slot && st === 'ejected' ? row({ key: 'use', title: C(925, 'Use SD2 Again'), on: () => act('storage.use') }) : null,
+      slot && st === 'ignored' ? row({ key: 'use', title: C(979, 'Use SD2'), on: () => act('storage.use') }) : null,
+      slot && st === 'ready' ? row({ key: 'prep', title: C(926, 'Create Game Folders'), detail: C(927, 'Adds a folder for each system. Nothing is deleted.'),
+        on: () => act('storage.prepare', {}, { topics: ['jobs'] }) }) : null,
+      slot && (mounted || st === 'unreadable' || st === 'ignored') && s['storage.sd2.cid'] ? row({ key: 'fmt', title: C(928, 'Format SD2'), detail: C(929, 'Erases everything on the card'), danger: true,
+        arm: { prompt: C(930, 'Press again • everything on SD2 will be erased') }, on: () => act('storage.format', { cid: s['storage.sd2.cid'] }, { topics: ['jobs'] }) }) : null),
+    slot ? section(C(931, 'BACKUP TO SD2'), 'device') : null,
+    slot ? group(
+      row({ key: 'auto', title: C(69, 'Automatic Backup'), toggle: s['storage.backup.enabled'] === '1',
+        detail: mounted ? (last ? C(933, 'Last backup: {0}', new Date(last * 1000).toLocaleString()) : C(934, 'Never backed up')) : C(935, 'Insert an SD2 card to back up'),
+        set: (v) => act('storage.backup.enabled', { v: v ? '1' : '0' }) }),
+      s['storage.backup.card'] !== 'conflict' ? row({ key: 'bk', title: C(88, 'Back Up Now'), disabled: st !== 'ready', on: () => act('storage.backup', {}, { topics: ['jobs'] }) })
+        : row({ key: 'conflict', title: C(942, 'Backup of a previous SD1'), detail: C(943, 'Restore it, or keep it aside and start a new backup') })) : null,
+    slot ? section(C(936, 'Backup Content'), 'device') : null,
+    slot ? group(row({ key: 'prof', title: C(945, 'Profiles & Settings'), detail: C(946, 'Always included. Passwords and accounts are never copied.'), disabled: true }), ...itemRows) : null,
     section(C(625, 'Removable Media'), 'device'),
     group(row({ key: 'media', title: C(611, 'Network Shares') + ' / ' + C(625, 'Removable Media'), chevron: true, on: () => go('files/:shares') }))],
   };

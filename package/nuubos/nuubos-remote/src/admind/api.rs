@@ -316,11 +316,18 @@ pub fn action(b: &Value) -> R {
         "system.autobattery" => { sock_ok("systemd", &format!("SET AUTO_BATTERY {}", int(&a("v"), 0, 50)?))?; ok() }
         "system.chargelimit" => { sock_ok("systemd", &format!("SET CHARGE_LIMIT {}", int(&a("v"), 80, 100)?))?; ok() }
         "system.sleep" => { sock_ok("systemd", &format!("SET SLEEP {}", int(&a("v"), 0, 240)?))?; ok() }
-        "storage.policy" => { sock_ok("systemd", &format!("SET STORAGE BACKUP_POLICY {}", one_of(&a("v"), &["OFF", "DAILY", "WEEKLY", "MONTHLY"])?))?; ok() }
-        "storage.backup" => { sock_ok("systemd", "START STORAGE BACKUP")?; ok() }
-        "storage.moveback" => { sock_ok("systemd", "START STORAGE MOVE_BACK")?; ok() }
-        "storage.auto" => { sock_ok("systemd", "SET STORAGE MODE AUTO")?; ok() }
-        "storage.adopt" => { sock_ok("systemd", &format!("START STORAGE ADOPT {}", token(&a("cid"))?))?; ok() }
+        /* The games card (SD2) and the backup to it. */
+        "storage.eject" => { sock_ok("systemd", "STORAGE SD2 EJECT")?; ok() }
+        "storage.use" => { sock_ok("systemd", "STORAGE SD2 USE")?; ok() }
+        "storage.backup.enabled" => { sock_ok("systemd", &format!("SET STORAGE BACKUP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
+        "storage.backup.item" => {
+            let item = one_of(&a("item"), &["saves", "states", "library", "screenshots", "bios", "covers"])?;
+            sock_ok("systemd", &format!("SET STORAGE BACKUP_ITEM {} {}", item, one_of(&a("v"), &["0", "1"])?))?;
+            ok()
+        }
+        "storage.backup" => job("sd2-backup", &[]),
+        "storage.prepare" => job("sd2-prepare", &[]),
+        "storage.format" => job("sd2-format", &[&token(&a("cid"))?]),
 
         /* Display (nuubos-displayd). */
         "display.brightness" => { tool_ok("nuubos-displayctl", &["brightness", &int(&a("v"), 1, 100)?.to_string()])?; done("display") }

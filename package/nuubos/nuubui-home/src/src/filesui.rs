@@ -92,8 +92,13 @@ fn human(bytes: i64) -> String {
 fn root_label(ui: &HomeWindow, r: &Root) -> String {
     match r.kind.as_str() {
         "userdata" => tr(ui, 610, "Internal Storage"),
-        _ => r.path.rsplit('/').next().unwrap_or(&r.path).to_owned(),
+        _ => volume_label(ui, r.path.rsplit('/').next().unwrap_or(&r.path)),
     }
+}
+
+/* /media/<name>: "sd2" is the games card in the TF2 slot. */
+pub fn volume_label(ui: &HomeWindow, name: &str) -> String {
+    if name == "sd2" { tr(ui, 64, "SD2") } else { name.to_owned() }
 }
 
 fn parent(path: &str) -> String {
@@ -154,7 +159,7 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
             }
             for (name, _path, total, free) in &st.volumes {
                 let key = format!("vol:{name}");
-                rows.push((key.clone(), row(name.clone(), tr_arg(ui, 622, "{0} free", &human(*free)),
+                rows.push((key.clone(), row(volume_label(ui, name), tr_arg(ui, 622, "{0} free", &human(*free)),
                     armed_detail(&armed, &key, tr(ui, 191, "Press again to confirm"),
                         format!("{} • {}", tr(ui, 626, "Eject"), human(*total)))), true));
             }
@@ -556,7 +561,7 @@ fn backup_destinations(ui: &HomeWindow) {
     let volumes = STATE.with(|st| st.borrow().volumes.clone());
     let mut options = vec![(INTERNAL_BACKUPS.to_owned(), tr(ui, 610, "Internal Storage"))];
     for (name, path, _, _) in volumes {
-        options.push((format!("{path}/nuubos-backups"), name));
+        options.push((format!("{path}/nuubos-backups"), volume_label(ui, &name)));
     }
     open_settings_choice(ui, "backup-destination", &tr(ui, 631, "Back Up Now"), options, INTERNAL_BACKUPS);
 }
@@ -613,7 +618,7 @@ fn start_restore(ui: &HomeWindow, file: String) {
 pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
     match action {
         "menu_up" | "menu_down" => move_selection(ui, action),
-        "menu_back" => navigate_settings_view(ui, if view == 61 { 20 } else { 24 }),
+        "menu_back" => if view == 61 { crate::storageui::open(ui) } else { navigate_settings_view(ui, 24) },
         "face_north" if view == 62 && !STATE.with(|st| st.borrow().busy) => {
             let key = focused_key(ui);
             let Some(path) = key.strip_prefix("restore:") else { return };

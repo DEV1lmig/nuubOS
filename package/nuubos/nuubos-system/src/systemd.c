@@ -87,13 +87,6 @@ struct runtime_state {
     int lid_fd;                 /* clamshells (SP): gpio-keys SW_LID, else -1 */
     bool lid_closed;
 
-    /* Storage operations can copy many GiB. Keep them outside the Product
-     * Service event loop and expose their state as ordinary Product state. */
-    pid_t storage_job_pid;
-    char storage_job_action[32];
-    char storage_job_state[16];
-    int storage_job_exit_code;
-
     bool notifications_ready;
 };
 
@@ -222,7 +215,6 @@ static int atomic_save_config(const struct config_state *cfg)
 #define DEFAULT_AUTO_BATTERY_THRESHOLD 20
 #define DEFAULT_SLEEP_AFTER_MIN 10
 #define DEFAULT_CHARGE_LIMIT 100
-#define DEFAULT_BACKUP_POLICY "WEEKLY"
 
 static void config_defaults(struct config_state *cfg)
 {
@@ -291,151 +283,6 @@ static int run_argv(char *const argv[])
         if (errno != EINTR) return -1;
     }
     return WIFEXITED(status) && WEXITSTATUS(status)==0 ? 0 : -1;
-}
-
-static bool safe_storage_token(const char *value)
-{
-    size_t n;
-
-    if (!value || !*value)
-        return false;
-
-    n = strlen(value);
-    if (n > 64)
-        return false;
-
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)value[i];
-        if (!((c >= '0' && c <= '9') ||
-              (c >= 'a' && c <= 'z') ||
-              (c >= 'A' && c <= 'Z') ||
-              c == '-' || c == '_' || c == ':'))
-            return false;
-    }
-
-    return true;
-}
-
-/* Storage jobs are the System service's long-running operations: one Live
- * Notification per job, completed in place by its final state. */
-static void notify_storage_job(const struct runtime_state *st)
-{
-    struct nuubos_notify n;
-
-    nuubos_notify_begin(&n, "POST", "storage.job", "storage.job");
-    nuubos_notify_str(&n, "action", st->storage_job_action);
-    nuubos_notify_str(&n, "state", st->storage_job_state);
-    if (!strcmp(st->storage_job_state, "running"))
-        nuubos_notify_int(&n, "progress", -1);
-    (void)nuubos_notify_send(&n);
-}
-
-static int start_storage_job(struct runtime_state *st,
-                             const char *action,
-                             const char *argument)
-{
-    pid_t pid;
-
-    if (st->storage_job_pid > 0)
-        return -2;
-
-    pid = fork();
-    if (pid < 0)
-        return -1;
-
-    if (pid == 0) {
-        int logfd = open("/run/nuubos/system-storage-job.log",
-                         O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        if (logfd >= 0) {
-            dup2(logfd, STDOUT_FILENO);
-            dup2(logfd, STDERR_FILENO);
-            if (logfd > STDERR_FILENO)
-                close(logfd);
-        }
-
-        if (!strcmp(action, "backup")) {
-            execl("/usr/sbin/nuubos-storagectl",
-                  "nuubos-storagectl", "sync-to-tf1", (char *)NULL);
-        } else if (!strcmp(action, "move-back")) {
-            execl("/usr/sbin/nuubos-storagectl",
-                  "nuubos-storagectl", "move-back-to-tf1", (char *)NULL);
-        } else if (!strcmp(action, "adopt")) {
-            char *preflight[] = {
-                "/usr/sbin/nuubos-storagectl",
-                "preflight-adopt-tf2",
-                (char *)argument,
-                NULL
-            };
-            char *auto_mode[] = {
-                "/usr/sbin/nuubos-storagectl",
-                "storage-mode",
-                "AUTO",
-                NULL
-            };
-
-            char *adopt[] = {
-                "/usr/sbin/nuubos-storagectl",
-                "adopt-tf2",
-                "--confirm-erase-cid",
-                (char *)argument,
-                NULL
-            };
-
-            if (run_argv(preflight) != 0)
-                _exit(20);
-            if (run_argv(adopt) != 0)
-                _exit(21);
-            if (run_argv(auto_mode) != 0)
-                _exit(22);
-            _exit(0);
-        }
-
-        _exit(127);
-    }
-
-    st->storage_job_pid = pid;
-    snprintf(st->storage_job_action, sizeof(st->storage_job_action), "%s", action);
-    snprintf(st->storage_job_state, sizeof(st->storage_job_state), "running");
-    st->storage_job_exit_code = -1;
-    notify_storage_job(st);
-    return 0;
-}
-
-static bool storage_job_tick(struct runtime_state *st)
-{
-    int status = 0;
-    pid_t rc;
-
-    if (st->storage_job_pid <= 0)
-        return false;
-
-    rc = waitpid(st->storage_job_pid, &status, WNOHANG);
-    if (rc == 0)
-        return false;
-
-    if (rc < 0) {
-        snprintf(st->storage_job_state, sizeof(st->storage_job_state), "failed");
-        st->storage_job_exit_code = errno ? errno : 1;
-        st->storage_job_pid = -1;
-        notify_storage_job(st);
-        return true;
-    }
-
-    if (WIFEXITED(status)) {
-        st->storage_job_exit_code = WEXITSTATUS(status);
-        snprintf(st->storage_job_state, sizeof(st->storage_job_state), "%s",
-                 st->storage_job_exit_code == 0 ? "succeeded" : "failed");
-    } else if (WIFSIGNALED(status)) {
-        st->storage_job_exit_code = 128 + WTERMSIG(status);
-        snprintf(st->storage_job_state, sizeof(st->storage_job_state), "failed");
-    } else {
-        st->storage_job_exit_code = 1;
-        snprintf(st->storage_job_state, sizeof(st->storage_job_state), "failed");
-    }
-
-    st->storage_job_pid = -1;
-    notify_storage_job(st);
-    return true;
 }
 
 static int apply_effective_profile(enum profile_mode p)
@@ -973,48 +820,65 @@ static void read_key_value_file(const char *path,
     fclose(f);
 }
 
-static void read_storage_fields(char *mode,size_t msz,char *active,size_t asz,
-                                char *health,size_t hsz,char *tf2,size_t t2sz,
-                                char *cid,size_t csz,char *action,size_t acsz,
-                                char *backup,size_t bsz,char *due,size_t dsz,
-                                char *reason,size_t rsz)
+/* Storage (docs/dev/platform.md "SD2 = games card"): SD1 health from the
+ * storage selector, the games card from nuubos-storagectl, the backup to
+ * it from nuubos-sd2-backup. They write these files and poke STORAGE
+ * CHANGED; the free space is measured here at every snapshot. */
+struct storage_view {
+    char sd1_health[32], sd1_action[32];
+    char sd2_slot[8], sd2_state[24], sd2_cid[96], sd2_fs[16], sd2_label[64], sd2_prompt[16];
+    char backup_enabled[8], backup_items[96], backup_last[24], backup_result[16], backup_card[16];
+    unsigned long long userdata_total, userdata_free, sd2_total, sd2_free;
+};
+
+static void space_of(const char *path, unsigned long long *total, unsigned long long *freeb)
 {
-    const char *status="/run/nuubos/storage/tf2.status";
+    struct statvfs sv;
 
-    snprintf(mode,msz,"Unknown");
-    snprintf(active,asz,"Unknown");
-    snprintf(health,hsz,"Unknown");
-    snprintf(tf2,t2sz,"Unknown");
-    if (csz > 0) cid[0] = '\0';
-    snprintf(action,acsz,"NONE");
-    snprintf(backup,bsz,"WEEKLY");
-    snprintf(due,dsz,"Unknown");
-    snprintf(reason,rsz,"Unknown");
+    *total = *freeb = 0;
+    if (statvfs(path, &sv) == 0) {
+        *total = (unsigned long long)sv.f_blocks * sv.f_frsize;
+        *freeb = (unsigned long long)sv.f_bavail * sv.f_frsize;
+    }
+}
 
-    read_key_value_file(status,"STORAGE_MODE",mode,msz);
-    read_key_value_file(status,"ACTIVE_STORAGE",active,asz);
-    read_key_value_file(status,"STORAGE_HEALTH",health,hsz);
-    read_key_value_file(status,"TF2_STATE",tf2,t2sz);
-    read_key_value_file(status,"TF2_CID",cid,csz);
-    read_key_value_file(status,"ACTION_REQUIRED",action,acsz);
-    read_key_value_file(status,"TF1_BACKUP_POLICY",backup,bsz);
-    read_key_value_file(status,"TF1_BACKUP_DUE",due,dsz);
-    read_key_value_file(status,"TF1_BACKUP_REASON",reason,rsz);
+static void read_storage(struct storage_view *v)
+{
+    const char *sd1 = "/run/nuubos/storage/storage.status";
+    const char *sd2 = "/run/nuubos/storage/sd2.status";
+    const char *backup = "/run/nuubos/storage/backup.status";
 
-    /* Configuration is authoritative for the selected backup policy. The
-     * selector snapshot may legitimately lag a policy-only change until its
-     * next restart, so always overlay the configured value here. */
-    read_key_value_file("/state/config/nuubos.conf",
-                        "TF1_BACKUP_POLICY",backup,bsz);
+    memset(v, 0, sizeof(*v));
+    snprintf(v->sd1_health, sizeof(v->sd1_health), "unknown");
+    snprintf(v->sd1_action, sizeof(v->sd1_action), "NONE");
+    snprintf(v->sd2_slot, sizeof(v->sd2_slot), "0");
+    snprintf(v->sd2_state, sizeof(v->sd2_state), "unknown");
+    snprintf(v->sd2_prompt, sizeof(v->sd2_prompt), "none");
+    snprintf(v->backup_enabled, sizeof(v->backup_enabled), "1");
+    snprintf(v->backup_card, sizeof(v->backup_card), "none");
+    read_key_value_file(sd1, "STORAGE_HEALTH", v->sd1_health, sizeof(v->sd1_health));
+    read_key_value_file(sd1, "ACTION_REQUIRED", v->sd1_action, sizeof(v->sd1_action));
+    read_key_value_file(sd2, "SD2_SLOT", v->sd2_slot, sizeof(v->sd2_slot));
+    read_key_value_file(sd2, "SD2_STATE", v->sd2_state, sizeof(v->sd2_state));
+    read_key_value_file(sd2, "SD2_CID", v->sd2_cid, sizeof(v->sd2_cid));
+    read_key_value_file(sd2, "SD2_FS", v->sd2_fs, sizeof(v->sd2_fs));
+    read_key_value_file(sd2, "SD2_LABEL", v->sd2_label, sizeof(v->sd2_label));
+    read_key_value_file(sd2, "SD2_PROMPT", v->sd2_prompt, sizeof(v->sd2_prompt));
+    read_key_value_file(backup, "ENABLED", v->backup_enabled, sizeof(v->backup_enabled));
+    read_key_value_file(backup, "ITEMS", v->backup_items, sizeof(v->backup_items));
+    read_key_value_file(backup, "LAST", v->backup_last, sizeof(v->backup_last));
+    read_key_value_file(backup, "RESULT", v->backup_result, sizeof(v->backup_result));
+    read_key_value_file(backup, "CARD", v->backup_card, sizeof(v->backup_card));
+    space_of("/userdata", &v->userdata_total, &v->userdata_free);
+    if (!strcmp(v->sd2_state, "ready") || !strcmp(v->sd2_state, "readonly"))
+        space_of("/media/sd2", &v->sd2_total, &v->sd2_free);
 }
 
 static void reply_status(int fd, const struct runtime_state *st)
 {
     char ip[128],model[256],kernel[128];
-    char mode[32],active[32],health[32],tf2[32],cid[96],action[64];
-    char backup[32],due[32],reason[64];
+    struct storage_view sv;
     struct utsname un;
-    struct statvfs sv;
     long long cpu=read_cpu_freq_khz(),gpu=read_gpu_freq_hz();
     long long tcpu=read_temp_millic("cpu-thermal"),tgpu=read_temp_millic("gpu-thermal");
     long long mem_total_kib=-1,mem_available_kib=-1;
@@ -1025,15 +889,7 @@ static void reply_status(int fd, const struct runtime_state *st)
     read_ipv4(ip,sizeof(ip));
     if(read_text_file("/proc/device-tree/model",model,sizeof(model))!=0)snprintf(model,sizeof(model),"Unknown H700 device");
     if(uname(&un)==0)snprintf(kernel,sizeof(kernel),"%s",un.release);else snprintf(kernel,sizeof(kernel),"Unknown");
-    read_storage_fields(mode,sizeof(mode),active,sizeof(active),health,sizeof(health),
-                        tf2,sizeof(tf2),cid,sizeof(cid),action,sizeof(action),
-                        backup,sizeof(backup),due,sizeof(due),reason,sizeof(reason));
-
-    unsigned long long total=0,freeb=0;
-    if(statvfs("/userdata",&sv)==0){
-        total=(unsigned long long)sv.f_blocks*sv.f_frsize;
-        freeb=(unsigned long long)sv.f_bavail*sv.f_frsize;
-    }
+    read_storage(&sv);
     char buf[6144];
     snprintf(buf,sizeof(buf),
         "protocol=1\n"
@@ -1057,20 +913,23 @@ static void reply_status(int fd, const struct runtime_state *st)
         "device.model=%s\n"
         "kernel=%s\n"
         "network=%s\n"
-        "storage.mode=%s\n"
-        "storage.active=%s\n"
         "storage.health=%s\n"
-        "storage.tf2_state=%s\n"
-        "storage.tf2_cid=%s\n"
         "storage.action_required=%s\n"
-        "storage.backup_policy=%s\n"
-        "storage.backup_due=%s\n"
-        "storage.backup_reason=%s\n"
         "storage.userdata_total=%llu\n"
         "storage.userdata_free=%llu\n"
-        "storage.job_state=%s\n"
-        "storage.job_action=%s\n"
-        "storage.job_exit=%d\n"
+        "storage.sd2.slot=%s\n"
+        "storage.sd2.state=%s\n"
+        "storage.sd2.cid=%s\n"
+        "storage.sd2.fs=%s\n"
+        "storage.sd2.label=%s\n"
+        "storage.sd2.prompt=%s\n"
+        "storage.sd2.total=%llu\n"
+        "storage.sd2.free=%llu\n"
+        "storage.backup.enabled=%s\n"
+        "storage.backup.items=%s\n"
+        "storage.backup.last=%s\n"
+        "storage.backup.result=%s\n"
+        "storage.backup.card=%s\n"
         "lifecycle.stage=%s\n"
         "lifecycle.last_wake=%s\n"
         "lifecycle.last_sleep_ms=%lld\n"
@@ -1084,8 +943,10 @@ static void reply_status(int fd, const struct runtime_state *st)
         charge_limit_path() ? 1 : 0,
         st->battery_percent,st->battery_state,
         cpu,gpu,tcpu,tgpu,mem_total_kib,mem_available_kib,uptime,model,kernel,ip,
-        mode,active,health,tf2,cid,action,backup,due,reason,total,freeb,
-        st->storage_job_state,st->storage_job_action,st->storage_job_exit_code,
+        sv.sd1_health,sv.sd1_action,sv.userdata_total,sv.userdata_free,
+        sv.sd2_slot,sv.sd2_state,sv.sd2_cid,sv.sd2_fs,sv.sd2_label,sv.sd2_prompt,
+        sv.sd2_total,sv.sd2_free,
+        sv.backup_enabled,sv.backup_items,sv.backup_last,sv.backup_result,sv.backup_card,
         idle_stage_name(st->idle_stage),
         st->last_wake_reason,
         st->last_sleep_elapsed_ms,
@@ -1109,8 +970,7 @@ static int reset_system_settings(struct runtime_state *st)
         "/usr/bin/dbus-send","--system","--print-reply",
         "--dest=org.nuubOS.Controllers","/org/nuubOS/Controllers",
         "org.nuubOS.Controllers1.ResetMappings",NULL};
-    static char *const backup_argv[]={"/usr/sbin/nuubos-storagectl","backup-policy",
-                                      DEFAULT_BACKUP_POLICY,NULL};
+    static char *const backup_argv[]={"/usr/sbin/nuubos-sd2-backup","reset",NULL};
     int rc=0;
 
     config_defaults(&st->cfg);
@@ -1124,8 +984,7 @@ static int reset_system_settings(struct runtime_state *st)
     if(run_argv(display_argv)!=0){fprintf(stderr,"systemd: reset: display\n");rc=-1;}
     if(run_argv(input_argv)!=0){fprintf(stderr,"systemd: reset: input bindings\n");rc=-1;}
     if(run_argv(controllers_argv)!=0){fprintf(stderr,"systemd: reset: controller mappings\n");rc=-1;}
-    if(st->storage_job_pid>0){fprintf(stderr,"systemd: reset: storage busy, backup policy kept\n");rc=-1;}
-    else if(run_argv(backup_argv)!=0){fprintf(stderr,"systemd: reset: backup policy\n");rc=-1;}
+    if(run_argv(backup_argv)!=0){fprintf(stderr,"systemd: reset: SD2 backup settings\n");rc=-1;}
     return rc;
 }
 
@@ -1186,43 +1045,43 @@ static void handle_command(struct client *c, struct runtime_state *st, const cha
         if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
-    if(sscanf(line,"SET STORAGE BACKUP_POLICY %63s",val)==1){
-        char *argv[]={"/usr/sbin/nuubos-storagectl","backup-policy",val,NULL};
-        if(strcmp(val,"OFF") && strcmp(val,"DAILY") &&
-           strcmp(val,"WEEKLY") && strcmp(val,"MONTHLY")){
-            (void)write_all(c->fd,"ERR invalid backup policy\n");return;
-        }
-        if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR storage policy failed\n");return;}
+    /* nuubos-storagectl / nuubos-sd2-backup changed their state files. */
+    if(!strcmp(line,"STORAGE CHANGED")){
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
-    if(sscanf(line,"SET STORAGE MODE %63s",val)==1){
-        char *argv[]={"/usr/sbin/nuubos-storagectl","storage-mode",val,NULL};
-        if(strcmp(val,"SINGLE") && strcmp(val,"AUTO") && strcmp(val,"DUAL")){
-            (void)write_all(c->fd,"ERR invalid storage mode\n");return;
-        }
-        if(st->storage_job_pid>0){(void)write_all(c->fd,"ERR storage busy\n");return;}
-        if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR storage mode failed\n");return;}
+    /* BACKUP_ITEM first: "SET STORAGE BACKUP %s" also matches its prefix. */
+    if(!strncmp(line,"SET STORAGE BACKUP ",19) && sscanf(line,"SET STORAGE BACKUP %63s",val)==1){
+        char *argv[]={"/usr/sbin/nuubos-sd2-backup","set","enabled",val,NULL};
+        if(strcmp(val,"0") && strcmp(val,"1")){(void)write_all(c->fd,"ERR invalid value\n");return;}
+        if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR backup settings failed\n");return;}
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
-    if(!strcmp(line,"START STORAGE BACKUP")){
-        int rc=start_storage_job(st,"backup",NULL);
-        if(rc==-2){(void)write_all(c->fd,"ERR storage busy\n");return;}
-        if(rc!=0){(void)write_all(c->fd,"ERR storage job failed\n");return;}
-        (void)write_all(c->fd,"OK started\n"); notify_subscribers(); return;
+    {
+        char item[32];
+        if(sscanf(line,"SET STORAGE BACKUP_ITEM %31s %63s",item,val)==2){
+            char *argv[]={"/usr/sbin/nuubos-sd2-backup","set","item",item,val,NULL};
+            if(strcmp(val,"0") && strcmp(val,"1")){(void)write_all(c->fd,"ERR invalid value\n");return;}
+            if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR backup settings failed\n");return;}
+            (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
+        }
     }
-    if(!strcmp(line,"START STORAGE MOVE_BACK")){
-        int rc=start_storage_job(st,"move-back",NULL);
-        if(rc==-2){(void)write_all(c->fd,"ERR storage busy\n");return;}
-        if(rc!=0){(void)write_all(c->fd,"ERR storage job failed\n");return;}
-        (void)write_all(c->fd,"OK started\n"); notify_subscribers(); return;
+    /* Quick games-card actions (the long ones are jobs: sd2-format,
+     * sd2-prepare, sd2-backup, sd2-restore). */
+    if(sscanf(line,"STORAGE SD2 %63s",val)==1){
+        /* USE (an ignored or ejected card) returns at once: the card is
+         * identified, maybe repaired, in the background; the result arrives
+         * as STORAGE CHANGED. */
+        const char *verb=!strcmp(val,"EJECT")?"eject":!strcmp(val,"IGNORE")?"ignore":
+                         !strcmp(val,"USE")?"use":NULL;
+        char *argv[]={"/usr/sbin/nuubos-storagectl","sd2",(char *)verb,NULL};
+        if(!verb){(void)write_all(c->fd,"ERR unknown command\n");return;}
+        if(run_argv(argv)!=0){(void)write_all(c->fd,!strcmp(val,"EJECT")?"ERR busy\n":"ERR failed\n");return;}
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
-    if(sscanf(line,"START STORAGE ADOPT %63s",val)==1){
-        int rc;
-        if(!safe_storage_token(val)){(void)write_all(c->fd,"ERR invalid TF2 CID\n");return;}
-        rc=start_storage_job(st,"adopt",val);
-        if(rc==-2){(void)write_all(c->fd,"ERR storage busy\n");return;}
-        if(rc!=0){(void)write_all(c->fd,"ERR storage job failed\n");return;}
-        (void)write_all(c->fd,"OK started\n"); notify_subscribers(); return;
+    if(!strcmp(line,"STORAGE BACKUP ARCHIVE")){
+        char *argv[]={"/usr/sbin/nuubos-sd2-backup","archive",NULL};
+        if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR failed\n");return;}
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
     (void)write_all(c->fd,"ERR unknown command\n");
 }
@@ -1264,11 +1123,6 @@ static int next_policy_timeout_ms(const struct runtime_state *st)
     long long elapsed = boottime_ms() - st->stage_enter_ms;
     long long target = -1;
 
-    /* Storage jobs are exceptional active work. Poll at 1 Hz only while one
-     * exists so child completion is noticed without a permanent heartbeat. */
-    if (st->storage_job_pid > 0)
-        timeout = 1000;
-
     if (st->idle_stage == IDLE_ACTIVE && st->cfg.sleep_after_min > 0)
         target = timeout_ms(st->cfg.sleep_after_min);
 
@@ -1302,12 +1156,8 @@ int main(void)
     st.stage_enter_ms=boottime_ms();
     snprintf(st.last_wake_reason,sizeof(st.last_wake_reason),"none");
     st.last_sleep_elapsed_ms=0;
-    st.storage_job_pid=-1;
     st.lid_closed=false;
     st.lid_fd=open_lid_switch(&st.lid_closed);
-    snprintf(st.storage_job_action,sizeof(st.storage_job_action),"none");
-    snprintf(st.storage_job_state,sizeof(st.storage_job_state),"idle");
-    st.storage_job_exit_code=0;
     lighting_wake(); /* Lights back on if a previous instance died asleep (no-op when awake). */
     refresh_battery(&st);
     st.effective_profile=PROFILE_AUTO;
@@ -1338,7 +1188,6 @@ int main(void)
         int rc=poll(pf,n,next_policy_timeout_ms(&st));
         if(rc<0){if(errno==EINTR)continue;break;}
         if(rc==0){
-            if(storage_job_tick(&st)) notify_subscribers();
             idle_policy_tick(&st);
             continue;
         }

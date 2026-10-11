@@ -1,0 +1,6 @@
+# Create the game folders on the games card
+COMMAND=/usr/sbin/nuubos-storagectl sd2 prepare
+SCOPE=device
+CANCEL=0
+RETRY=1
+ARGS=0

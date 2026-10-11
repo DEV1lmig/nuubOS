@@ -1,0 +1,99 @@
+From: nuubOS
+Subject: [PATCH] arm64: dts: allwinner: h700: TF2 slot on every Anbernic board
+
+Every H700 board has the second microSD slot with the same wiring, but
+only RG35XX Pro, RG40XX-V and RG CubeXX enabled it. Include the TF2
+slot from the family base (RG35XX 2024), which every board includes,
+keep its supply on across s2idle, declare the I/O supply and the
+missing 1.8 V switch, and give the MMC hosts fixed aliases so the slot
+is mmc2 on boards without the SDIO Wi-Fi too.
+
+---
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
+@@ -18,6 +18,10 @@
+ 	compatible = "anbernic,rg35xx-2024", "allwinner,sun50i-h700";
+ 
+ 	aliases {
++		/* nuubOS: fixed host numbers, the TF2 slot is always mmc2 (mmcblk2). */
++		mmc0 = &mmc0;
++		mmc1 = &mmc1;
++		mmc2 = &mmc2;
+ 		serial0 = &uart0;
+ 	};
+ 
+@@ -512,6 +516,7 @@
+ };
+ 
+ #include "sun50i-h700-anbernic-usb0-otg.dtsi"
++#include "sun50i-h700-anbernic-tf2.dtsi"
+ 
+ /* nuubOS: keep the H700 family SDIO Wi-Fi host powered across s2idle. */
+ &mmc1 {
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-tf2.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-tf2.dtsi
+@@ -1,4 +1,15 @@
+ // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++/*
++ * TF2 microSD slot, present on every Anbernic H700 board (wiring as in
++ * Chris Morgan's "arm64: dts: allwinner: h700: Add MMC2 for Anbernic
++ * RG35XX", carried by ROCKNIX): MMC2, card detect PE22 (active low),
++ * card supply switched by PE4, I/O from cldo3.
++ *
++ * The supply stays on (ROCKNIX "Keep the second SD card powered"): the
++ * slot pins are pulled up from the always-on I/O rail, so a card whose
++ * supply is cut in s2idle is back-powered through them and can come back
++ * busy. 1.8 V signalling is not modelled: no UHS modes.
++ */
+ 
+ / {
+ 	reg_tf2_vcc: regulator-tf2-vcc {
+@@ -8,13 +19,18 @@
+ 		regulator-max-microvolt = <3300000>;
+ 		gpio = <&pio 4 4 GPIO_ACTIVE_HIGH>; /* PE4 */
+ 		enable-active-high;
++		regulator-always-on;
+ 	};
+ };
++
+ &mmc2 {
+ 	vmmc-supply = <&reg_tf2_vcc>;
++	vqmmc-supply = <&reg_cldo3>;
+ 	cd-gpios = <&pio 4 22 GPIO_ACTIVE_LOW>; /* PE22 */
+ 	bus-width = <4>;
+ 	max-frequency = <50000000>;
++	disable-wp;
++	no-1-8-v;
+ 	no-sdio;
+ 	no-mmc;
+ 	status = "okay";
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-pro.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-pro.dts
+@@ -6,7 +6,6 @@
+ 
+ #include "sun50i-h700-anbernic-rg35xx-plus.dts"
+ #include "sun50i-h700-anbernic-hdmi-audio.dtsi"
+-#include "sun50i-h700-anbernic-tf2.dtsi"
+ #include "sun50i-h700-anbernic-dual-analog.dtsi"
+ 
+ / {
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg40xx-v.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg40xx-v.dts
+@@ -6,7 +6,6 @@
+ #include "sun50i-h700-anbernic-rg35xx-plus.dts"
+ #include "sun50i-h700-anbernic-hdmi-audio.dtsi"
+ #include "sun50i-h700-anbernic-uart5-ph.dtsi"
+-#include "sun50i-h700-anbernic-tf2.dtsi"
+ #include "sun50i-h700-anbernic-pwm0-backlight.dtsi"
+ #include "sun50i-h700-anbernic-pwm3-rumble-pi13.dtsi"
+ #include "sun50i-h700-anbernic-dual-analog.dtsi"
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rgcubexx.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rgcubexx.dts
+@@ -7,7 +7,6 @@
+ #include "sun50i-h700-anbernic-rg35xx-plus.dts"
+ #include "sun50i-h700-anbernic-hdmi-audio.dtsi"
+ #include "sun50i-h700-anbernic-uart5-ph.dtsi"
+-#include "sun50i-h700-anbernic-tf2.dtsi"
+ #include "sun50i-h700-anbernic-pwm0-backlight.dtsi"
+ #include <dt-bindings/leds/common.h>
+ #include "sun50i-h700-anbernic-pwm3-rumble-pi13.dtsi"

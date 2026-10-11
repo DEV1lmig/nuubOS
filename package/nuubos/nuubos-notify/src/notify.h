@@ -29,8 +29,12 @@
  *   battery.full
  *   wifi.connected          ssid=
  *   wifi.lost               ssid=
- *   storage.job             action=backup|move-back|adopt
- *                           state=running|succeeded|failed [progress=]
+ *   storage.sd2.inserted    name=      (games card mounted, nuubos-storagectl)
+ *   storage.sd2.removed                (pulled out while in use)
+ *   storage.sd2.ejected
+ *   storage.sd2.readonly    name=
+ *   storage.sd2.unreadable
+ *   storage.sd2.formatted
  *   game.state.saved        [slot=]   (no slot: automatic slot)
  *   game.state.loaded       [slot=]
  *   game.state.empty        slot=
@@ -38,6 +42,7 @@
  *   game.slot               slot=      (changed with a controller hotkey)
  *   game.fastforward        state=on|off
  *   game.failed             reason=start|crash
+ *   game.storage_lost                  (its games card went away: saved and closed)
  *   game.screenshot.saved              (screenshot written)
  *   game.screenshot.failed
  *   media.failed                       (playback could not start / ended in error)

@@ -1,0 +1,6 @@
+# Erase and format the games card (its CID, as confirmed by the user)
+COMMAND=/usr/sbin/nuubos-storagectl sd2 format
+SCOPE=device
+CANCEL=0
+RETRY=0
+ARGS=1

@@ -10,6 +10,7 @@ mod moonlight;
 mod splash;
 mod splash_core;
 mod steamlink;
+mod storageui;
 mod themes;
 mod webui;
 slint::include_modules!();
@@ -49,6 +50,31 @@ static SYSTEM_INFO_GATE: OnceLock<Arc<(Mutex<bool>, Condvar)>> = OnceLock::new()
 /* Initial setup (OOB) is running: controller navigation belongs to it. The
  * state itself is owned by nuubos-usersd (setup_complete). */
 static OOB_ACTIVE: AtomicBool = AtomicBool::new(false);
+/* The Settings shell input flag of main(), for modules that open Settings
+ * themselves (storageui: a new games card's question). */
+static SETTINGS_FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+/* The OOB offers a restore from the games card once per session. */
+static OOB_RESTORE_OFFERED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn oob_active() -> bool {
+    OOB_ACTIVE.load(Ordering::SeqCst)
+}
+
+pub(crate) fn oob_notice(ui: &HomeWindow, text: String) {
+    ui.set_oob_notice(text.into());
+}
+
+/* Open Settings on a page from outside it (Home, an application shell). */
+pub(crate) fn open_settings_at(ui: &HomeWindow, view: i32) {
+    if let Some(flag) = SETTINGS_FLAG.get() {
+        flag.store(true, Ordering::SeqCst);
+    }
+    navigate_settings_view(ui, view);
+    if !ui.get_settings_open() {
+        ui.set_settings_open(true);
+        write_ui_context("settings");
+    }
+}
 /* The full-screen safe mode screen owns the input (EPIC-050). */
 static SAFE_SCREEN: AtomicBool = AtomicBool::new(false);
 
@@ -173,20 +199,7 @@ struct SystemSnapshot {
     device_model: String,
     kernel: String,
     network: String,
-    storage_mode: String,
-    storage_active: String,
-    storage_health: String,
-    tf2_state: String,
-    tf2_cid: String,
-    storage_action_required: String,
-    backup_policy: String,
-    backup_due: String,
-    backup_reason: String,
-    storage_job_state: String,
-    storage_job_action: String,
-    storage_job_exit: i32,
-    userdata_total: u64,
-    userdata_free: u64,
+    storage: storageui::Storage,
     idle_stage: String,
 }
 
@@ -211,20 +224,7 @@ impl Default for SystemSnapshot {
             device_model: "Unavailable".into(),
             kernel: "Unavailable".into(),
             network: "Unavailable".into(),
-            storage_mode: "Unknown".into(),
-            storage_active: "Unknown".into(),
-            storage_health: "Unknown".into(),
-            tf2_state: "Unknown".into(),
-            tf2_cid: String::new(),
-            storage_action_required: "NONE".into(),
-            backup_policy: "Unknown".into(),
-            backup_due: "Unknown".into(),
-            backup_reason: "Unknown".into(),
-            storage_job_state: "idle".into(),
-            storage_job_action: "none".into(),
-            storage_job_exit: 0,
-            userdata_total: 0,
-            userdata_free: 0,
+            storage: storageui::Storage::default(),
             idle_stage: "active".into(),
         }
     }
@@ -611,20 +611,7 @@ fn parse_system_snapshot(reply: &str) -> SystemSnapshot {
             "device.model" => s.device_model = value.to_owned(),
             "kernel" => s.kernel = value.to_owned(),
             "network" => s.network = value.to_owned(),
-            "storage.mode" => s.storage_mode = value.to_owned(),
-            "storage.active" => s.storage_active = value.to_owned(),
-            "storage.health" => s.storage_health = value.to_owned(),
-            "storage.tf2_state" => s.tf2_state = value.to_owned(),
-            "storage.tf2_cid" => s.tf2_cid = value.to_owned(),
-            "storage.action_required" => s.storage_action_required = value.to_owned(),
-            "storage.backup_policy" => s.backup_policy = value.to_owned(),
-            "storage.backup_due" => s.backup_due = value.to_owned(),
-            "storage.backup_reason" => s.backup_reason = value.to_owned(),
-            "storage.job_state" => s.storage_job_state = value.to_owned(),
-            "storage.job_action" => s.storage_job_action = value.to_owned(),
-            "storage.job_exit" => s.storage_job_exit = value.parse().unwrap_or(0),
-            "storage.userdata_total" => s.userdata_total = value.parse().unwrap_or(0),
-            "storage.userdata_free" => s.userdata_free = value.parse().unwrap_or(0),
+            k if k.starts_with("storage.") => s.storage.parse(k, value),
             "lifecycle.stage" => s.idle_stage = value.to_owned(),
             _ => {}
         }
@@ -687,27 +674,17 @@ fn apply_system_snapshot(ui: &HomeWindow, s: &SystemSnapshot) {
     ui.set_system_device_model(s.device_model.clone().into());
     ui.set_system_kernel(s.kernel.clone().into());
     ui.set_system_network(s.network.clone().into());
-    ui.set_system_storage_mode(s.storage_mode.clone().into());
-    ui.set_system_storage_active(s.storage_active.clone().into());
-    ui.set_system_storage_health(s.storage_health.clone().into());
-    ui.set_system_tf2_state(s.tf2_state.clone().into());
-    ui.set_system_tf2_cid(s.tf2_cid.clone().into());
-    ui.set_system_storage_action_required(s.storage_action_required.clone().into());
-    ui.set_system_backup_policy(s.backup_policy.clone().into());
-    ui.set_system_backup_due(s.backup_due.clone().into());
-    ui.set_system_backup_reason(s.backup_reason.clone().into());
-    ui.set_system_storage_job_state(s.storage_job_state.clone().into());
-    ui.set_system_storage_job_action(s.storage_job_action.clone().into());
-    ui.set_system_storage_job_exit(s.storage_job_exit);
-
-    if s.userdata_total > 0 {
-        let used = s.userdata_total.saturating_sub(s.userdata_free);
-        ui.set_system_storage_usage(
-            format!("{} used of {}", human_bytes(used), human_bytes(s.userdata_total)).into()
-        );
+    let st = &s.storage;
+    ui.set_system_storage_summary(storageui::summary(ui, st).into());
+    ui.set_system_storage_usage(if st.sd1_total > 0 {
+        tr(ui, 914, "{0} free of {1}")
+            .replace("{0}", &storageui::human(st.sd1_free))
+            .replace("{1}", &storageui::human(st.sd1_total))
+            .into()
     } else {
-        ui.set_system_storage_usage(tr(ui, 241, "Unavailable").into());
-    }
+        tr(ui, 241, "Unavailable").into()
+    });
+    storageui::update(ui, st);
 }
 
 fn refresh_system(ui: &HomeWindow) {
@@ -2123,11 +2100,12 @@ fn start_home_music_session() {
  * nothing here: inputd routes them to the game gamepads by itself. */
 fn on_game_session(ui: &HomeWindow, running: bool) {
     eprintln!("home: game session running={running}");
-    let _ = ui;
     if running {
         thread::spawn(stop_home_music_session);
     } else {
         thread::spawn(start_home_music_session);
+        /* A games card inserted during the session asks now. */
+        storageui::maybe_ask(ui);
     }
 }
 
@@ -2381,21 +2359,6 @@ fn open_system_profile_dropdown(ui: &HomeWindow) {
     );
 }
 
-fn open_storage_backup_policy_dropdown(ui: &HomeWindow) {
-    open_settings_choice(
-        ui,
-        "system-storage-backup-policy",
-        &tr(ui, 69, "Automatic Backup"),
-        vec![
-            ("OFF".to_owned(), tr(ui, 54, "Off")),
-            ("DAILY".to_owned(), tr(ui, 70, "Daily")),
-            ("WEEKLY".to_owned(), tr(ui, 71, "Weekly")),
-            ("MONTHLY".to_owned(), tr(ui, 72, "Monthly")),
-        ],
-        ui.get_system_backup_policy().as_str(),
-    );
-}
-
 fn open_auto_battery_dropdown(ui: &HomeWindow) {
     let values = [0, 10, 15, 20, 25, 30, 40, 50];
     let options = values
@@ -2583,6 +2546,7 @@ fn apply_settings_choice(ui: &HomeWindow) {
         c if c.starts_with("game-") || c.starts_with("emu-") => gameui::apply_choice(ui, c, value),
         c if c.starts_with("files-") || c.starts_with("share-") || c.starts_with("backup-") => filesui::apply_choice(ui, c, value),
         c if c.starts_with("find-") => findui::apply_choice(ui, c, value),
+        c if storageui::owns_choice(c) => storageui::apply_choice(ui, c, value),
         "player-assignment" => {
             let player_index = ui.get_player_assignment_index().max(0) as usize;
             let Some(assignment) = ui.get_player_assignments().row_data(player_index) else {
@@ -2635,9 +2599,6 @@ fn apply_settings_choice(ui: &HomeWindow) {
         }
         "system-sleep" => {
             system_set(ui, format!("SET SLEEP {}", value));
-        }
-        "system-storage-backup-policy" => {
-            system_set(ui, format!("SET STORAGE BACKUP_POLICY {}", value));
         }
         "ui-language" => { let v=value.clone();thread::spawn(move||{let _=localization_command(&format!("SET LANGUAGE {}",v));}); }
         "user-login-mode" => {thread::spawn(move||{let _=users_command(&format!("SET_LOGIN_MODE	{}",value));});}
@@ -4169,18 +4130,18 @@ fn input_command(command: &str) -> std::io::Result<String> {
  * Settings, OOB). inputd still calls it the Settings capture; it is
  * released only when the UI exits (later: while a game/app runs). */
 /* While the user picker is up the Quick Menu must not open (context
- * "user-picker", checked by the Quick Menu) and Home keeps the navigation
- * keys (the capture Settings, OOB and safe mode use). Closing it restores
- * both unless one of those still needs them. */
+ * "user-picker", checked by the Quick Menu). The navigation capture is
+ * Home-wide (set_ui_capture above), so closing the picker keeps it:
+ * releasing it here left Home without stick navigation after a boot
+ * through the picker (inputd routes the sticks only under capture). */
 fn sync_picker_capture(ui: &HomeWindow, open: bool) {
-    let keep = open || ui.get_settings_open() || OOB_ACTIVE.load(Ordering::SeqCst) || SAFE_SCREEN.load(Ordering::SeqCst);
     /* The Quick Menu reads the context: no menu on the picker. */
     if open {
         write_ui_context("user-picker");
     } else if !OOB_ACTIVE.load(Ordering::SeqCst) && !SAFE_SCREEN.load(Ordering::SeqCst) {
         write_ui_context(if ui.get_settings_open() { "settings" } else { "home" });
     }
-    thread::spawn(move || set_ui_capture(keep));
+    thread::spawn(|| set_ui_capture(true));
 }
 
 fn set_ui_capture(enabled: bool) {
@@ -4551,16 +4512,6 @@ fn update_system_scroll(ui: &HomeWindow) {
     ));
 }
 
-fn update_system_storage_scroll(ui: &HomeWindow) {
-    const COUNT: i32 = 8;
-    ui.set_system_storage_scroll_offset(guarded_scroll_offset(
-        ui.get_system_storage_index(),
-        COUNT,
-        ui.get_settings_list_visible_rows(),
-        ui.get_system_storage_scroll_offset(),
-    ));
-}
-
 fn update_system_info_scroll(ui: &HomeWindow) {
     const COUNT: i32 = 10;
     ui.set_system_info_scroll_offset(guarded_scroll_offset(
@@ -4579,6 +4530,10 @@ fn handle_settings_action(
     play_ui_sound(action);
     let view = ui.get_settings_view();
     if ui.get_datetime_picker_open(){datetime::action(ui,action);return;}
+    if ui.get_settings_dialog_open() {
+        gameui::dialog_action(ui, action);
+        return;
+    }
     if ui.get_avatar_picker_open(){if action=="menu_back"{ui.set_avatar_picker_open(false);return;}let n=ui.get_avatar_choices().row_count() as i32;match action{"menu_up"|"menu_down"|"menu_left"|"menu_right"=>move_avatar_selection(ui,action),"menu_confirm" if n>0=>{if let Some(a)=ui.get_avatar_choices().row_data(ui.get_avatar_picker_index().max(0) as usize){let id=ui.get_profile_edit_user_id().to_string();let spec=a.spec.to_string();ui.set_avatar_picker_open(false);thread::spawn(move||{let _=users_command(&format!("SET_AVATAR	{}	{}",id,spec));});}},_=>{}}return;}
 
     if ui.get_settings_choice_open() {
@@ -4669,10 +4624,7 @@ fn handle_settings_action(
             26 => navigate_settings_view(ui, 25),
             27 | 28 => navigate_settings_view(ui, 19),
             POWER_VIEW => navigate_settings_view(ui, 0),
-            20 | 21 => {
-                ui.set_system_storage_confirm(false);
-                navigate_settings_view(ui, 19);
-            }
+            21 => navigate_settings_view(ui, 19),
             13 => navigate_settings_view(ui, 12),
             15 => navigate_settings_view(ui, 13),
             14 => navigate_settings_view(ui, ui.get_controller_tester_return_view()),
@@ -5179,10 +5131,7 @@ fn handle_settings_action(
                 }
                 "menu_confirm" => match ui.get_system_index() {
                     0 => {
-                        ui.set_system_storage_index(0);
-                        ui.set_system_storage_scroll_offset(0);
-                        ui.set_system_storage_confirm(false);
-                        navigate_settings_view(ui, 20);
+                        storageui::open(ui);
                         refresh_system(ui);
                     },
                     1 => gameui::open_update(ui),
@@ -5214,63 +5163,6 @@ fn handle_settings_action(
             },
             _ => {}
         },
-        20 => {
-            let job_running = ui.get_system_storage_job_state().as_str() == "running";
-            match action {
-                "menu_up" => {
-                    ui.set_system_storage_index(
-                        move_model_selection(ui.get_system_storage_index(), 8, -1)
-                    );
-                    ui.set_system_storage_confirm(false);
-                    update_system_storage_scroll(ui);
-                }
-                "menu_down" => {
-                    ui.set_system_storage_index(
-                        move_model_selection(ui.get_system_storage_index(), 8, 1)
-                    );
-                    ui.set_system_storage_confirm(false);
-                    update_system_storage_scroll(ui);
-                }
-                /* Rows 0, 1, 2 and 6 are deliberately read-only: Confirm does nothing. */
-                "menu_confirm" if ui.get_system_storage_index() == 7 => filesui::open_media(ui),
-                "menu_confirm" if ui.get_system_storage_index() == 3 && !job_running => {
-                    open_storage_backup_policy_dropdown(ui);
-                }
-                "menu_confirm" if ui.get_system_storage_index() == 4 && !job_running => {
-                    let tf2 = ui.get_system_tf2_state().to_string();
-                    let active = ui.get_system_storage_active().to_string();
-                    if tf2 == "FOREIGN" {
-                        let cid = ui.get_system_tf2_cid().to_string();
-                        if !cid.is_empty() {
-                            if ui.get_system_storage_confirm() {
-                                ui.set_system_storage_confirm(false);
-                                system_set(ui, format!("START STORAGE ADOPT {}", cid));
-                            } else {
-                                ui.set_system_storage_confirm(true);
-                            }
-                        }
-                    } else if tf2 == "OWNED" && active == "TF2" {
-                        if ui.get_system_storage_confirm() {
-                            ui.set_system_storage_confirm(false);
-                            system_set(ui, "START STORAGE MOVE_BACK".to_owned());
-                        } else {
-                            ui.set_system_storage_confirm(true);
-                        }
-                    } else if tf2 == "OWNED" {
-                        ui.set_system_storage_confirm(false);
-                        system_set(ui, "SET STORAGE MODE AUTO".to_owned());
-                    }
-                }
-                "menu_confirm" if ui.get_system_storage_index() == 5 && !job_running => {
-                    if ui.get_system_tf2_state().as_str() == "OWNED"
-                        && ui.get_system_storage_active().as_str() == "TF2"
-                    {
-                        system_set(ui, "START STORAGE BACKUP".to_owned());
-                    }
-                }
-                _ => {}
-            }
-        }
         21 => match action {
             "menu_up" => {
                 ui.set_system_info_index(
@@ -5734,7 +5626,13 @@ fn oob_go(ui:&HomeWindow,step:i32){
     ui.set_oob_scroll(0);
     ui.set_oob_notice("".into());
     match step{
-        1=>navigate_settings_view(ui,30),
+        1=>{
+            navigate_settings_view(ui,30);
+            /* A backup on the games card can bring everything back. */
+            if !OOB_RESTORE_OFFERED.swap(true,Ordering::SeqCst)&&!storageui::offer_restore(ui){
+                OOB_RESTORE_OFFERED.store(false,Ordering::SeqCst);
+            }
+        }
         2=>{wifi_notice(ui,"");navigate_settings_view(ui,31);}
         3=>navigate_settings_view(ui,32),
         _=>{}
@@ -6099,6 +5997,7 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let settings_active = Arc::new(AtomicBool::new(false));
+    let _ = SETTINGS_FLAG.set(settings_active.clone());
     {
         let weak = ui.as_weak();
         let settings_active = settings_active.clone();

@@ -56,29 +56,9 @@ IP="$(
 
 [ -n "$IP" ] || IP="offline"
 
-ACTIVE="TF1"
-TF2_STATE="UNKNOWN"
-ACTION="NONE"
-
-if [ -r /run/nuubos/storage/tf2.status ]; then
-    ACTIVE="$(
-        sed -n 's/^ACTIVE_STORAGE=//p' \
-            /run/nuubos/storage/tf2.status
-    )"
-
-    TF2_STATE="$(
-        sed -n 's/^TF2_STATE=//p' \
-            /run/nuubos/storage/tf2.status
-    )"
-
-    ACTION="$(
-        sed -n 's/^ACTION_REQUIRED=//p' \
-            /run/nuubos/storage/tf2.status
-    )"
-fi
-
-[ -n "$ACTIVE" ] || ACTIVE="NONE"
-[ -n "$TF2_STATE" ] || TF2_STATE="UNKNOWN"
+READY="$(sed -n 's/^STORAGE_READY=//p' /run/nuubos/storage/storage.status 2>/dev/null)"
+SD2_STATE="$(sed -n 's/^SD2_STATE=//p' /run/nuubos/storage/sd2.status 2>/dev/null)"
+[ -n "$SD2_STATE" ] || SD2_STATE="unknown"
 
 TEMP="n/a"
 
@@ -118,48 +98,17 @@ printf '  %-10s %s\n' "Uptime" "$UPTIME"
 printf '  %-10s %s\n' "Wi-Fi" "$IP"
 printf '  %-10s %s\n' "Temp" "$TEMP"
 
-if [ "$ACTIVE" = "NONE" ]; then
-    printf '  %-10s %s%s%s\n' \
-        "Storage" \
-        "$YELLOW" \
-        "not ready" \
-        "$RESET"
+if [ "$READY" != "1" ]; then
+    printf '  %-10s %s%s%s\n' "Storage" "$YELLOW" "SD1 not ready" "$RESET"
 else
-    printf '  %-10s %s%s active%s\n' \
-        "Storage" \
-        "$GREEN" \
-        "$ACTIVE" \
-        "$RESET"
+    printf '  %-10s %s%s%s\n' "Storage" "$GREEN" "SD1 ready" "$RESET"
 fi
 
-case "$TF2_STATE:$ACTION" in
-    FOREIGN:FORMAT)
-        printf '  %-10s %s%s%s\n' \
-            "SD2" \
-            "$YELLOW" \
-            "foreign · format available" \
-            "$RESET"
-        ;;
-
-    OWNED:*)
-        printf '  %-10s %s%s%s\n' \
-            "SD2" \
-            "$GREEN" \
-            "nuubOS owned" \
-            "$RESET"
-        ;;
-
-    ABSENT:*)
-        printf '  %-10s %s\n' \
-            "SD2" \
-            "not inserted"
-        ;;
-
-    *)
-        printf '  %-10s %s\n' \
-            "SD2" \
-            "$TF2_STATE"
-        ;;
+case "$SD2_STATE" in
+    ready) printf '  %-10s %s%s%s\n' "SD2" "$GREEN" "games card at /media/sd2" "$RESET" ;;
+    readonly|unreadable) printf '  %-10s %s%s%s\n' "SD2" "$YELLOW" "$SD2_STATE" "$RESET" ;;
+    none) ;;
+    *) printf '  %-10s %s\n' "SD2" "$SD2_STATE" ;;
 esac
 
 printf '\n'

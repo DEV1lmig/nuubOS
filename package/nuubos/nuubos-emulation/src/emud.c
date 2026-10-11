@@ -27,7 +27,9 @@
  * STATES [game], SETTINGS, SET <key> <value>, PAUSE, RESUME,
  * SAVE_STATE, LOAD_STATE, SLOT <n|+1|-1>, RESET, FAST_FORWARD, ADVANCED,
  * QUIT, SCREENSHOT, OVERLAY_TEXT <line> reply OK or ERR <reason>; PRE_POWER <sleep|restart|poweroff>
- * replies once the game state is safe.
+ * replies once the game state is safe. STORAGE_LOST <mount point> (from
+ * nuubos-storagectl when the games card is pulled out): a game whose ROM
+ * was on it is saved in the automatic state and closed, with a notice.
  *
  * Per-game configuration (EPIC-018): GAME_SETTINGS <game> <system> lists the
  * effective values and the user's explicit overrides; GAME_SET <game>
@@ -42,8 +44,13 @@
  * RetroAchievements (EPIC-017): a user logged in with
  * nuubos-achievementsctl has /state/users/<id>/secrets/retroachievements.conf
  * (user name and API token, never the password); the session enables
- * RetroArch's achievements with that token, and hardcore mode when chosen. Outcomes the user must see (state saved,
- * empty slot, launch failure...) are typed notifications (EPIC-006).
+ * RetroArch's achievements with that token, and hardcore mode when chosen.
+ * In hardcore mode (user request 2026-10-11) the session has no save
+ * states at all: SAVE_STATE, LOAD_STATE, SLOT and FAST_FORWARD (and their
+ * hotkeys) are refused with game.hardcore, the game starts from the
+ * beginning and nothing is saved when it closes. Outcomes the user must
+ * see (state saved, empty slot, launch failure...) are typed notifications
+ * (EPIC-006).
  *
  * Idle: poll() without timeout. A timeout is armed only while a save or a
  * quit is pending.
@@ -252,11 +259,15 @@ struct session {
 	char system[64];
 	char core[64];
 	char content[PATH_MAX];
+	/* The ROM file itself (content may be a generated MAME .cmd). */
+	char rom[PATH_MAX];
 	char states_dir[PATH_MAX];
 	char state_base[PATH_MAX];
 	int slot;
 	bool paused;
 	bool fast_forward;
+	/* RetroAchievements hardcore: no save states, no fast-forward. */
+	bool hardcore;
 	long long started_ms;
 	long long quit_deadline_ms;
 	bool term_sent;
@@ -539,6 +550,14 @@ static void notify_failed(const char *reason)
 	(void)nuubos_notify_send(&n);
 }
 
+static void notify_storage_lost(void)
+{
+	struct nuubos_notify n;
+
+	nuubos_notify_begin(&n, "POST", "game.session", "game.storage_lost");
+	(void)nuubos_notify_send(&n);
+}
+
 static void notify_slot(int slot)
 {
 	struct nuubos_notify n;
@@ -554,6 +573,16 @@ static void notify_screenshot(bool ok)
 
 	nuubos_notify_begin(&n, "POST", "game.screenshot",
 			    ok ? "game.screenshot.saved" : "game.screenshot.failed");
+	(void)nuubos_notify_send(&n);
+}
+
+/* An action hardcore mode does not allow (save/load state, slot,
+ * fast-forward). */
+static void notify_hardcore(void)
+{
+	struct nuubos_notify n;
+
+	nuubos_notify_begin(&n, "POST", "game.state", "game.hardcore");
 	(void)nuubos_notify_send(&n);
 }
 
@@ -597,6 +626,7 @@ static size_t build_status(char *out, size_t size)
 			 "overlay=%d\n"
 			 "overlay_items=%s\n"
 			 "fps=%.1f\n"
+			 "hardcore=%d\n"
 			 "end=1\n",
 			 state_name(),
 			 session.state == SESSION_IDLE ? "" : session.game,
@@ -609,7 +639,8 @@ static size_t build_status(char *out, size_t size)
 			 session.state == SESSION_IDLE ? DEFAULT_SLOTS : session.settings.slots,
 			 session.state != SESSION_IDLE && session.settings.overlay ? 1 : 0,
 			 session.state == SESSION_IDLE ? "" : session.settings.overlay_items,
-			 session.fps);
+			 session.fps,
+			 session.state != SESSION_IDLE && session.hardcore ? 1 : 0);
 
 	return n < 0 ? 0 : (size_t)n < size ? (size_t)n : size - 1;
 }
@@ -2042,7 +2073,7 @@ static int write_session_cfg(const char *ra_dir, const char *saves,
 			     bool auto_load, const char **shader)
 {
 	char tmp[] = SESSION_CFG ".tmp";
-	bool auto_save = !session.settings.slot_rotation;
+	bool auto_save = !session.settings.slot_rotation && !session.hardcore;
 	FILE *fp;
 	int player;
 	int rc;
@@ -2269,6 +2300,7 @@ static const char *launch(const char *game, const char *mode)
 	copy_text(session.game, sizeof(session.game), game);
 	copy_text(session.system, sizeof(session.system), answer + 3);
 	copy_text(session.content, sizeof(session.content), tab + 1);
+	copy_text(session.rom, sizeof(session.rom), tab + 1);
 	if (!file_exists(session.content))
 		return "unavailable";
 	if (!resolve_core(session.system, session.core, sizeof(session.core),
@@ -2276,6 +2308,9 @@ static const char *launch(const char *game, const char *mode)
 		return "no-core";
 	load_overrides(session.user, game, &overrides);
 	load_achievements(session.user, &achievements);
+	session.hardcore = achievements.enabled && achievements.hardcore;
+	if (session.hardcore && !strncmp(mode, "slot:", 5))
+		return "hardcore";
 	if (overrides.core[0] && strcmp(overrides.core, session.core)) {
 		char cores[512];
 
@@ -2337,8 +2372,11 @@ static const char *launch(const char *game, const char *mode)
 		 session.states_dir, path);
 
 	/* Starting point: RetroArch loads an entry slot (--entryslot) or the
-	 * automatic state (savestate_auto_load). */
-	if (!strcmp(mode, "resume")) {
+	 * automatic state (savestate_auto_load). Hardcore always starts from
+	 * the beginning. */
+	if (session.hardcore) {
+		(void)newest_state(session.state_base, session.settings.slots, &manual);
+	} else if (!strcmp(mode, "resume")) {
 		start = newest_state(session.state_base, session.settings.slots, &manual);
 	} else if (!strncmp(mode, "slot:", 5)) {
 		start = atoi(mode + 5);
@@ -2449,9 +2487,10 @@ static const char *launch(const char *game, const char *mode)
 	session.overlay_tick_ms = monotonic_ms() + OVERLAY_TICK_MS;
 	session.fast_forward = false;
 	session.started_ms = monotonic_ms();
-	log_msg("emud: launch game=%s system=%s core=%s pid=%d user=%s start=%d shader=%s render=%d",
+	log_msg("emud: launch game=%s system=%s core=%s pid=%d user=%s start=%d shader=%s render=%d hardcore=%d",
 		session.game, session.system, session.core, (int)pid,
-		session.user, start, shader[0] ? shader : "none", render_height);
+		session.user, start, shader[0] ? shader : "none", render_height,
+		session.hardcore ? 1 : 0);
 	library_session("SESSION_BEGIN", session.game);
 	notify_subscribers();
 	return NULL;
@@ -2463,7 +2502,7 @@ static void request_quit(void)
 		return;
 	/* With slot rotation RetroArch's automatic slot is off: the progress
 	 * goes into the next slot first (once; a failed save still quits). */
-	if (session.settings.slot_rotation && !session.quit_saved) {
+	if (session.settings.slot_rotation && !session.hardcore && !session.quit_saved) {
 		session.quit_requested = true;
 		if (session.pending != PENDING_NONE)
 			return;
@@ -2501,6 +2540,27 @@ static void finish_power_wait(void)
 	reply(c, "OK\n");
 }
 
+/* Saves and states just changed: the automatic backup to the games card
+ * runs now if it is on (docs/dev/platform.md "SD2 = games card"). The
+ * helper only submits a job; it is reaped like any child. */
+static void trigger_backup(void)
+{
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+		if (null >= 0) {
+			dup2(null, STDIN_FILENO);
+			dup2(null, STDOUT_FILENO);
+			dup2(null, STDERR_FILENO);
+		}
+		execl("/usr/sbin/nuubos-sd2-backup", "nuubos-sd2-backup", "trigger",
+		      "session-end", (char *)NULL);
+		_exit(127);
+	}
+}
+
 static void child_exited(int status)
 {
 	long long ran = monotonic_ms() - session.started_ms;
@@ -2523,6 +2583,8 @@ static void child_exited(int status)
 	notify_subscribers();
 	if (power_client >= 0 && clients[power_client].fd >= 0)
 		reply(&clients[power_client], "OK\n");
+	else
+		trigger_backup();
 }
 
 static void reap_children(void)
@@ -2674,6 +2736,13 @@ static void handle_hotkey(const char *action)
 	if (session.state != SESSION_RUNNING)
 		return;
 	log_msg("emud: hotkey %s", action);
+	if (session.hardcore &&
+	    (!strcmp(action, "save_state") || !strcmp(action, "load_state") ||
+	     !strcmp(action, "slot_next") || !strcmp(action, "slot_prev") ||
+	     !strcmp(action, "fast_forward"))) {
+		notify_hardcore();
+		return;
+	}
 	if (!strcmp(action, "save_state")) {
 		if (save_next(false))
 			notify_subscribers();
@@ -2854,12 +2923,14 @@ static void handle_settings(struct client *c, const char *key, const char *value
 /* STATES [game]: the save states of the running game, or of a game before
  * it starts (Home's start menu): "slots=N", then "state=<slot>\t<mtime>\t
  * <HH:MM local>" for each existing state (slot -1 = the automatic state),
- * "end=1". */
+ * "end=1". In hardcore mode "hardcore=1" and no states (none can be
+ * loaded). */
 static void handle_states(struct client *c, const char *game)
 {
 	char base[PATH_MAX];
 	char out[4096];
 	int slots;
+	bool hardcore;
 	size_t len;
 
 	if (game && game[0]) {
@@ -2869,6 +2940,7 @@ static void handle_states(struct client *c, const char *game)
 		char name[NAME_MAX + 1];
 		char *tab;
 		struct emu_settings e;
+		struct achievements a;
 
 		if (!valid_game(game)) {
 			reply(c, "ERR game\n");
@@ -2887,17 +2959,21 @@ static void handle_states(struct client *c, const char *game)
 		*tab = '\0';
 		load_settings(user, &e);
 		slots = e.slots;
+		load_achievements(user, &a);
+		hardcore = a.enabled && a.hardcore;
 		content_base_name(tab + 1, name, sizeof(name));
 		snprintf(base, sizeof(base), USERS_DIR "/%s/states/%s/%s", user, answer + 3, name);
 	} else if (session.state == SESSION_RUNNING) {
 		slots = session.settings.slots;
+		hardcore = session.hardcore;
 		copy_text(base, sizeof(base), session.state_base);
 	} else {
 		reply(c, "ERR no-session\n");
 		return;
 	}
-	len = (size_t)snprintf(out, sizeof(out), "slots=%d\n", slots);
-	for (int slot = AUTO_SLOT; slot < slots && len + 48 < sizeof(out); slot++) {
+	len = (size_t)snprintf(out, sizeof(out), "slots=%d\n%s", slots,
+			       hardcore ? "hardcore=1\n" : "");
+	for (int slot = AUTO_SLOT; !hardcore && slot < slots && len + 48 < sizeof(out); slot++) {
 		long long t = state_mtime(base, slot);
 
 		time_t tt = (time_t)t;
@@ -2967,6 +3043,11 @@ static void handle_command(struct client *c, char *line)
 			return;
 		ra_command("SET_PAUSED %d", !strcmp(line, "PAUSE") ? 1 : 0);
 		reply(c, "OK\n");
+	} else if (session.hardcore && session.state == SESSION_RUNNING &&
+		   (!strcmp(line, "SAVE_STATE") || !strcmp(line, "LOAD_STATE") ||
+		    !strcmp(line, "SLOT") || !strcmp(line, "FAST_FORWARD"))) {
+		notify_hardcore();
+		reply(c, "ERR hardcore\n");
 	} else if (!strcmp(line, "SAVE_STATE")) {
 		if (!running(c))
 			return;
@@ -3044,6 +3125,29 @@ static void handle_command(struct client *c, char *line)
 		handle_settings(c, arg, value ? value : "");
 	} else if (!strcmp(line, "STATES")) {
 		handle_states(c, arg);
+	} else if (!strcmp(line, "STORAGE_LOST") && arg) {
+		size_t len = strlen(arg);
+
+		reply(c, "OK\n");
+		if (session.state != SESSION_RUNNING || !len ||
+		    strncmp(session.rom, arg, len) || session.rom[len] != '/')
+			return;
+		log_msg("emud: the ROM's storage %s went away, saving and closing", arg);
+		notify_storage_lost();
+		/* Saves and states live on SD1: the core still has the game in
+		 * memory, so the automatic state is taken first (not in
+		 * hardcore), then the session ends like before a power off.
+		 * A core stuck reading the missing card is killed by the quit
+		 * timeout. */
+		if (!session.hardcore && session.pending == PENDING_NONE) {
+			if (!session.settings.slot_rotation)
+				(void)begin_save(AUTO_SLOT, true);
+			else if (save_next(true))
+				session.quit_saved = true;
+		}
+		session.quit_requested = true;
+		if (session.pending == PENDING_NONE)
+			request_quit();
 	} else if (!strcmp(line, "PRE_POWER") && arg) {
 		if (strcmp(arg, "sleep") && strcmp(arg, "restart") &&
 		    strcmp(arg, "poweroff")) {
@@ -3063,8 +3167,9 @@ static void handle_command(struct client *c, char *line)
 		/* Progress is safe before every power action (CLAUDE §20.1):
 		 * in the automatic slot, or with slot rotation in the next slot
 		 * (the quit before restart/poweroff then does not save again);
-		 * a state operation already running completes first. */
-		if (session.state == SESSION_RUNNING &&
+		 * a state operation already running completes first. Hardcore
+		 * sessions have no states: SRAM is written by the quit. */
+		if (session.state == SESSION_RUNNING && !session.hardcore &&
 		    session.pending == PENDING_NONE) {
 			if (!session.settings.slot_rotation)
 				(void)begin_save(AUTO_SLOT, true);
