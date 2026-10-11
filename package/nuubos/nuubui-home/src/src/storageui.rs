@@ -3,8 +3,10 @@
  * (see gameui.rs), and the games card's moments outside it
  * (docs/dev/platform.md "SD2 = games card"):
  *
- *   64 Storage          SD1, the games card (SD2) and its actions, then
- *                       BACKUP TO SD2
+ *   64 Storage          SD1, the games card (SD2) and its actions
+ *   62 Backup           its first section, BACKUP TO SD2, and
+ *   28 Recovery         its "Restore from SD2" row (both pages are
+ *                       filesui's: backup_rows/restore_rows/backup_confirm)
  *   59 Backup Content   what the backup to SD2 includes
  *
  * The state comes from the nuubos-systemd snapshot (storage.*), pushed on
@@ -16,7 +18,7 @@
  */
 
 use crate::gameui::{
-    apply_rows_split, arm_or, armed, armed_detail, days_ago, focused_key, move_selection, nav, notice, row, run_tool,
+    apply_rows, arm_or, armed, armed_detail, days_ago, focused_key, move_selection, nav, notice, row, run_tool,
     show, toggle,
 };
 use crate::{navigate_settings_view, open_settings_choice, tr, tr_arg, GenRow, HomeWindow};
@@ -153,7 +155,7 @@ fn last_backup(ui: &HomeWindow, s: &Storage) -> String {
     }
 }
 
-fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> (Vec<(String, GenRow, bool)>, i32) {
+fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bool)> {
     let s = &st.storage;
     let mut rows: Vec<(String, GenRow, bool)> = Vec::new();
     let armed = armed();
@@ -172,7 +174,7 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> (Vec<(String, GenRow, b
         ] {
             rows.push((format!("item:{item}"), toggle(title, s.has_item(item), detail), true));
         }
-        return (rows, 0);
+        return rows;
     }
 
     let busy = !st.busy.is_empty();
@@ -215,54 +217,74 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> (Vec<(String, GenRow, b
         }
     }
     rows.push(("media".into(), nav(tr(ui, 625, "Removable Media"), String::new()), true));
+    rows
+}
 
-    /* BACKUP TO SD2 */
-    let split = rows.len() as i32;
+/* BACKUP TO SD2 (System → Backup & Restore): none without a card slot. */
+fn sd2_backup_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
+    let s = &st.storage;
+    let mut rows: Vec<(String, GenRow, bool)> = Vec::new();
     if !s.slot {
-        return (rows, 0);
+        return rows;
     }
+    let armed = armed();
+    let busy = !st.busy.is_empty();
     let writable = s.state == "ready";
     let mut auto = toggle(tr(ui, 69, "Automatic Backup"), s.backup_enabled,
         if s.mounted() { last_backup(ui, s) } else { tr(ui, 935, "Insert an SD2 card to back up") });
     if s.backup_result == "failed" {
         auto.detail = tr(ui, 968, "The backup could not be completed").into();
     }
-    rows.push(("auto".into(), auto, true));
+    rows.push(("sd2-auto".into(), auto, true));
     let on = ITEMS.iter().filter(|i| s.has_item(i)).count();
-    rows.push(("content".into(), nav(tr(ui, 936, "Backup Content"),
+    rows.push(("sd2-content".into(), nav(tr(ui, 936, "Backup Content"),
         if on == ITEMS.len() { tr(ui, 937, "All") }
         else { tr(ui, 938, "{0} of {1}").replace("{0}", &on.to_string()).replace("{1}", &ITEMS.len().to_string()) }), true));
     if s.backup_card == "conflict" {
-        rows.push(("archive".into(), row(tr(ui, 942, "Backup of a previous SD1"),
+        rows.push(("sd2-archive".into(), row(tr(ui, 942, "Backup of a previous SD1"),
             if st.busy == "archive" { tr(ui, 91, "Running") } else { String::new() },
-            armed_detail(&armed, "archive", tr(ui, 191, "Press again to confirm"),
+            armed_detail(&armed, "sd2-archive", tr(ui, 191, "Press again to confirm"),
                 tr(ui, 943, "Restore it, or keep it aside and start a new backup"))), writable && !busy));
     } else {
         let mut now = row(tr(ui, 88, "Back Up Now"),
             if st.busy == "backup" { tr(ui, 966, "Backing up…") } else { String::new() }, String::new());
         now.enabled = writable;
-        rows.push(("backup".into(), now, writable && !busy));
+        rows.push(("sd2-backup".into(), now, writable && !busy));
     }
-    if matches!(s.backup_card.as_str(), "linked" | "conflict" | "restorable") {
+    rows
+}
+
+pub fn backup_rows(ui: &HomeWindow) -> Vec<(String, GenRow, bool)> {
+    STATE.with(|st| sd2_backup_rows(ui, &st.borrow()))
+}
+
+/* Recovery: "Restore from SD2" while the card holds a usable backup. */
+pub fn restore_rows(ui: &HomeWindow) -> Vec<(String, GenRow, bool)> {
+    STATE.with(|st| {
+        let st = st.borrow();
+        let s = &st.storage;
+        if !s.slot || !matches!(s.backup_card.as_str(), "linked" | "conflict" | "restorable") {
+            return Vec::new();
+        }
         let mut restore = nav(tr(ui, 940, "Restore from SD2"),
             if st.busy == "restore" { tr(ui, 965, "Restoring…") } else { String::new() });
         restore.detail = tr(ui, 941, "Replaces the data on SD1 with a backup").into();
-        rows.push(("restore".into(), restore, s.mounted() && !busy));
-    }
-    (rows, split)
+        vec![("sd2-restore".into(), restore, s.mounted() && st.busy.is_empty())]
+    })
 }
 
 pub fn render(ui: &HomeWindow) {
     let view = ui.get_settings_view();
+    if view == crate::filesui::BACKUP_VIEW || view == crate::filesui::RECOVERY_VIEW {
+        crate::filesui::render(ui);
+        return;
+    }
     if view != STORAGE_VIEW && view != CONTENT_VIEW {
         return;
     }
-    let (rows, split) = STATE.with(|st| build_rows(ui, &st.borrow(), view));
-    if view == CONTENT_VIEW {
-        apply_rows_split(ui, rows, tr(ui, 936, "Backup Content").to_uppercase(), 0, String::new());
-    } else {
-        apply_rows_split(ui, rows, tr(ui, 19, "Storage").to_uppercase(), split, tr(ui, 931, "BACKUP TO SD2"));
-    }
+    let rows = STATE.with(|st| build_rows(ui, &st.borrow(), view));
+    let section = if view == CONTENT_VIEW { tr(ui, 936, "Backup Content") } else { tr(ui, 19, "Storage") };
+    apply_rows(ui, rows, section.to_uppercase());
 }
 
 /* System → Storage. */
@@ -485,15 +507,24 @@ fn confirm(ui: &HomeWindow, view: i32, key: &str) {
             }
         }
         "media" => crate::filesui::open_media(ui),
-        "auto" => {
+        _ => {}
+    }
+}
+
+/* Confirm on a BACKUP TO SD2 row of Backup or on Restore from SD2 of
+ * Recovery; false when the key is not one of them. */
+pub fn backup_confirm(ui: &HomeWindow, key: &str) -> bool {
+    let s = STATE.with(|st| st.borrow().storage.clone());
+    match key {
+        "sd2-auto" => {
             STATE.with(|st| st.borrow_mut().storage.backup_enabled = !s.backup_enabled);
             render(ui);
             system(ui, vec!["set-storage-backup".into(), if s.backup_enabled { "0" } else { "1" }.into()], |_, _| {});
         }
-        "content" => show(ui, CONTENT_VIEW),
-        "backup" => start_backup(ui),
-        "archive" => {
-            if arm_or(ui, "archive") {
+        "sd2-content" => show(ui, CONTENT_VIEW),
+        "sd2-backup" => start_backup(ui),
+        "sd2-archive" => {
+            if arm_or(ui, "sd2-archive") {
                 STATE.with(|st| st.borrow_mut().busy = "archive".into());
                 system(ui, vec!["storage-backup-archive".into()], |ui, out| {
                     STATE.with(|st| st.borrow_mut().busy.clear());
@@ -505,12 +536,13 @@ fn confirm(ui: &HomeWindow, view: i32, key: &str) {
             }
             render(ui);
         }
-        "restore" => load_backups(ui, choose_backup),
-        _ => {}
+        "sd2-restore" => load_backups(ui, choose_backup),
+        _ => return false,
     }
+    true
 }
 
-/* Input on pages 64 and 59 (gameui::handle_page). */
+/* Input on pages 64 and 59 (gameui::handle_page); 62 is filesui's. */
 pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
     match action {
         "menu_up" | "menu_down" => {
@@ -519,8 +551,7 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
         }
         "menu_back" => {
             if view == CONTENT_VIEW {
-                show(ui, STORAGE_VIEW);
-                render(ui);
+                crate::filesui::open_backup_at(ui, "sd2-content");
             } else {
                 navigate_settings_view(ui, 19);
             }

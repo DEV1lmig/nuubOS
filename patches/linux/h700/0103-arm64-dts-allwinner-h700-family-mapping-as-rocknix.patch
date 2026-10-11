@@ -1,0 +1,201 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] arm64: dts: allwinner: h700: family device mapping as ROCKNIX
+
+X/Y wiring fixed in the family base (PA2 = X, PA3 = Y), HDMI audio, PWM0
+backlight and PWM2 vibration motor on every board (RG35XX Pro keeps its
+haptics/LED coordinator, RG40XX-H/V and CubeXX use PI13), L3/R3 on the
+RG34XX-SP and RG40XX-H, RG40XX-H RGB enable lines left to userspace,
+RG35XX-H stick polarity and polling as the other dual-stick boards, and
+the battery-backed PCF8563 RTC of the Plus family as rtc0.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- /dev/null
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-pwm2-rumble.dtsi
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++
++/*
++ * Vibration motor on PWM2 (PH2), the route of the boards that keep PH2
++ * free (no RGB controller on UART5), as ROCKNIX describes the family.
++ */
++/ {
++	pwm-vibrator {
++		compatible = "pwm-vibrator";
++		pwms = <&pwm 2 1000000 0>;
++		pwm-names = "enable";
++		pinctrl-names = "default";
++		pinctrl-0 = <&pwm2_pin>;
++	};
++};
++
++&pwm {
++	status = "okay";
++};
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg34xx-sp.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg34xx-sp.dts
+@@ -6,6 +6,7 @@
+ 
+ #include "sun50i-h700-anbernic-rg35xx-sp.dts"
+ #include "sun50i-h700-anbernic-dual-analog-inverted.dtsi"
++#include "sun50i-h700-anbernic-thumb-buttons.dtsi"
+ 
+ / {
+ 	model = "Anbernic RG34XX-SP";
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
+@@ -174,16 +174,21 @@
+ 			linux,code = <BTN_DPAD_UP>;
+ 		};
+ 
++		/*
++		 * nuubOS: physical X (top) is PA2 and Y (left) is PA3 on every
++		 * board of the family (hardware-checked on RG35XX Pro, RG40XX-V,
++		 * RG CubeXX; ROCKNIX swaps them back in userspace for all H700).
++		 */
+ 		button-x {
+ 			label = "Action-Pad X";
+-			gpios = <&pio 0 3 GPIO_ACTIVE_LOW>; /* PA3 */
++			gpios = <&pio 0 2 GPIO_ACTIVE_LOW>; /* PA2 */
+ 			linux,input-type = <EV_KEY>;
+ 			linux,code = <BTN_NORTH>;
+ 		};
+ 
+ 		button-y {
+ 			label = "Action Pad Y";
+-			gpios = <&pio 0 2 GPIO_ACTIVE_LOW>; /* PA2 */
++			gpios = <&pio 0 3 GPIO_ACTIVE_LOW>; /* PA3 */
+ 			linux,input-type = <EV_KEY>;
+ 			linux,code = <BTN_WEST>;
+ 		};
+@@ -517,6 +522,15 @@
+ 
+ #include "sun50i-h700-anbernic-usb0-otg.dtsi"
+ #include "sun50i-h700-anbernic-tf2.dtsi"
++#include "sun50i-h700-anbernic-hdmi-audio.dtsi"
++/*
++ * nuubOS: LCD backlight on PWM0 and vibration motor on PWM2 (PH2) for the
++ * whole family, as ROCKNIX; boards that route PH2 to the RGB UART move the
++ * motor to PI13 (RG40XX-H/V, CubeXX), RG35XX Pro drives it with its
++ * haptics/LED coordinator.
++ */
++#include "sun50i-h700-anbernic-pwm0-backlight.dtsi"
++#include "sun50i-h700-anbernic-pwm2-rumble.dtsi"
+ 
+ /* nuubOS: keep the H700 family SDIO Wi-Fi host powered across s2idle. */
+ &mmc1 {
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-h.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-h.dts
+@@ -136,3 +136,20 @@
+ &usbphy {
+ 	usb1_vbus-supply = <&reg_vcc5v0_usb>;
+ };
++
++/*
++ * Same stick polarity and polling as the other dual-stick boards (ROCKNIX:
++ * X and Y inverted, RX and RY not); mainline had Y normal, RY inverted
++ * and a 60 ms poll.
++ */
++&{/adc-joystick} {
++	poll-interval = <4>;
++};
++
++&{/adc-joystick/axis@1} {
++	abs-range = <4096 0>;
++};
++
++&{/adc-joystick/axis@3} {
++	abs-range = <0 4096>;
++};
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-plus.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-plus.dts
+@@ -51,3 +51,24 @@
+ 		host-wake-gpios = <&pio 6 16 GPIO_ACTIVE_HIGH>; /* PG16 */
+ 	};
+ };
++
++/*
++ * nuubOS: battery-backed PCF8563-compatible RTC (seen answering on the
++ * RG CubeXX with a valid time; ROCKNIX describes it on the whole Plus
++ * family). It keeps time while the handheld is off, the SoC RTC does not,
++ * so it is rtc0 (hctosys/systohc); its interrupt line is not wired.
++ */
++/ {
++	aliases {
++		rtc0 = &rtc_ext;
++		rtc1 = &rtc;
++	};
++};
++
++&r_i2c {
++	rtc_ext: rtc@51 {
++		compatible = "nxp,pcf8563";
++		reg = <0x51>;
++		#clock-cells = <0>;
++	};
++};
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-pro.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-pro.dts
+@@ -95,6 +95,9 @@
+  */
+ 
+ / {
++	/* The haptics/LED coordinator below owns PWM2 and the motor. */
++	/delete-node/ pwm-vibrator;
++
+ 	haptics_led {
+ 		compatible = "anbernic,rg35xx-pro-haptics";
+ 
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg40xx-h.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg40xx-h.dts
+@@ -6,7 +6,9 @@
+ #include "sun50i-h700-anbernic-rg35xx-plus.dts"
+ #include "sun50i-h700-anbernic-uart5-ph.dtsi"
+ #include <dt-bindings/leds/common.h>
+-#include "sun50i-h700-anbernic-pwm3-rumble.dtsi"
++/* PH0 belongs to UART0: the motor is on PI13 as on the RG40XX-V (ROCKNIX). */
++#include "sun50i-h700-anbernic-pwm3-rumble-pi13.dtsi"
++#include "sun50i-h700-anbernic-thumb-buttons.dtsi"
+ #include "sun50i-h700-anbernic-dual-analog-inverted.dtsi"
+ 
+ / {
+@@ -20,13 +22,11 @@
+ 	status = "okay";
+ };
+ 
+-&{/leds} {
+-	led-rgb {
+-		function = LED_FUNCTION_KBD_BACKLIGHT;
+-		color = <LED_COLOR_ID_RGB>;
+-		gpios = <&pio 8 7 GPIO_ACTIVE_HIGH>; /* PI7 */
+-	};
+-};
++/*
++ * RGB controller: UART5 on PH2/PH3 carries the frames, PE5 powers the MCU
++ * and PI7 the LED rail; nuubOS userspace drives both enable lines through
++ * the GPIO character device, as on the RG40XX-V and CubeXX.
++ */
+ 
+ &panel {
+ 	compatible = "anbernic,rg40xx-panel", "panel-mipi-dpi-spi";
+--- /dev/null
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-thumb-buttons.dtsi
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++
++/* Stick clicks of the dual-stick boards: L3 on PE8, R3 on PE9. */
++&gpio_keys_gamepad {
++	button-thumbl {
++		label = "GPIO Thumb Left";
++		gpios = <&pio 4 8 GPIO_ACTIVE_LOW>; /* PE8 */
++		linux,input-type = <EV_KEY>;
++		linux,code = <BTN_THUMBL>;
++	};
++
++	button-thumbr {
++		label = "GPIO Thumb Right";
++		gpios = <&pio 4 9 GPIO_ACTIVE_LOW>; /* PE9 */
++		linux,input-type = <EV_KEY>;
++		linux,code = <BTN_THUMBR>;
++	};
++};

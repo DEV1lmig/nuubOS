@@ -3012,8 +3012,8 @@ fn navigate_settings_view(ui: &HomeWindow, next_view: i32) {
     if previous_view == 14 && next_view != 14 {
         set_controller_tester(ui, false);
     }
-    /* Backup & Restore's Delete hint (filesui). */
-    if previous_view == 62 && next_view != 62 {
+    /* Recovery's Delete hint on a saved backup (filesui). */
+    if previous_view == filesui::RECOVERY_VIEW && next_view != filesui::RECOVERY_VIEW {
         ui.set_settings_north_hint("".into());
     }
     if previous_view == 15 && next_view != 15 {
@@ -3044,17 +3044,11 @@ fn navigate_settings_view(ui: &HomeWindow, next_view: i32) {
         ui.invoke_focus_navigation();
     }
 
-    if matches!(next_view, 27 | 28) {
+    if next_view == 27 {
         ui.set_recovery_armed(-1);
         ui.set_recovery_stage(0);
         ui.set_recovery_notice("".into());
-        if next_view == 27 {
-            ui.set_diag_index(0);
-        } else {
-            let first = if ui.get_safe_mode() { 4 } else { 0 };
-            ui.set_recovery_index(first);
-            ui.set_recovery_scroll_offset(0);
-        }
+        ui.set_diag_index(0);
     }
 
     if previous_view != 2 && next_view == 2 {
@@ -4286,69 +4280,87 @@ fn recovery_run(ui: &HomeWindow, args: Vec<String>, ok_index: usize, ok_text: &'
                 } else {
                     ui.set_recovery_notice(tr(&ui, 507, "The recovery operation failed").into());
                 }
+                /* The Recovery page shows it as its notice. */
+                if ui.get_settings_view() == filesui::RECOVERY_VIEW {
+                    gameui::notice(&ui, ui.get_recovery_notice().to_string());
+                }
             }
         });
     });
 }
 
-/// Recovery (EPIC-049/050): rows 0 Repair, 1 Reset User Profile, 2 Factory
-/// Reset, 3 Factory Reset + Erase User Data, 4 Exit Safe Mode (safe mode only).
-/// Rows 1-3 are destructive: the first press arms the row, the next executes
-/// it; row 3 needs one more press. Any navigation disarms.
-fn handle_recovery_action(ui: &HomeWindow, action: &str) {
-    let count = if ui.get_safe_mode() { 5 } else { 4 };
-    match action {
-        "menu_up" | "menu_down" => {
-            let delta = if action == "menu_up" { -1 } else { 1 };
-            ui.set_recovery_index(move_model_selection(ui.get_recovery_index(), count, delta));
-            ui.set_recovery_armed(-1);
-            ui.set_recovery_stage(0);
-            ui.set_recovery_scroll_offset(guarded_scroll_offset(
-                ui.get_recovery_index(),
-                count,
-                ui.get_settings_list_visible_rows(),
-                ui.get_recovery_scroll_offset(),
-            ));
+/* Recovery (28, filesui), REPAIR & RESET (EPIC-049/050): Repair Settings,
+ * Reset User Profile, Factory Reset, Full Factory Reset, and Exit Safe Mode
+ * in safe mode. The resets are armed by the first press and run on the
+ * next; the full one needs one more press (recovery-stage). */
+const RECOVERY_KEYS: [&str; 5] = ["repair", "reset-user", "reset-factory", "reset-all", "safe-exit"];
+
+pub(crate) fn is_recovery_key(key: &str) -> bool {
+    RECOVERY_KEYS.contains(&key)
+}
+
+pub(crate) fn recovery_rows(ui: &HomeWindow) -> Vec<(String, GenRow, bool)> {
+    let armed = gameui::armed();
+    let prompt = |key: &str, normal: String| {
+        if armed != key {
+            normal
+        } else if key == "reset-all" && ui.get_recovery_stage() == 1 {
+            tr(ui, 517, "Press once more to also erase all saves")
+        } else {
+            tr(ui, 516, "Press again to confirm • the console restarts")
         }
-        "menu_confirm" => {
-            let row = ui.get_recovery_index();
-            match row {
-                0 => recovery_run(ui, vec!["repair".into()], 506, "Configuration checked"),
-                1 | 2 | 3 => {
-                    if ui.get_recovery_armed() != row {
-                        ui.set_recovery_armed(row);
-                        ui.set_recovery_stage(0);
-                        return;
-                    }
-                    if row == 3 && ui.get_recovery_stage() == 0 {
-                        ui.set_recovery_stage(1);
-                        return;
-                    }
-                    ui.set_recovery_armed(-1);
-                    ui.set_recovery_stage(0);
-                    let args = match row {
-                        1 => {
-                            let id = ui.get_active_user_id().to_string();
-                            if id.is_empty() {
-                                return;
-                            }
-                            vec!["reset-user".into(), id]
-                        }
-                        2 => vec!["factory-reset".into(), "settings".into()],
-                        _ => vec!["factory-reset".into(), "userdata".into()],
-                    };
-                    if row == 1 {
-                        recovery_run(ui, args, 509, "Profile reset");
-                    } else {
-                        recovery_run(ui, args, 0, "");
+    };
+    let has_user = !ui.get_active_user_id().is_empty();
+    let mut rows = vec![
+        ("repair".to_owned(), gameui::row(tr(ui, 505, "Repair Settings"), String::new(),
+            tr(ui, 512, "Finds and fixes damaged settings files. Games and saves are not touched.")), true),
+        ("reset-user".to_owned(), gameui::row(tr(ui, 508, "Reset User Profile"), String::new(),
+            prompt("reset-user", tr(ui, 513, "Resets the current user's preferences, controls and app settings. Saves are kept. The console restarts."))), has_user),
+        ("reset-factory".to_owned(), gameui::row(tr(ui, 510, "Factory Reset"), String::new(),
+            prompt("reset-factory", tr(ui, 514, "Erases users, settings, Wi-Fi networks and Bluetooth pairings, then starts the initial setup. Games and BIOS are kept."))), true),
+        ("reset-all".to_owned(), gameui::row(tr(ui, 511, "Full Factory Reset"), String::new(),
+            prompt("reset-all", tr(ui, 515, "Like Factory Reset, and also erases every user's saves, states, screenshots and app data. Games and BIOS are kept."))), true),
+    ];
+    rows[1].1.enabled = has_user;
+    if ui.get_safe_mode() {
+        rows.push(("safe-exit".to_owned(), gameui::row(tr(ui, 520, "Restart Normally"), String::new(),
+            tr(ui, 712, "Leaves safe mode and restarts with your theme and settings.")), true));
+    }
+    rows
+}
+
+/* Confirm on a REPAIR & RESET row; false when the key is not one of them. */
+pub(crate) fn recovery_confirm(ui: &HomeWindow, key: &str) -> bool {
+    match key {
+        "repair" => recovery_run(ui, vec!["repair".into()], 506, "Configuration checked"),
+        "reset-user" | "reset-factory" | "reset-all" => {
+            if gameui::armed() != key {
+                ui.set_recovery_stage(0);
+            } else if key == "reset-all" && ui.get_recovery_stage() == 0 {
+                ui.set_recovery_stage(1);
+                gameui::render(ui);
+                return true;
+            }
+            if !gameui::arm_or(ui, key) {
+                return true;
+            }
+            ui.set_recovery_stage(0);
+            gameui::render(ui);
+            match key {
+                "reset-user" => {
+                    let id = ui.get_active_user_id().to_string();
+                    if !id.is_empty() {
+                        recovery_run(ui, vec!["reset-user".into(), id], 509, "Profile reset");
                     }
                 }
-                4 if ui.get_safe_mode() => exit_safe_mode(),
-                _ => {}
+                "reset-factory" => recovery_run(ui, vec!["factory-reset".into(), "settings".into()], 0, ""),
+                _ => recovery_run(ui, vec!["factory-reset".into(), "userdata".into()], 0, ""),
             }
         }
-        _ => {}
+        "safe-exit" if ui.get_safe_mode() => exit_safe_mode(),
+        _ => return false,
     }
+    true
 }
 
 /// Leaves safe mode: clears the flag and restarts through the central
@@ -4445,8 +4457,8 @@ fn safe_confirm(ui: &HomeWindow, row: i32, settings_active: &Arc<AtomicBool>) {
 }
 
 /* System: STORAGE & SOFTWARE (0 Storage, 1 Software Update, 2 System
- * Information) | TROUBLESHOOTING (3 Diagnostics, 4 Recovery). */
-const SYSTEM_ROWS: i32 = 5;
+ * Information) | TROUBLESHOOTING (3 Diagnostics, 4 Backup, 5 Recovery). */
+const SYSTEM_ROWS: i32 = 6;
 /* Settings → Power (settings-view 69, category 5): POWER (0 Performance
  * Profile, 1 Automatic Battery Saver, 2 Sleep After) | BATTERY (3 Charge,
  * 4 Health, read-only; 5 Charge Limit when the battery driver has one) |
@@ -4580,7 +4592,7 @@ fn handle_settings_action(
         }
         return;
     }
-    if (52..=66).contains(&view) {
+    if (52..=66).contains(&view) || view == filesui::RECOVERY_VIEW {
         gameui::handle_page(ui, view, action);
         return;
     }
@@ -4622,7 +4634,7 @@ fn handle_settings_action(
             19 | 23 | gameui::GAMING_VIEW => navigate_settings_view(ui, 0),
             24 | 25 => navigate_settings_view(ui, 23),
             26 => navigate_settings_view(ui, 25),
-            27 | 28 => navigate_settings_view(ui, 19),
+            27 => navigate_settings_view(ui, 19),
             POWER_VIEW => navigate_settings_view(ui, 0),
             21 => navigate_settings_view(ui, 19),
             13 => navigate_settings_view(ui, 12),
@@ -5115,7 +5127,7 @@ fn handle_settings_action(
         },
         17 => lighting::handle_page(ui, action),
         23 => match action {"menu_up"=>{ui.set_general_index(move_model_selection(ui.get_general_index(),12,-1));update_general_scroll(ui);},"menu_down"=>{ui.set_general_index(move_model_selection(ui.get_general_index(),12,1));update_general_scroll(ui);},_ if (6..=9).contains(&ui.get_general_index())=>date_time_row_action(ui,ui.get_general_index()-6,action),"menu_confirm"=>match ui.get_general_index(){0=>open_active_user(ui),1=>open_language_dropdown(ui),2=>themes::open_choice(ui),3=>{ui.set_user_list_index(0);ui.set_user_list_scroll(0);navigate_settings_view(ui,25);},4 if ui.get_user_count()>1=>open_startup(ui),5 if ui.get_user_count()>1&&ui.get_user_login_mode().as_str()=="default"=>open_default_user(ui),10 if ui.get_automatic_time()=>{ui.set_regional_notice(tr(ui,323,"Syncing…").into());let w=ui.as_weak();thread::spawn(move||{let ok=regional_sync_command().map(|r|r.starts_with("OK")).unwrap_or(false);let _=slint::invoke_from_event_loop(move||if let Some(ui)=w.upgrade(){ui.set_regional_notice(if ok{tr(&ui,299,"Time synchronized").into()}else{tr(&ui,300,"Time synchronization failed").into()});});});},11=>open_keyboard_choice(ui),_=>{}},_=>{}},
-        24 => match action {"menu_up"|"menu_down"=>{ui.set_profile_index(move_model_selection(ui.get_profile_index(),3,if action=="menu_up"{-1}else{1}));ui.set_profile_scroll(guarded_scroll_offset(ui.get_profile_index(),3,ui.get_settings_list_visible_rows(),ui.get_profile_scroll()));},"menu_confirm" if ui.get_profile_index()==2=>filesui::open_backup(ui),"menu_confirm" if ui.get_profile_index()==0=>open_system_keyboard(ui,&tr(ui,285,"Username"),8,24,"text",ui.get_profile_edit_name().as_str()),"menu_confirm" if ui.get_profile_index()==1=>open_avatar_picker(ui),_=>{}},
+        24 => match action {"menu_up"|"menu_down"=>{ui.set_profile_index(move_model_selection(ui.get_profile_index(),2,if action=="menu_up"{-1}else{1}));ui.set_profile_scroll(guarded_scroll_offset(ui.get_profile_index(),2,ui.get_settings_list_visible_rows(),ui.get_profile_scroll()));},"menu_confirm" if ui.get_profile_index()==0=>open_system_keyboard(ui,&tr(ui,285,"Username"),8,24,"text",ui.get_profile_edit_name().as_str()),"menu_confirm" if ui.get_profile_index()==1=>open_avatar_picker(ui),_=>{}},
         25 => {let n=ui.get_user_count()+1;match action{"menu_up"=>{ui.set_user_list_index(move_model_selection(ui.get_user_list_index(),n,-1));update_user_scroll(ui);},"menu_down"=>{ui.set_user_list_index(move_model_selection(ui.get_user_list_index(),n,1));update_user_scroll(ui);},"menu_confirm" if ui.get_user_list_index()==ui.get_user_count()=>open_system_keyboard(ui,&tr(ui,296,"Enter username"),9,25,"text",""),"menu_confirm"=>open_selected_user(ui),_=>{}}},
         26 => match action {"menu_up"=>{ui.set_profile_index(move_model_selection(ui.get_profile_index(),3,-1));ui.set_user_delete_confirm(false);},"menu_down"=>{ui.set_profile_index(move_model_selection(ui.get_profile_index(),3,1));ui.set_user_delete_confirm(false);},"menu_confirm" if ui.get_profile_index()==0=>open_system_keyboard(ui,&tr(ui,285,"Username"),8,26,"text",ui.get_profile_edit_name().as_str()),"menu_confirm" if ui.get_profile_index()==1=>open_avatar_picker(ui),"menu_confirm" if ui.get_profile_index()==2&&ui.get_profile_edit_user_id()!=ui.get_active_user_id()&&ui.get_user_count()>1=>{if ui.get_user_delete_confirm(){let id=ui.get_profile_edit_user_id().to_string();ui.set_user_delete_confirm(false);navigate_settings_view(ui,users_page_view(ui));thread::spawn(move||{let _=users_command(&format!("DELETE	{}	CONFIRM",id));});}else{ui.set_user_delete_confirm(true);}},_=>{}},
         gameui::GAMING_VIEW => gameui::handle_gaming(ui, action),
@@ -5141,7 +5153,8 @@ fn handle_settings_action(
                         navigate_settings_view(ui, 21);
                     },
                     3 => navigate_settings_view(ui, 27),
-                    4 => navigate_settings_view(ui, 28),
+                    4 => filesui::open_backup(ui),
+                    5 => filesui::open_recovery(ui),
                     _ => {}
                 },
                 _ => {}
@@ -5186,7 +5199,6 @@ fn handle_settings_action(
             "menu_confirm" if ui.get_diag_index() == 0 && !ui.get_diag_busy() => create_support_bundle(ui),
             _ => {}
         },
-        28 => handle_recovery_action(ui, action),
         18 => {
             let count = DA_ROWS + ui.get_da_temp();
             let row = display_audio_row(ui);

@@ -92,12 +92,10 @@ sync_time()
         die "NTP completed but system clock is still invalid"
 
     #
-    # Persist into the hardware RTC. If the handheld does not retain RTC
-    # power across a cold shutdown, NTP remains the authoritative source.
-    #
-    #
-    # RTC persistence is optional. Some targets, such as RG35XX Pro,
-    # cannot retain RTC time while fully unpowered.
+    # Persist into rtc0: the battery-backed PCF8563 on the Plus family
+    # (platform.md), which keeps time while the handheld is off. Optional:
+    # on a board without it rtc0 is the SoC RTC, lost on power off, and NTP
+    # remains the authoritative source.
     #
     hwclock -w -u 2>/dev/null || true
 

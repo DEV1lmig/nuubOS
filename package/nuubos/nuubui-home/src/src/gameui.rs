@@ -779,7 +779,7 @@ pub(crate) fn render(ui: &HomeWindow) {
         crate::storageui::render(ui);
         return;
     }
-    if (58..=62).contains(&view) {
+    if (58..=62).contains(&view) || view == crate::filesui::RECOVERY_VIEW {
         crate::filesui::render(ui);
         return;
     }
@@ -843,6 +843,14 @@ pub(crate) fn apply_rows(ui: &HomeWindow, rows: Vec<(String, GenRow, bool)>, sec
 /* The same with a second section from row `split` (0 = none). */
 pub(crate) fn apply_rows_split(ui: &HomeWindow, rows: Vec<(String, GenRow, bool)>, section: String, split: i32,
     split_label: String) {
+    apply_rows_sections(ui, rows, section, (split, split_label), (0, String::new()), &[]);
+}
+
+/* The same with up to three sections: the second from row `split.0`, the
+ * third from `split2.0` (0 = none); `scopes` = the USER/DEVICE chip of each
+ * section when they differ (empty = the page's own). */
+pub(crate) fn apply_rows_sections(ui: &HomeWindow, rows: Vec<(String, GenRow, bool)>, section: String,
+    (split, split_label): (i32, String), (split2, split2_label): (i32, String), scopes: &[String]) {
     let count = rows.len() as i32;
     let index = ui.get_gen_index().clamp(0, (count - 1).max(0));
     STATE.with(|st| {
@@ -866,8 +874,12 @@ pub(crate) fn apply_rows_split(ui: &HomeWindow, rows: Vec<(String, GenRow, bool)
     ui.set_gen_select_label("".into());
     ui.set_gen_split(split);
     ui.set_gen_split_label(split_label.into());
+    ui.set_gen_split2(split2);
+    ui.set_gen_split2_label(split2_label.into());
+    let scopes: Vec<slint::SharedString> = scopes.iter().map(|s| s.into()).collect();
+    ui.set_gen_scopes(ModelRc::from(Rc::new(VecModel::from(scopes))));
     ui.set_gen_scroll(if split > 0 {
-        sectioned_scroll(ui, index, count, ui.get_gen_scroll(), (split, 0, 0))
+        sectioned_scroll(ui, index, count, ui.get_gen_scroll(), (split, split2, 0))
     } else {
         guarded_scroll_offset(index, count, ui.get_settings_list_visible_rows(), ui.get_gen_scroll())
     });
@@ -2053,7 +2065,7 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
         crate::storageui::handle_page(ui, view, action);
         return;
     }
-    if (58..=62).contains(&view) {
+    if (58..=62).contains(&view) || view == crate::filesui::RECOVERY_VIEW {
         crate::filesui::handle_page(ui, view, action);
         return;
     }

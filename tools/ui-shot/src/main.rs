@@ -12,6 +12,11 @@ impl Platform for P {
     }
 }
 
+fn scopes(labels: &[String]) -> ModelRc<SharedString> {
+    let v: Vec<SharedString> = labels.iter().map(|l| l.into()).collect();
+    ModelRc::from(Rc::new(VecModel::from(v)))
+}
+
 fn gen(rows: &[(&str, &str, &str, bool, i32)]) -> ModelRc<GenRow> {
     /* (title, value, detail, navigates, toggle: -1 none, 0 off, 1 on) */
     let v: Vec<GenRow> = rows
@@ -396,7 +401,7 @@ fn main() {
         })),
         ("display_audio", Box::new(|ui| { ui.set_settings_selected_index(4); ui.set_settings_view(18); ui.set_display_audio_index(2); ui.set_display_audio_scroll_offset(0); })),
         ("display_audio_sounds", Box::new(|ui| { ui.set_display_color_temperature_available(true); ui.set_display_audio_index(9); ui.set_display_audio_scroll_offset(5); })),
-        ("system", Box::new(|ui| { ui.set_display_color_temperature_available(false); ui.set_settings_selected_index(6); ui.set_settings_view(19); ui.set_system_index(4); ui.set_system_scroll_offset(0); })),
+        ("system", Box::new(|ui| { ui.set_display_color_temperature_available(false); ui.set_settings_selected_index(6); ui.set_settings_view(19); ui.set_system_index(5); ui.set_system_scroll_offset(0); })),
         ("power", Box::new(|ui| { ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(1); ui.set_power_scroll_offset(0); })),
         ("power_devices", Box::new(|ui| { ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(5); ui.set_power_scroll_offset(3); })),
         ("controllers", Box::new(|ui| { ui.set_settings_selected_index(2); ui.set_settings_view(0); })),
@@ -530,48 +535,92 @@ fn main() {
         })),
         ("diagnostics", Box::new(|ui| {
             ui.set_details_active(false); ui.set_settings_north_hint("".into()); ui.set_settings_selected_index(5); ui.set_settings_view(27); ui.set_diag_index(0); ui.set_recovery_notice("nuubos-support-20261007-101500.tar.gz".into()); })),
-        ("recovery", Box::new(|ui| { ui.set_settings_selected_index(5); ui.set_settings_view(28); ui.set_recovery_index(3); ui.set_recovery_armed(3); ui.set_recovery_stage(1); })),
-        ("recovery_safe", Box::new(|ui| { ui.set_settings_selected_index(5); ui.set_safe_mode(true); ui.set_settings_view(28); ui.set_recovery_index(4); })),
         ("safe_screen", Box::new(|ui| { ui.set_recovery_notice("".into()); ui.set_recovery_armed(-1); ui.set_recovery_stage(0); ui.set_active_user_id("u".into()); ui.set_safe_index(0); ui.set_safe_screen_open(true); })),
         ("safe_screen_armed", Box::new(|ui| { ui.set_safe_index(5); ui.set_recovery_armed(5); ui.set_recovery_stage(0); })),
         ("safe_screen_notice", Box::new(|ui| { ui.set_safe_index(2); ui.set_recovery_armed(-1); ui.set_recovery_stage(0); ui.set_recovery_notice("Support bundle saved: nuubos-support-20261008-070500.tar.gz".into()); })),
-        /* Settings → System → Storage (storageui.rs pages 64 and 59). */
+        /* Settings → System → Storage (storageui.rs page 64) and Backup &
+         * Restore (filesui.rs page 62, BACKUP TO SD2 from storageui.rs,
+         * Backup Content 59). */
         ("storage", Box::new(|ui| {
             ui.set_safe_screen_open(false); ui.set_recovery_notice("".into());
             ui.set_settings_open(true); ui.set_details_active(false);
             ui.set_settings_selected_index(6); ui.set_settings_view(64); ui.set_gen_index(2); ui.set_gen_scroll(0);
             ui.set_gen_section(s(ui, 19).to_uppercase().into()); ui.set_gen_select(true);
-            ui.set_gen_split(6); ui.set_gen_split_label(s(ui, 931).into());
+            ui.set_gen_split(0); ui.set_gen_split2(0);
             ui.set_gen_rows(gen(&[
                 (&s(ui, 912), &s(ui, 914).replace("{0}", "41.1 GB").replace("{1}", "60.2 GB"), &s(ui, 913), false, -1),
                 (&s(ui, 64), &s(ui, 914).replace("{0}", "214.3 GB").replace("{1}", "255.8 GB"), "SANDISK", false, -1),
                 (&s(ui, 924), "", "", false, -1),
                 (&s(ui, 926), "", &s(ui, 927), false, -1),
                 (&s(ui, 928), "", &s(ui, 929), false, -1),
-                (&s(ui, 625), "", "", true, -1),
-                (&s(ui, 69), "", &s(ui, 933).replace("{0}", &s(ui, 402)), false, 1),
-                (&s(ui, 936), &s(ui, 937), "", true, -1),
-                (&s(ui, 88), "", "", false, -1),
-                (&s(ui, 940), "", &s(ui, 941), true, -1)]));
+                (&s(ui, 625), "", "", true, -1)]));
         })),
-        ("storage_backup", Box::new(|ui| { ui.set_gen_index(8); ui.set_gen_scroll(5); })),
         ("storage_format_armed", Box::new(|ui| {
             ui.set_gen_index(4); ui.set_gen_scroll(0);
             let rows = ui.get_gen_rows();
             if let Some(mut r) = rows.row_data(4) { r.armed = true; r.detail = s(ui, 930).into(); rows.set_row_data(4, r); }
         })),
         ("storage_empty", Box::new(|ui| {
-            ui.set_gen_index(1); ui.set_gen_scroll(0); ui.set_gen_split(3);
+            ui.set_gen_index(1); ui.set_gen_scroll(0);
             ui.set_gen_rows(gen(&[
                 (&s(ui, 912), &s(ui, 914).replace("{0}", "41.1 GB").replace("{1}", "60.2 GB"), &s(ui, 913), false, -1),
                 (&s(ui, 64), &s(ui, 916), "", false, -1),
-                (&s(ui, 625), "", "", true, -1),
-                (&s(ui, 69), "", &s(ui, 935), false, 1),
+                (&s(ui, 625), "", "", true, -1)]));
+        })),
+        ("backup", Box::new(|ui| {
+            ui.set_settings_view(62); ui.set_gen_index(0); ui.set_gen_scroll(0);
+            ui.set_gen_scopes(scopes(&[s(ui, 313), s(ui, 312)]));
+            ui.set_gen_section(s(ui, 931).into());
+            ui.set_gen_split(3); ui.set_gen_split_label(s(ui, 981).into()); ui.set_gen_split2(0);
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 69), "", &s(ui, 933).replace("{0}", &s(ui, 402)), false, 1),
                 (&s(ui, 936), &s(ui, 937), "", true, -1),
-                (&s(ui, 88), "", "", false, -1)]));
+                (&s(ui, 88), "", "", false, -1),
+                (&s(ui, 632), "", "", false, 0),
+                (&s(ui, 633), "", "", false, 0),
+                (&s(ui, 631), "", "", false, -1)]));
+        })),
+        ("backup_profile", Box::new(|ui| { ui.set_gen_index(4); ui.set_gen_scroll(2); })),
+        /* Recovery (filesui.rs page 28): SD2 | saved profile backups |
+         * REPAIR & RESET (main.rs recovery_rows). */
+        ("recovery", Box::new(|ui| {
+            ui.set_settings_view(28); ui.set_gen_index(1); ui.set_gen_scroll(0);
+            ui.set_gen_scopes(scopes(&[s(ui, 313), s(ui, 312), s(ui, 313)]));
+            ui.set_gen_section(s(ui, 931).into());
+            ui.set_gen_split(1); ui.set_gen_split_label(s(ui, 981).into());
+            ui.set_gen_split2(3); ui.set_gen_split2_label(s(ui, 983).into());
+            ui.set_gen_select_label(s(ui, 635).into()); ui.set_settings_north_hint(s(ui, 618).into());
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 940), "", &s(ui, 941), true, -1),
+                ("Baf • 2026-10-09 21:14:02", "312 MB", &s(ui, 636), false, -1),
+                ("Baf • 2026-10-02 18:40:11", "298 MB", &s(ui, 636), false, -1),
+                (&s(ui, 505), "", &s(ui, 512), false, -1),
+                (&s(ui, 508), "", &s(ui, 513), false, -1),
+                (&s(ui, 510), "", &s(ui, 514), false, -1),
+                (&s(ui, 511), "", &s(ui, 515), false, -1)]));
+        })),
+        ("recovery_reset_armed", Box::new(|ui| {
+            ui.set_gen_select_label("".into()); ui.set_settings_north_hint("".into());
+            ui.set_gen_index(6); ui.set_gen_scroll(3);
+            let rows = ui.get_gen_rows();
+            if let Some(mut r) = rows.row_data(6) { r.armed = true; r.detail = s(ui, 517).into(); rows.set_row_data(6, r); }
+        })),
+        ("recovery_no_sd2", Box::new(|ui| {
+            ui.set_gen_index(0); ui.set_gen_scroll(0);
+            ui.set_gen_scopes(scopes(&[s(ui, 312), s(ui, 313)]));
+            ui.set_gen_section(s(ui, 981).into());
+            ui.set_gen_split(1); ui.set_gen_split_label(s(ui, 983).into()); ui.set_gen_split2(0);
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 634), "", "", false, -1),
+                (&s(ui, 505), "", &s(ui, 512), false, -1),
+                (&s(ui, 508), "", &s(ui, 513), false, -1),
+                (&s(ui, 510), "", &s(ui, 514), false, -1),
+                (&s(ui, 511), "", &s(ui, 515), false, -1),
+                (&s(ui, 520), "", &s(ui, 712), false, -1)]));
         })),
         ("storage_content", Box::new(|ui| {
-            ui.set_settings_view(59); ui.set_gen_index(6); ui.set_gen_scroll(0); ui.set_gen_split(0);
+            ui.set_gen_select_label("".into()); ui.set_settings_north_hint("".into()); ui.set_gen_scopes(scopes(&[]));
+            ui.set_settings_view(59); ui.set_gen_index(6); ui.set_gen_scroll(0); ui.set_gen_split(0); ui.set_gen_split2(0);
             ui.set_gen_section(s(ui, 936).to_uppercase().into());
             ui.set_gen_rows(gen(&[
                 (&s(ui, 945), "", &s(ui, 946), false, 1),
@@ -580,7 +629,7 @@ fn main() {
                 (&s(ui, 576), "", "", false, 1), (&s(ui, 953), "", &s(ui, 954), false, 0)]));
         })),
         ("storage_prompt", Box::new(|ui| {
-            ui.set_settings_view(64); ui.set_gen_index(0); ui.set_gen_split(6);
+            ui.set_settings_view(64); ui.set_gen_index(0); ui.set_gen_split(0);
             ui.set_gen_rows(gen(&[
                 (&s(ui, 912), &s(ui, 914).replace("{0}", "41.1 GB").replace("{1}", "60.2 GB"), &s(ui, 913), false, -1),
                 (&s(ui, 64), &s(ui, 914).replace("{0}", "63.8 GB").replace("{1}", "63.9 GB"), "SD64", false, -1),

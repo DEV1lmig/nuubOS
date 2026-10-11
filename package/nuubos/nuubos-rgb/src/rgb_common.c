@@ -23,11 +23,35 @@
  * order: nuubos-rgbd maps logical frames (zone by zone, position by
  * position) through it, so effects never depend on the wiring order.
  * Check a ring with `nuubos-rgbctl locate N`.
+ *
+ * RG40XX-H: same MCU protocol and 16-LED layout as the CubeXX (ROCKNIX
+ * drives both with one frame: LEDs 0-7 right ring, 8-15 left ring); the
+ * ring directions are copied from the CubeXX, not hardware-checked.
  */
 static const struct nuubos_rgb_topology topologies[] = {
 	{
 		.device_id = "rgcubexx",
 		.compatible = "anbernic,rgcubexx",
+		.led_count = 16,
+		.zone_count = 2,
+		.zones = {
+			{
+				.name = "left-stick",
+				.type = NUUBOS_RGB_ZONE_RING,
+				.led_count = 8,
+				.led_indexes = { 15, 14, 13, 12, 11, 10, 9, 8 },
+			},
+			{
+				.name = "right-stick",
+				.type = NUUBOS_RGB_ZONE_RING,
+				.led_count = 8,
+				.led_indexes = { 1, 0, 7, 6, 5, 4, 3, 2 },
+			},
+		},
+	},
+	{
+		.device_id = "rg40xx-h",
+		.compatible = "anbernic,rg40xx-h",
 		.led_count = 16,
 		.zone_count = 2,
 		.zones = {

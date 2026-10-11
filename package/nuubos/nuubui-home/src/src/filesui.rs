@@ -5,15 +5,21 @@
  *   58 Files (EPIC-031)            nuubos-filesctl; copy/move are jobs
  *   60 Network Shares (EPIC-036)   nuubos-sharesctl
  *   61 Removable Media (EPIC-032)  nuubos-mediactl (Settings > Storage)
- *   62 Backup & Restore (EPIC-035) nuubos-backupctl jobs (Settings > Profile)
+ *   62 Backup (EPIC-035)           Settings > System > Troubleshooting:
+ *                                  BACKUP TO SD2 (storageui), then this
+ *                                  profile's nuubos-backupctl backup
+ *   28 Recovery (EPIC-035/049/050) next to it: Restore from SD2
+ *                                  (storageui), this profile's saved
+ *                                  backups, REPAIR & RESET (main.rs,
+ *                                  nuubos-recoveryctl)
  *
  * 58 and 60 are the Files shell (the Details shell with "Files" as title,
- * its rail shows the location); 61 and 62 are Settings pages. No file
+ * its rail shows the location); 61, 62 and 28 are Settings pages. No file
  * policy lives here: paths are checked by nuubos-filesctl.
  */
 
 use crate::gameui::{
-    apply_rows, apply_rows_split, arm_or, armed, armed_detail, focused_key, move_selection, nav, notice, row, run_tool,
+    apply_rows, apply_rows_sections, arm_or, armed, armed_detail, focused_key, move_selection, nav, notice, row, run_tool,
     show, tool_then, toggle,
 };
 use crate::{handle_settings_action, navigate_settings_view, open_settings_choice, open_system_keyboard,
@@ -37,6 +43,9 @@ const SHARESCTL: &str = "/usr/sbin/nuubos-sharesctl";
 const BACKUPCTL: &str = "/usr/bin/nuubos-backupctl";
 const JOBCTL: &str = "/usr/bin/nuubos-jobctl";
 const INTERNAL_BACKUPS: &str = "/userdata/backups";
+
+pub const BACKUP_VIEW: i32 = 62;
+pub const RECOVERY_VIEW: i32 = 28;
 
 /* The Files shell owns Home input. */
 pub static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -164,12 +173,16 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                         format!("{} • {}", tr(ui, 626, "Eject"), human(*total)))), true));
             }
         }
-        62 => {
+        BACKUP_VIEW => {
+            rows.extend(crate::storageui::backup_rows(ui));
             rows.push(("shots".into(), toggle(tr(ui, 632, "Include Screenshots"), st.with_screenshots, String::new()), true));
             rows.push(("appdata".into(), toggle(tr(ui, 633, "Include App Data"), st.with_appdata, String::new()), true));
             let mut b = row(tr(ui, 631, "Back Up Now"), if st.busy { tr(ui, 91, "Running") } else { String::new() }, String::new());
             b.enabled = !st.busy;
             rows.push(("backup".into(), b, !st.busy));
+        }
+        RECOVERY_VIEW => {
+            rows.extend(crate::storageui::restore_rows(ui));
             if st.backups.is_empty() {
                 let mut r = row(tr(ui, 634, "No backups found"), String::new(), String::new());
                 r.enabled = false;
@@ -182,6 +195,7 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                         tr(ui, 636, "Replaces this profile's saves, save states and settings. ROMs and BIOS are not affected."))),
                     !st.busy));
             }
+            rows.extend(crate::recovery_rows(ui));
         }
         _ => {}
     }
@@ -192,9 +206,32 @@ fn backup_title(user: &str, created: &str) -> String {
     format!("{} • {}", user, created.replace('T', " ").trim_end_matches('Z'))
 }
 
-/* Page 62: Back Up Now and its options, then the saved backups as their
- * own section (rows from BACKUP_LIST_START). */
-const BACKUP_LIST_START: i32 = 3;
+/* Backup: BACKUP TO SD2 (storageui, only with a card slot), then PROFILE
+ * BACKUP. Recovery: BACKUP TO SD2 (Restore from SD2, only with a backup on
+ * the card), PROFILE BACKUP (the saved backups), REPAIR & RESET. */
+fn sections(ui: &HomeWindow, view: i32, rows: Vec<(String, GenRow, bool)>) {
+    let (user, device) = (tr(ui, 312, "USER"), tr(ui, 313, "DEVICE"));
+    let sd2 = tr(ui, 931, "BACKUP TO SD2");
+    let profile = tr(ui, 981, "PROFILE BACKUP");
+    let first = |key: fn(&str) -> bool| rows.iter().position(|r| key(&r.0)).unwrap_or(rows.len()) as i32;
+    if view == BACKUP_VIEW {
+        let n = first(|k| k == "shots");
+        if n > 0 {
+            apply_rows_sections(ui, rows, sd2, (n, profile), (0, String::new()), &[device, user]);
+        } else {
+            apply_rows_sections(ui, rows, profile, (0, String::new()), (0, String::new()), &[user]);
+        }
+        return;
+    }
+    let reset = tr(ui, 983, "REPAIR & RESET");
+    let n1 = first(|k| k != "sd2-restore");
+    let n2 = first(crate::is_recovery_key);
+    if n1 > 0 {
+        apply_rows_sections(ui, rows, sd2, (n1, profile), (n2, reset), &[device.clone(), user, device]);
+    } else {
+        apply_rows_sections(ui, rows, profile, (n2, reset), (0, String::new()), &[user, device]);
+    }
+}
 
 pub(crate) fn render(ui: &HomeWindow) {
     let view = ui.get_settings_view();
@@ -205,7 +242,7 @@ pub(crate) fn render(ui: &HomeWindow) {
             58 => st.cwd.rsplit('/').next().unwrap_or("").to_owned(),
             60 => tr(ui, 611, "Network Shares"),
             61 => tr(ui, 19, "Storage"),
-            _ => tr(ui, 630, "Backup & Restore"),
+            _ => String::new(),
         };
         (build_rows(ui, &st, view), section)
     });
@@ -216,8 +253,10 @@ pub(crate) fn render(ui: &HomeWindow) {
             ui.set_gen_index(i as i32);
         }
     }
-    if view == 62 {
-        apply_rows_split(ui, rows, section, BACKUP_LIST_START, tr(ui, 736, "Saved Backups"));
+    if view == BACKUP_VIEW {
+        sections(ui, view, rows);
+    } else if view == RECOVERY_VIEW {
+        sections(ui, view, rows);
         /* On a saved backup: Confirm restores, North deletes. */
         let on_backup = focused_key(ui).starts_with("restore:") && !STATE.with(|st| st.borrow().busy);
         if on_backup {
@@ -524,12 +563,31 @@ fn refresh_media(ui: &HomeWindow) {
 }
 
 /* ---------------------------------------------------------------- */
-/* Backup & Restore (Settings > Profile)                            */
+/* Backup and Recovery (Settings > System)                          */
 /* ---------------------------------------------------------------- */
 
 pub fn open_backup(ui: &HomeWindow) {
-    STATE.with(|st| st.borrow_mut().busy = false);
-    show(ui, 62);
+    open_backup_at(ui, "");
+}
+
+/* With the focus on the row `key` (back from Backup Content). */
+pub fn open_backup_at(ui: &HomeWindow, key: &str) {
+    open_page(ui, BACKUP_VIEW, key);
+}
+
+/* Recovery; in safe mode on Exit Safe Mode. */
+pub fn open_recovery(ui: &HomeWindow) {
+    open_page(ui, RECOVERY_VIEW, if ui.get_safe_mode() { "safe-exit" } else { "" });
+}
+
+fn open_page(ui: &HomeWindow, view: i32, key: &str) {
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.busy = false;
+        st.focused = key.to_owned();
+    });
+    ui.set_recovery_stage(0);
+    show(ui, view);
     refresh_backups(ui);
 }
 
@@ -614,12 +672,12 @@ fn start_restore(ui: &HomeWindow, file: String) {
     });
 }
 
-/* Input on Settings pages 61 and 62 (gameui::handle_page). */
+/* Input on Settings pages 61, 62 and 28 (gameui::handle_page). */
 pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
     match action {
         "menu_up" | "menu_down" => move_selection(ui, action),
-        "menu_back" => if view == 61 { crate::storageui::open(ui) } else { navigate_settings_view(ui, 24) },
-        "face_north" if view == 62 && !STATE.with(|st| st.borrow().busy) => {
+        "menu_back" => if view == 61 { crate::storageui::open(ui) } else { navigate_settings_view(ui, 19) },
+        "face_north" if view == RECOVERY_VIEW && !STATE.with(|st| st.borrow().busy) => {
             let key = focused_key(ui);
             let Some(path) = key.strip_prefix("restore:") else { return };
             let title = STATE.with(|st| st.borrow().backups.iter().find(|b| b.0 == path)
@@ -629,6 +687,10 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
         }
         "menu_confirm" => {
             let key = focused_key(ui);
+            if (view == BACKUP_VIEW || view == RECOVERY_VIEW)
+                && (crate::storageui::backup_confirm(ui, &key) || crate::recovery_confirm(ui, &key)) {
+                return;
+            }
             match (view, key.as_str()) {
                 (61, k) if k.starts_with("vol:") => {
                     if arm_or(ui, k) {
@@ -639,15 +701,15 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
                         });
                     }
                 }
-                (62, "shots") => {
+                (BACKUP_VIEW, "shots") => {
                     STATE.with(|st| { let mut st = st.borrow_mut(); st.with_screenshots = !st.with_screenshots; });
                     render(ui);
                 }
-                (62, "appdata") => {
+                (BACKUP_VIEW, "appdata") => {
                     STATE.with(|st| { let mut st = st.borrow_mut(); st.with_appdata = !st.with_appdata; });
                     render(ui);
                 }
-                (62, "backup") => {
+                (BACKUP_VIEW, "backup") => {
                     /* Fresh volume list for the destination choice. */
                     tool_then(ui, MEDIACTL, vec!["list".into()], None, |ui, out| {
                         let volumes = parse_kv_lines(&out, "volume")
@@ -659,7 +721,7 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
                         backup_destinations(ui);
                     });
                 }
-                (62, k) if k.starts_with("restore:") => {
+                (RECOVERY_VIEW, k) if k.starts_with("restore:") => {
                     if arm_or(ui, k) {
                         start_restore(ui, k[8..].to_owned());
                     }
