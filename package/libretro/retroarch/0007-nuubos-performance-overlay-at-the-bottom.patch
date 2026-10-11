@@ -1,0 +1,161 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS performance overlay at the bottom, wrapped
+
+The OSD_TEXT line (patch 0004) moves to the bottom left of the screen
+and wraps between its items (three spaces apart) onto as many lines as
+the screen width needs, measured with the OSD font; extra lines grow
+upwards. At the top it ran off the right edge of narrow screens (RG
+CubeXX 720x720 at 1.125 density) and covered the top of the game. gl2
+draws a dark one pixel outline under the text so it stays readable on
+light pictures.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+
+--- a/gfx/video_driver.c
++++ b/gfx/video_driver.c
+@@ -487,6 +487,79 @@
+    strlcpy(nuubos_osd_text, text ? text : "", sizeof(nuubos_osd_text));
+ }
+ 
++/* The overlay text wrapped to the screen width: items are separated by
++ * three spaces and a line breaks only between items. Redone only when
++ * the text, the screen or the scale changes. Returns the line count. */
++static unsigned nuubos_osd_wrap(char *out, size_t size,
++      unsigned width, float scale)
++{
++   static char last_text[256];
++   static char last_out[320];
++   static unsigned last_width;
++   static float last_scale;
++   static unsigned last_lines;
++   const char *item = nuubos_osd_text;
++   size_t len       = 0;
++   unsigned lines   = 1;
++   int max          = (int)(width * (1.0f - 2.0f * 0.012f));
++
++   if (     last_width == width && last_scale == scale
++         && !strcmp(last_text, nuubos_osd_text))
++   {
++      strlcpy(out, last_out, size);
++      return last_lines;
++   }
++   out[0]       = '\0';
++   while (*item && len + 4 < size)
++   {
++      const char *sep  = strstr(item, "   ");
++      size_t item_len  = sep ? (size_t)(sep - item) : strlen(item);
++      const char *line = strrchr(out, '\n');
++      size_t line_len  = len - (line ? (size_t)(line + 1 - out) : 0);
++
++      if (item_len)
++      {
++         if (len + item_len + 4 >= size)
++            break;
++         if (line_len)
++         {
++            /* Join with the separator when the line still fits. */
++            memcpy(out + len, "   ", 3);
++            memcpy(out + len + 3, item, item_len);
++            out[len + 3 + item_len] = '\0';
++            if (font_driver_get_message_width(NULL, line ? line + 1 : out,
++                     line_len + 3 + item_len, scale) > max)
++            {
++               out[len] = '\n';
++               memcpy(out + len + 1, item, item_len);
++               out[len + 1 + item_len] = '\0';
++               len += 1 + item_len;
++               lines++;
++            }
++            else
++               len += 3 + item_len;
++         }
++         else
++         {
++            memcpy(out + len, item, item_len);
++            len += item_len;
++            out[len] = '\0';
++         }
++      }
++      if (!sep)
++         break;
++      item = sep + 3;
++      while (*item == ' ')
++         item++;
++   }
++   strlcpy(last_text, nuubos_osd_text, sizeof(last_text));
++   strlcpy(last_out, out, sizeof(last_out));
++   last_width = width;
++   last_scale = scale;
++   last_lines = lines;
++   return lines;
++}
++
+ video_driver_state_t *video_state_get_ptr(void)
+ {
+    return &video_driver_st;
+@@ -4356,26 +4429,30 @@
+       }
+    }
+ 
+-   /* nuubOS performance overlay: white text with a dark shadow at the top
+-    * left, about 15 px high on a 480-line screen (scaled with the output),
+-    * through the statistics path (RetroArch's own statistics win). */
++   /* nuubOS performance overlay: white text with a dark shadow at the
++    * bottom left, about 15 px high on a 480-line screen (scaled with the
++    * output), wrapped between items onto as many lines as the width needs
++    * (they grow upwards), through the statistics path (RetroArch's own
++    * statistics win). At the bottom it stays clear of a picture cropped at
++    * the sides and of the top of the game (user request 2026-10-11). */
+    if (     render_frame
+          && !video_info.statistics_show
+          && nuubos_osd_text[0])
+    {
++      float scale    = ((float)video_info.height / 480.0f)
++            * (15.0f / video_info.font_size);
++      unsigned lines = nuubos_osd_wrap(video_info.stat_text,
++            sizeof(video_info.stat_text), video_info.width, scale);
+       video_info.osd_stat_params.x           = 0.012f;
+-      video_info.osd_stat_params.y           = 1.0f - 20.0f / 480.0f;
++      video_info.osd_stat_params.y           = (8.0f + 19.0f * (lines - 1)) / 480.0f;
+       video_info.osd_stat_params.text_align  = TEXT_ALIGN_LEFT;
+-      video_info.osd_stat_params.scale       = ((float)video_info.height / 480.0f)
+-            * (15.0f / video_info.font_size);
++      video_info.osd_stat_params.scale       = scale;
+       video_info.osd_stat_params.full_screen = true;
+       video_info.osd_stat_params.drop_x      = 1;
+       video_info.osd_stat_params.drop_y      = -1;
+       video_info.osd_stat_params.drop_mod    = 0.0f;
+       video_info.osd_stat_params.drop_alpha  = 1.0f;
+       video_info.osd_stat_params.color       = COLOR_ABGR(255, 255, 255, 255);
+-      strlcpy(video_info.stat_text, nuubos_osd_text,
+-            sizeof(video_info.stat_text));
+       video_info.statistics_show             = true;
+    }
+ 
+--- a/gfx/drivers/gl2.c
++++ b/gfx/drivers/gl2.c
+@@ -3630,6 +3630,24 @@
+ #endif
+          glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack[4]);
+          glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
++         {
++            /* nuubOS: a dark one pixel outline (four offset copies) keeps
++             * the performance overlay readable on light game pictures. */
++            static const float outline[4][2] = {
++               { -1.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, -1.0f }, { 0.0f, 1.0f } };
++            struct font_params dark = *osd_params;
++            unsigned i;
++            dark.color   = COLOR_ABGR(0, 0, 0, 255);
++            dark.drop_x  = 0;
++            dark.drop_y  = 0;
++            for (i = 0; i < 4; i++)
++            {
++               dark.x = osd_params->x + outline[i][0] / (float)width;
++               dark.y = osd_params->y + outline[i][1] / (float)height;
++               font_driver_render_msg(gl, stat_text,
++                     (const struct font_params*)&dark, NULL);
++            }
++         }
+          font_driver_render_msg(gl, stat_text,
+                (const struct font_params*)osd_params, NULL);
+          glPixelStorei(GL_UNPACK_ALIGNMENT, unpack[4]);

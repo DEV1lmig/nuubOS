@@ -180,12 +180,18 @@ try:
         return open(t + '/args').read()
     def idle_state():
         return wait(lambda: 'state_busy=0' in cmd('emud.sock', 'STATUS'))
+    sdir = '%s/users/%s/states/snes/' % (ud, user)
+    # The quit above saved into a rotating slot: start from no states.
+    for f in os.listdir(sdir): os.remove(sdir + f)
     check('launch new', launch('new'))
     check('panel renders native', wait(lambda: open(t + '/render-height').read() == '\n'))
     sess = session()
     check('integer scaling', 'aspect_ratio_index = "22"' in sess and 'video_scale_integer = "true"' in sess
           and 'video_viewport_bias_y = "0.000000"' in sess and 'video_shader_enable = "true"' in sess)
-    check('auto save, no auto load', 'savestate_auto_save = "true"' in sess and 'savestate_auto_load = "false"' in sess)
+    # Slot rotation (default): emud saves the next slot at quit, not RetroArch.
+    check('no auto save with rotation, no auto load', 'savestate_auto_save = "false"' in sess and 'savestate_auto_load = "false"' in sess)
+    check('RetroArch notifications off', 'notification_show_save_state = "false"' in sess
+          and 'notification_show_screenshot_flash = "2"' in sess and 'menu_show_load_content_animation = "false"' in sess)
     check('no entry slot, sharp shader', '--entryslot' not in args()
           and '--set-shader %s/shaders/global.glslp -L' % emu_share in args())
     slots = []
@@ -196,16 +202,36 @@ try:
     check('rotation wraps', slots == ['slot=0', 'slot=1', 'slot=2', 'slot=0'])
     sts = cmd('emud.sock', 'STATES')
     check('states listed', 'slots=3\n' in sts and all('state=%d\t' % n in sts for n in (0, 1, 2)))
-    check('quit saves auto state', cmd('emud.sock', 'QUIT').startswith('OK'))
+    before = os.path.getmtime(sdir + 'Mario.state1')
+    seen = len(notes)
+    time.sleep(1.1)  # resume compares state mtimes in seconds
+    check('quit accepted', cmd('emud.sock', 'QUIT').startswith('OK'))
     check('idle', wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS')))
-    sdir = '%s/users/%s/states/snes/' % (ud, user)
+    check('quit saved the next slot', os.path.getmtime(sdir + 'Mario.state1') > before
+          and not os.path.exists(sdir + 'Mario.state.auto'))
+    check('quit save quiet', not any('game.state.saved' in n for n in notes[seen:]))
+
+    # Sleep with rotation: the next slot, the game keeps running.
+    check('launch resume', launch())
+    check('resume from the quit slot', '--entryslot 1 ' in args())
+    before = os.path.getmtime(sdir + 'Mario.state2')
+    time.sleep(1.1)
+    check('pre-power sleep', cmd('emud.sock', 'PRE_POWER\tsleep').startswith('OK'))
+    check('sleep saved the next slot', os.path.getmtime(sdir + 'Mario.state2') > before
+          and 'state=running' in cmd('emud.sock', 'STATUS'))
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+
+    # Without rotation RetroArch keeps the automatic state.
+    check('rotation off', cmd('emud.sock', 'SET\tslot_rotation\t0').startswith('OK'))
+    check('launch, rotation off', launch())
+    check('auto save without rotation', 'savestate_auto_save = "true"' in session())
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
     check('auto state written', os.path.exists(sdir + 'Mario.state.auto'))
     check('states by game', 'state=-1\t' in cmd('emud.sock', 'STATES\t' + game))
-
-    # Resume: the most recent state, automatic or numbered.
-    check('launch resume', launch())
+    check('launch resume auto', launch())
     check('resume from auto', 'savestate_auto_load = "true"' in session() and '--entryslot' not in args())
     cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    cmd('emud.sock', 'SET\tslot_rotation\t1')
     future = time.time() + 100
     os.utime(sdir + 'Mario.state1', (future, future))
     check('launch resume slot', launch())
@@ -226,7 +252,7 @@ try:
     check('bezel shader', 'bezel.glsl' in glslp and 'CRT = "1"' in glslp and 'BEZEL_STYLE = "0"' in glslp
           and 'aspect_ratio_index = "24"' in session()
           and 'textures = "SYSICON;BRAND"' in glslp and 'HAS_ICON = "0"' in glslp
-          and 'bezel-wordmark.png' in glslp)
+          and 'bezel-logo.png' in glslp)
     cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
 finally:
     for p in procs: p.terminate(); p.wait()

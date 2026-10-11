@@ -2,49 +2,48 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
 <title>nuubOS</title>
-<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header><span class="brand">nuub<b>OS</b></span><span id="device"></span></header>
-<main>
-  <section>
-    <h2 data-t="device"></h2>
-    <dl class="facts">
-      <dt data-t="version"></dt><dd id="version">–</dd>
-      <dt data-t="games"></dt><dd id="games">–</dd>
-      <dt data-t="storage"></dt><dd id="storage">–</dd>
-    </dl>
-    <button id="scan" data-t="scan"></button>
-  </section>
+<div id="login" hidden>
+  <form class="box" id="login-form" autocomplete="on">
+    <div class="brand"><span class="brand-mark"></span></div>
+    <div class="tag" id="login-tag"></div>
+    <div class="field">
+      <label for="login-user" id="login-user-label"></label>
+      <input class="input" id="login-user" name="username" autocomplete="username" value="root" spellcheck="false" autocapitalize="off">
+    </div>
+    <div class="field">
+      <label for="login-password" id="login-password-label"></label>
+      <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="off">
+    </div>
+    <div class="err" id="login-error" role="alert"></div>
+    <button class="btn" id="login-submit" type="submit"></button>
+    <div class="note" id="login-note"></div>
+  </form>
+</div>
 
-  <section>
-    <h2 data-t="upload_roms"></h2>
-    <label><span data-t="system"></span> <select id="upload-system"></select></label>
-    <p class="hint" id="upload-exts"></p>
-    <input type="file" id="upload-files" multiple>
-    <button id="upload" data-t="upload"></button>
-    <progress id="upload-progress" max="100" value="0" hidden></progress>
-    <p id="upload-status" class="status"></p>
-  </section>
+<header id="top" hidden>
+  <div class="brand"><button class="back only-narrow" id="menu-button" type="button"></button><span class="brand-mark"></span><span class="avatar" id="top-avatar"></span></div>
+  <div id="clock"></div>
+  <div class="status" id="top-status"></div>
+</header>
 
-  <section>
-    <h2 data-t="library"></h2>
-    <label><span data-t="system"></span> <select id="library-system"></select></label>
-    <ul id="library-games" class="list"></ul>
-  </section>
-
-  <section>
-    <h2 data-t="bios"></h2>
-    <p class="hint" data-t="bios_hint"></p>
-    <label><span data-t="bios_file"></span> <select id="bios-target"></select></label>
-    <input type="file" id="bios-file">
-    <button id="bios-upload" data-t="upload"></button>
-    <p id="bios-status" class="status"></p>
-    <table id="bios-table"></table>
-  </section>
+<main id="app" hidden>
+  <nav id="railwrap"><h1 id="rail-title"></h1><div id="rail" role="navigation"></div></nav>
+  <section id="pane"><div id="page"></div></section>
 </main>
+
+<footer id="hints" hidden></footer>
+<div id="toasts" aria-live="polite"></div>
+<div id="scrim" hidden></div>
+<script src="i18n.js"></script>
 <script src="app.js"></script>
+<script src="pages.js"></script>
 </body>
 </html>

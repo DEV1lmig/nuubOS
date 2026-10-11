@@ -61,12 +61,30 @@ fn swatch(hex: &str) -> Color {
 fn apply(ui: &HomeWindow, state: State) {
     let (supported, effect, color, brightness, speed, signals, _active) = state;
     ui.set_lighting_supported(supported);
+    if !supported && ui.get_controllers_menu_index() == 3 {
+        ui.set_controllers_menu_index(2);
+    }
     ui.set_lighting_swatch(swatch(&color));
     ui.set_lighting_effect(effect.into());
     ui.set_lighting_color(color.into());
     ui.set_lighting_brightness(brightness);
     ui.set_lighting_speed(speed.into());
     ui.set_lighting_signals(signals as i32);
+}
+
+/// Lifecycle shape of the LEDs, started when nuubUI starts the matching
+/// splash animation so both run in step ("boot").
+pub fn lifecycle(phase: &'static str) {
+    thread::spawn(move || {
+        let result = (|| -> zbus::Result<()> {
+            let connection = zbus::blocking::Connection::system()?;
+            proxy(&connection)?.call_method("Lifecycle", &(phase,))?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("home: lighting lifecycle {phase} failed={error}");
+        }
+    });
 }
 
 pub fn refresh(ui: &HomeWindow) {

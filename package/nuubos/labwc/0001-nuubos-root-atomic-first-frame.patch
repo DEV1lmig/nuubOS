@@ -1,138 +1,55 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: nuubOS <nuubos@localhost>
-Date: Sun, 28 Sep 2026 18:10:00 +0200
-Subject: [PATCH] output: render boot raster from dedicated root scene tree
+Date: Sat, 10 Oct 2026 16:00:00 +0200
+Subject: [PATCH] output: render the nuubOS boot raster in the first frame
 
-The v0.7.5 experiment placed plain scene rectangles inside Labwc's
-background layer-shell tree. Labwc intentionally treats children of that
-tree as layer_surface nodes and asserts that node->data is populated.
-
-Keep Labwc's mandatory first modeset commit, but render the matching nuubOS
-raster in a dedicated direct child of the scene root. The tree is lowered
-below Labwc's normal layer/view trees and therefore acts only as a
-compositor-owned boot fallback.
+Keep Labwc's mandatory first modeset commit, but give it the nuubOS boot
+splash so the kernel splash -> compositor -> nuubUI handoff never jumps.
+The raster comes from nuubos-splash-render.h (copied into src/ by
+labwc.mk), the same renderer the kernel splash uses and nuubUI ports
+pixel for pixel; it is one scene buffer in a dedicated direct child of
+the scene root, lowered below Labwc's normal layer/view trees.
 
 ---
 --- a/src/output.c
 +++ b/src/output.c
-@@ -11,6 +11,7 @@
+@@ -11,6 +11,8 @@
  #include <assert.h>
  #include <drm_fourcc.h>
  #include <glib.h>
++#include <stdlib.h>
 +#include <string.h>
  #include <strings.h>
  #include <wlr/backend/wayland.h>
  #include <wlr/config.h>
-@@ -520,6 +521,242 @@
+@@ -29,6 +31,7 @@
+ #include "common/scene-helpers.h"
+ #include "common/string-helpers.h"
+ #include "config/rcxml.h"
++#include "buffer.h"
+ #include "labwc.h"
+ #include "layers.h"
+ #include "node.h"
+@@ -36,6 +39,9 @@
+ #include "output-virtual.h"
+ #include "regions.h"
+ #include "session-lock.h"
++/* Copied from nuubos-splash by labwc.mk (PRE_BUILD): the same raster as
++ * the kernel splash and nuubUI. */
++#include "nuubos-splash-render.h"
+ #include "view.h"
+ #include "xwayland.h"
+ 
+@@ -520,6 +526,77 @@
  	return wlr_output_test_state(wlr_output, state);
  }
  
-+
-+static const char *
-+nuubos_glyph_rows(char c)
-+{
-+	switch (c) {
-+	case 'A': return " ### " "#   #" "#   #" "#####" "#   #" "#   #" "#   #";
-+	case 'B': return "#### " "#   #" "#   #" "#### " "#   #" "#   #" "#### ";
-+	case 'O': return " ### " "#   #" "#   #" "#   #" "#   #" "#   #" " ### ";
-+	case 'P': return "#### " "#   #" "#   #" "#### " "#    " "#    " "#    ";
-+	case 'R': return "#### " "#   #" "#   #" "#### " "#  # " "#   #" "#   #";
-+	case 'S': return " ####" "#    " "#    " " ### " "    #" "    #" "#### ";
-+	case 'a': return "     " "     " " ### " "    #" " ####" "#   #" " ####";
-+	case 'b': return "#    " "#    " "#### " "#   #" "#   #" "#   #" "#### ";
-+	case 'd': return "    #" "    #" " ####" "#   #" "#   #" "#   #" " ####";
-+	case 'e': return "     " "     " " ### " "#   #" "#####" "#    " " ####";
-+	case 'f': return "  ## " " #   " " ### " " #   " " #   " " #   " " #   ";
-+	case 'g': return "     " " ####" "#   #" "#   #" " ####" "    #" " ### ";
-+	case 'i': return "  #  " "     " " ##  " "  #  " "  #  " "  #  " " ### ";
-+	case 'l': return " ##  " "  #  " "  #  " "  #  " "  #  " "  #  " " ### ";
-+	case 'm': return "     " "     " "## ##" "# # #" "# # #" "#   #" "#   #";
-+	case 'n': return "     " "     " "#### " "#   #" "#   #" "#   #" "#   #";
-+	case 'o': return "     " "     " " ### " "#   #" "#   #" "#   #" " ### ";
-+	case 'p': return "     " "     " "#### " "#   #" "#   #" "#### " "#    ";
-+	case 'r': return "     " "     " "# ## " "##  #" "#    " "#    " "#    ";
-+	case 's': return "     " "     " " ####" "#    " " ### " "    #" "#### ";
-+	case 't': return " #   " " #   " "###  " " #   " " #   " " #  #" "  ## ";
-+	case 'u': return "     " "     " "#   #" "#   #" "#   #" "#   #" " ####";
-+	case 'v': return "     " "     " "#   #" "#   #" "#   #" " # # " "  #  ";
-+	case 'w': return "     " "     " "#   #" "#   #" "# # #" "# # #" " # # ";
-+	case 'y': return "     " "     " "#   #" "#   #" " ####" "    #" " ### ";
-+	case '.': return "     " "     " "     " "     " "     " " ##  " " ##  ";
-+	case ' ': return "     " "     " "     " "     " "     " "     " "     ";
-+	default:  return "     " "     " "     " "     " "     " "     " "     ";
-+	}
-+}
-+
++/* The renderer writes 0x00RRGGBB; scene buffers are ARGB8888. */
 +static void
-+nuubos_scene_rect(struct wlr_scene_tree *parent, int x, int y,
-+		int width, int height, const float color[static 4])
++nuubos_splash_opaque(uint32_t *pixels, size_t count)
 +{
-+	if (width <= 0 || height <= 0) {
-+		return;
-+	}
-+
-+	struct wlr_scene_rect *rect =
-+		wlr_scene_rect_create(parent, width, height, color);
-+	wlr_scene_node_set_position(&rect->node, x, y);
-+}
-+
-+static int
-+nuubos_text_width(const char *text, int scale, int tracking)
-+{
-+	int n = (int)strlen(text);
-+
-+	if (n <= 0) {
-+		return 0;
-+	}
-+
-+	return n * 6 * scale - scale + (n - 1) * tracking;
-+}
-+
-+static void
-+nuubos_draw_glyph(struct wlr_scene_tree *parent, int x, int y,
-+		char c, int scale, const float color[static 4])
-+{
-+	const char *rows = nuubos_glyph_rows(c);
-+
-+	for (int row = 0; row < 7; row++) {
-+		int col = 0;
-+
-+		while (col < 5) {
-+			while (col < 5 && rows[row * 5 + col] == ' ') {
-+				col++;
-+			}
-+
-+			if (col >= 5) {
-+				break;
-+			}
-+
-+			int run_start = col;
-+
-+			while (col < 5 && rows[row * 5 + col] != ' ') {
-+				col++;
-+			}
-+
-+			nuubos_scene_rect(parent,
-+				x + run_start * scale,
-+				y + row * scale,
-+				(col - run_start) * scale,
-+				scale,
-+				color);
-+		}
-+	}
-+}
-+
-+static void
-+nuubos_draw_text(struct wlr_scene_tree *parent, int x, int y,
-+		const char *text, int scale, int tracking,
-+		const float color[static 4])
-+{
-+	int cursor = x;
-+
-+	while (*text) {
-+		nuubos_draw_glyph(parent, cursor, y, *text, scale, color);
-+		cursor += 6 * scale + tracking;
-+		text++;
++	for (size_t i = 0; i < count; i++) {
++		pixels[i] |= 0xff000000u;
 +	}
 +}
 +
@@ -160,59 +77,23 @@ compositor-owned boot fallback.
 +
 +	int width = mode->width;
 +	int height = mode->height;
++	uint32_t *pixels = malloc((size_t)width * (size_t)height * 4);
 +
-+	int title_scale = height / 68;
-+	if (title_scale < 7) {
-+		title_scale = 7;
-+	}
-+	if (title_scale > 14) {
-+		title_scale = 14;
++	if (!pixels) {
++		return;
 +	}
 +
-+	int subtitle_scale = title_scale / 2;
-+	if (subtitle_scale < 3) {
-+		subtitle_scale = 3;
-+	}
-+	if (subtitle_scale > 6) {
-+		subtitle_scale = 6;
-+	}
++	struct nuubos_splash_palette palette;
 +
-+	int brand_tracking = title_scale / 2;
-+	if (brand_tracking < 2) {
-+		brand_tracking = 2;
-+	}
-+
-+	static const float background[4] = {
-+		19.0f / 255.0f, 21.0f / 255.0f, 20.0f / 255.0f, 1.0f
-+	};
-+	static const float foreground[4] = {
-+		231.0f / 255.0f, 226.0f / 255.0f, 216.0f / 255.0f, 1.0f
-+	};
-+	static const float subtitle_color[4] = {
-+		158.0f / 255.0f, 166.0f / 255.0f, 159.0f / 255.0f, 1.0f
-+	};
-+	static const float accent[4] = {
-+		91.0f / 255.0f, 134.0f / 255.0f, 214.0f / 255.0f, 1.0f
-+	};
-+
-+	const char *brand_left = "nuub";
-+	const char *brand_right = "OS";
-+	const char *subtitle = "Small System. Big Adventures.";
-+
-+	int left_w = nuubos_text_width(brand_left, title_scale, brand_tracking);
-+	int right_w = nuubos_text_width(brand_right, title_scale, brand_tracking);
-+	int title_w = left_w + brand_tracking + right_w;
-+
-+	int cx = width / 2;
-+	int cy = height / 2;
-+	int brand_y = cy - title_scale * 12;
++	nuubos_splash_load_palette(&palette, NULL);
++	nuubos_splash_render(pixels, width, width, height, "boot", &palette);
++	nuubos_splash_opaque(pixels, (size_t)width * (size_t)height);
 +
 +	/*
 +	 * IMPORTANT:
 +	 * This is deliberately a direct child of the scene ROOT, not of
 +	 * output->layer_tree[0]. Labwc walks layer_tree children as layer-shell
-+	 * nodes and asserts that node->data is a layer_surface. Plain rects in
-+	 * that tree caused the v0.7.5 startup assertion.
++	 * nodes and asserts that node->data is a layer_surface.
 +	 */
 +	boot_tree = wlr_scene_tree_create(&server.scene->tree);
 +	wlr_scene_node_lower_to_bottom(&boot_tree->node);
@@ -222,41 +103,12 @@ compositor-owned boot fallback.
 +			output->scene_output->x, output->scene_output->y);
 +	}
 +
-+	nuubos_scene_rect(boot_tree, 0, 0, width, height, background);
++	/* One buffer node (the buffer owns the pixels). */
++	struct lab_data_buffer *buffer =
++		buffer_create_from_data(pixels, width, height, width * 4);
 +
-+	int x = cx - title_w / 2;
-+
-+	nuubos_draw_text(boot_tree, x, brand_y, brand_left,
-+		title_scale, brand_tracking, foreground);
-+
-+	x += left_w + brand_tracking;
-+
-+	nuubos_draw_text(boot_tree, x, brand_y, brand_right,
-+		title_scale, brand_tracking, accent);
-+
-+	int line_w = title_w + title_scale * 8;
-+	int max_line_w = width - title_scale * 10;
-+
-+	if (line_w > max_line_w) {
-+		line_w = max_line_w;
-+	}
-+
-+	int line_h = title_scale / 2;
-+	if (line_h < 3) {
-+		line_h = 3;
-+	}
-+
-+	int line_y = brand_y + title_scale * 11;
-+
-+	nuubos_scene_rect(boot_tree,
-+		cx - line_w / 2, line_y, line_w, line_h, accent);
-+
-+	int sub_y = line_y + title_scale * 5;
-+	int sub_w = nuubos_text_width(subtitle, subtitle_scale, 0);
-+
-+	nuubos_draw_text(boot_tree,
-+		cx - sub_w / 2, sub_y, subtitle,
-+		subtitle_scale, 0, subtitle_color);
++	wlr_scene_buffer_create(boot_tree, &buffer->base);
++	wlr_buffer_drop(&buffer->base);
 +
 +	wlr_log(WLR_INFO,
 +		"nuubOS: installed root atomic first-frame boot splash %dx%d",
@@ -266,18 +118,18 @@ compositor-owned boot fallback.
  static void
  configure_new_output(struct output *output)
  {
-@@ -550,6 +787,12 @@
- 	server.pending_output_layout_change++;
- 	add_output_to_layout(output);
+@@ -552,6 +629,12 @@
  	server.pending_output_layout_change--;
-+
-+	/*
+ 
+ 	/*
 +	 * Populate the first compositor frame before Labwc performs its mandatory
 +	 * initial modeset commit. Keep these nodes outside the layer-shell trees.
 +	 */
 +	nuubos_create_atomic_boot_splash(output);
- 
- 	/*
++
++	/*
  	 * Force the initial modeset commit to actually happen.
+ 	 *
+ 	 * lab_wlr_scene_output_commit() skips the real commit whenever the
 -- 
 2.51.0

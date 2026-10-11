@@ -10,10 +10,12 @@
 # One device-global credential (user "root") for SSH/SCP/SFTP, SMB file
 # sharing and Web administration. It is generated randomly per device on
 # first start and never shipped. Secrets live in STATE, root only:
-#   /state/remote/credential      the password
+#   /state/remote/credential      the password (Web administration sign-in
+#                                 reads it on every attempt: nuubos-admind)
 #   /state/remote/root.hash       its crypt(3) hash for /etc/shadow
-#   /state/remote/web.htdigest    Web administration digest file
 #   /state/remote/ksmbd/          SMB user database
+#   /state/remote/web-key.pem     Web administration TLS key and its
+#   /state/remote/web-cert.pem    self-signed certificate (per device)
 # SSH (Dropbear) is password login only: public-key login is not built. The
 # rootfs /etc/shadow is replaced by image updates, so every start re-applies
 # the hash. The serial console logs in without a password (getty -n -l
@@ -27,11 +29,12 @@ R="${NUUBOS_ROOT:-}"
 DIR="$R/state/remote"
 CONF="$R/state/config/remote.conf"
 CRED="$DIR/credential"
-HTDIGEST="$DIR/web.htdigest"
+WEB_KEY="$DIR/web-key.pem"
+WEB_CERT="$DIR/web-cert.pem"
+WEB_FP="$DIR/web-cert.sha256"
 KSMBD_DIR="$DIR/ksmbd"
 ROOT_HASH="$DIR/root.hash"
 SHADOW="$R/etc/shadow"
-REALM="nuubOS"
 USER_NAME=root
 NO_DAEMONS="${NUUBOS_REMOTE_NO_DAEMONS:-0}"
 
@@ -58,11 +61,6 @@ new_password()
     printf '%s-%s-%s\n' "$(echo "$raw" | cut -c1-4)" "$(echo "$raw" | cut -c5-8)" "$(echo "$raw" | cut -c9-12)"
 }
 
-md5_hex()
-{
-    printf '%s' "$1" | md5sum | cut -d' ' -f1
-}
-
 prepare_dir()
 {
     mkdir -p "$DIR" && chmod 700 "$DIR"
@@ -85,8 +83,6 @@ apply_password()
     h="$(printf '%s' "$pw" | mkpasswd -m sha512 -P 0)" && [ -n "$h" ] || return 1
     printf '%s\n' "$h" > "$ROOT_HASH.tmp" && chmod 600 "$ROOT_HASH.tmp" &&
         mv "$ROOT_HASH.tmp" "$ROOT_HASH" && apply_shadow || return 1
-    printf '%s:%s:%s\n' "$USER_NAME" "$REALM" "$(md5_hex "$USER_NAME:$REALM:$pw")" > "$HTDIGEST.tmp" &&
-        chmod 600 "$HTDIGEST.tmp" && mv "$HTDIGEST.tmp" "$HTDIGEST" || return 1
     mkdir -p "$KSMBD_DIR" && chmod 700 "$KSMBD_DIR"
     if [ "$NO_DAEMONS" != 1 ] && command -v ksmbd.adduser >/dev/null 2>&1; then
         rm -f "$KSMBD_DIR/ksmbdpwd.db"
@@ -103,12 +99,14 @@ ensure_credential()
         printf '%s\n' "$pw" > "$CRED.tmp" && chmod 600 "$CRED.tmp" && mv "$CRED.tmp" "$CRED" || return 1
         apply_password "$pw" || return 1
         log "generated the device credential"
-    elif [ ! -s "$HTDIGEST" ] || [ ! -s "$ROOT_HASH" ]; then
+    elif [ ! -s "$ROOT_HASH" ]; then
         apply_password "$(cat "$CRED")" || return 1
     else
         apply_shadow || return 1
     fi
     chmod 600 "$CRED"
+    # The Web administration used HTTP digest files before 0.2.
+    rm -f "$DIR/web.htdigest"
 }
 
 ensure_conf()
@@ -163,17 +161,35 @@ stop_smb()
     return 0
 }
 
+# The certificate names the console; a new one only when there is none
+# (browsers remember the one they were asked to trust).
+ensure_cert()
+{
+    [ -s "$WEB_KEY" ] && [ -s "$WEB_CERT" ] && return 0
+    name="$(tr -cd 'A-Za-z0-9-' < /etc/hostname 2>/dev/null | cut -c1-63)"
+    [ -n "$name" ] || name=nuubos
+    fp="$(nuubos-web-cert "$WEB_KEY" "$WEB_CERT" "$name")" || { log "no TLS certificate"; return 1; }
+    printf '%s\n' "$fp" > "$WEB_FP"
+    log "created the Web administration certificate"
+}
+
 start_web()
 {
-    pid_alive /var/run/nuubos-web.pid && return 0
-    mkdir -p /userdata/.nuubos-upload
-    lighttpd -f /etc/nuubos/web/lighttpd.conf
+    pid_alive /var/run/nuubos-web.pid && pid_alive /var/run/nuubos-admind.pid && return 0
+    ensure_cert || return 1
+    pid_alive /var/run/nuubos-admind.pid ||
+        start-stop-daemon -S -q -b -m -p /var/run/nuubos-admind.pid --exec /usr/sbin/nuubos-admind -- --owner www-data
+    # lighttpd opens its log after dropping to www-data.
+    touch /run/nuubos/web.log && chown www-data:www-data /run/nuubos/web.log
+    pid_alive /var/run/nuubos-web.pid || lighttpd -f /etc/nuubos/web/lighttpd.conf
 }
 
 stop_web()
 {
-    [ -r /var/run/nuubos-web.pid ] && kill "$(cat /var/run/nuubos-web.pid)" 2>/dev/null
-    rm -f /var/run/nuubos-web.pid
+    for p in /var/run/nuubos-web.pid /var/run/nuubos-admind.pid; do
+        [ -r "$p" ] && kill "$(cat "$p")" 2>/dev/null
+        rm -f "$p"
+    done
 }
 
 running()
@@ -181,7 +197,7 @@ running()
     case "$1" in
         ssh) pid_alive /var/run/dropbear.pid ;;
         smb) pidof ksmbd.mountd >/dev/null 2>&1 ;;
-        web) pid_alive /var/run/nuubos-web.pid ;;
+        web) pid_alive /var/run/nuubos-web.pid && pid_alive /var/run/nuubos-admind.pid ;;
     esac
 }
 
@@ -213,7 +229,7 @@ case "${1:-}" in
             if [ "$NO_DAEMONS" != 1 ] && running "$s"; then r=1; else r=0; fi
             printf '%s=%s\nrunning_%s=%s\n' "$s" "$e" "$s" "$r"
         done
-        printf 'address=%s\nuser=%s\nend=1\n' "$(address)" "$USER_NAME"
+        printf 'address=%s\nuser=%s\nweb_fingerprint=%s\nend=1\n' "$(address)" "$USER_NAME" "$(cat "$WEB_FP" 2>/dev/null)"
         ;;
     set)
         case "${2:-}:${3:-}" in
@@ -235,11 +251,11 @@ case "${1:-}" in
                 pw="$(new_password)" || { echo "ERR random"; exit 1; }
                 printf '%s\n' "$pw" > "$CRED.tmp" && chmod 600 "$CRED.tmp" && mv "$CRED.tmp" "$CRED" || { echo "ERR storage"; exit 1; }
                 apply_password "$pw" || { echo "ERR apply"; exit 1; }
-                # Running SMB and Web servers reload their databases; Dropbear
-                # reads /etc/shadow on each login.
+                # A running SMB server reloads its database; Dropbear reads
+                # /etc/shadow and nuubos-admind the credential at each
+                # sign-in (its open sessions end with the old password).
                 if [ "$NO_DAEMONS" != 1 ]; then
                     enabled smb && { stop_smb; start_smb; }
-                    enabled web && { stop_web; start_web; }
                 fi
                 echo OK
                 ;;

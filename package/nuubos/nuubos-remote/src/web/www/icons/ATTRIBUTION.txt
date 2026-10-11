@@ -1,0 +1,18 @@
+Font Awesome Free 6.7.2
+
+The SVG icons in this folder are redistributed from Font Awesome Free 6.7.2
+(solid set; bluetooth-b from the brands set), licensed under Creative
+Commons Attribution 4.0 International (CC BY 4.0).
+Copyright 2024 Fonticons, Inc. https://fontawesome.com/
+See LICENSE.txt for the complete Font Awesome Free license.
+
+The icon geometry is unchanged. The web pages use each icon as a CSS mask
+and colour it from the active Mood; the fill colour inside the files of the
+nuubUI set is not used.
+
+Same files as nuubui-home ui/assets/icons, plus (added 2026-10-10 for the
+Web administration): upload, download, power-off, right-from-bracket, moon,
+house, circle-info, lock, pen, copy, scissors, ellipsis-vertical, keyboard,
+bluetooth-b.
+
+nuubOS own icons (MIT, not Font Awesome): desktop.svg, plus.svg.

@@ -16,7 +16,7 @@
  *            slow comet when the progress is unknown (user request
  *            2026-10-09). Its completion plays the tasks signal.
  *   Signals  short system animations over the effect, grouped in five
- *            per-user categories: power (welcome, sleep, wake, power off),
+ *            per-user categories: power (boot, sleep, wake, restart, power off),
  *            battery, connections, games, tasks. Their sources are the
  *            typed notification events of nuubos-notifyd (EPIC-006) — one
  *            event vocabulary for the screen and the LEDs — plus the
@@ -32,7 +32,11 @@
  *   SetSignal(s category, b enabled)   enabling plays the category's signal
  *   PreviewSignal(s category)
  *   Preview(s effect, s color) / EndPreview()   live, never persisted
- *   Lifecycle(s "sleep"|"wake"|"shutdown")   sleep replies once dark
+ *   Lifecycle(s "sleep"|"wake"|"shutdown"|"boot"|"restart"|"reboot"|"poweroff")
+ *            sleep replies once dark; boot/restart/poweroff are the LED
+ *            side of the lifecycle splash animations (nuubUI, Quick Menu
+ *            src/splash.rs), started with them and timed like them;
+ *            shutdown = poweroff
  *   signal StateChanged(same as GetState)
  * Preferences: /state/users/<id>/lighting.conf (FORMAT=2), atomic writes.
  *
@@ -80,6 +84,21 @@
 #define BUILTIN_THEMES "/usr/share/nuubos/themes"
 #define USER_THEMES "/userdata/themes"
 
+/* Lifecycle splash timing: nuubui-home/nuubos-quick-menu src/splash.rs. */
+#define SPLASH_BOOT_FILL_MS 700
+#define SPLASH_BOOT_FADE_MS 320
+#define SPLASH_OUT_FADE_MS 280
+#define SPLASH_RESTART_SWEEP_MS 900
+#define SPLASH_RESTART_SWEEPS 2
+#define SPLASH_POWEROFF_DRAIN_MS 650
+
+/* Ring position at the bottom of the stick, in turns from logical
+ * position 0. RG40XX-V (checked 2026-10-10 with nuubos-rgbctl locate 0):
+ * position 0 is the upper right LED and the order runs clockwise, so of
+ * the 8 LEDs 45 degrees apart position 3 is at the bottom. Every
+ * topology in rgb_common.c follows this order (CubeXX remapped 2026-10-11). */
+#define RING_BOTTOM 0.375f
+
 #define MAX_LEDS 32
 #define MAX_ZONES 4
 #define MAX_TASKS 8
@@ -123,6 +142,9 @@ enum shape {
 	SHAPE_WAKE,     /* light blooms from position 0 */
 	SHAPE_SLEEP,    /* everything fades to dark */
 	SHAPE_FAREWELL, /* full ring drains back to position 0 */
+	SHAPE_BOOT,     /* splash boot: the ring fills from position 0, then the effect */
+	SHAPE_RESTART,  /* splash restart: effect fades, a comet runs two laps */
+	SHAPE_POWEROFF, /* splash power off: full accent ring drains and dims */
 	SHAPE_LINK,     /* two arcs meet; optionally the player number */
 	SHAPE_UNLINK,   /* the ring retracts to position 0 */
 	SHAPE_PULSE,    /* N full-ring pulses */
@@ -405,8 +427,9 @@ static int clamp_brightness(int value)
 
 static void default_prefs(struct prefs *p)
 {
-	/* Quiet by default: the LEDs speak only for system signals. */
-	snprintf(p->effect, sizeof(p->effect), "off");
+	/* Aurora in the user's Mood accent by default (user request
+	 * 2026-10-11). */
+	snprintf(p->effect, sizeof(p->effect), "aurora");
 	snprintf(p->color, sizeof(p->color), "theme");
 	p->brightness = DEFAULT_BRIGHTNESS;
 	snprintf(p->speed, sizeof(p->speed), "normal");
@@ -576,6 +599,22 @@ static void load_theme_accent(void)
 	FILE *fp;
 
 	theme_accent = (struct rgb){ 58 / 255.0f, 134 / 255.0f, 1.0f };
+	/* No user yet (boot, user picker): the last user's Mood, as cached for
+	 * the lifecycle splash, so the boot greeting matches the screen. */
+	if (!active_user[0] || strcmp(active_user, "default") == 0) {
+		fp = fopen("/etc/nuubos/splash.palette", "r");
+		if (!fp)
+			return;
+		while (fgets(line, sizeof(line), fp)) {
+			struct rgb c;
+
+			trim(line);
+			if (strncmp(line, "accent=", 7) == 0 && parse_hex(line + 7, &c))
+				theme_accent = c;
+		}
+		fclose(fp);
+		return;
+	}
 	snprintf(path, sizeof(path), "/state/users/%s/settings.conf", active_user);
 	fp = fopen(path, "r");
 	if (fp) {
@@ -876,6 +915,40 @@ static struct rgb signal_pixel(struct rgb base, float u, int i, int n, float s)
 		out = ring_distance(u, 0.0f) <= r ? c : BLACK;
 		return out;
 	}
+	/* The splash shapes follow splash::frame (nuubUI): same phases, same
+	 * milliseconds (SPLASH_* below). */
+	case SHAPE_BOOT: {
+		/* Lights up from the bottom of the ring along both sides and
+		 * closes at the top (user request 2026-10-10). */
+		float fill = SPLASH_BOOT_FILL_MS / 1000.0f;
+		float e = s < fill ? 1.0f - powf(1.0f - s / fill, 3.0f) : 1.0f;
+
+		out = ring_distance(u, RING_BOTTOM) <= 0.5f * e + 0.5f / n ? c : BLACK;
+		tail = SPLASH_BOOT_FADE_MS / 1000.0f;
+		break;
+	}
+	case SHAPE_RESTART: {
+		float fade = SPLASH_OUT_FADE_MS / 1000.0f;
+		float lap = SPLASH_RESTART_SWEEP_MS / 1000.0f;
+		float head, dist;
+
+		if (s < fade)
+			return scale(base, 1.0f - smooth(s / fade));
+		/* Two continuous laps: one ease over the whole run, no stop
+		 * between them (user request 2026-10-10). */
+		head = frac(SPLASH_RESTART_SWEEPS * smooth((s - fade) / (lap * SPLASH_RESTART_SWEEPS)));
+		dist = frac(head - u);
+		return dist < 0.35f ? scale(c, powf(1.0f - dist / 0.35f, 1.5f)) : BLACK;
+	}
+	case SHAPE_POWEROFF: {
+		float fade = SPLASH_OUT_FADE_MS / 1000.0f;
+		float k;
+
+		if (s < fade)
+			return mix(base, c, smooth(s / fade));
+		k = smooth((s - fade) / (SPLASH_POWEROFF_DRAIN_MS / 1000.0f));
+		return ring_distance(u, 0.0f) <= 0.5f * (1.0f - k) ? scale(c, 1.0f - 0.6f * k) : BLACK;
+	}
 	case SHAPE_LINK: {
 		float r = 0.5f * smooth(s / 0.5f);
 
@@ -1134,7 +1207,7 @@ static void render(void)
 			finish_sleep();
 			return;
 		}
-		if (ended == SHAPE_FAREWELL) {
+		if (ended == SHAPE_FAREWELL || ended == SHAPE_RESTART || ended == SHAPE_POWEROFF) {
 			phase = PHASE_SHUTDOWN;
 			hardware_off_now();
 			return;
@@ -1247,7 +1320,8 @@ static void lifecycle(const char *what, DBusMessage *message)
 		/* Also sent when nuubos-systemd starts and after a failed power
 		 * off: only a dark (or darkening) ring comes back. */
 		if (phase == PHASE_AWAKE && sig.shape != SHAPE_FAREWELL &&
-		    sig.shape != SHAPE_SLEEP)
+		    sig.shape != SHAPE_SLEEP && sig.shape != SHAPE_RESTART &&
+		    sig.shape != SHAPE_POWEROFF)
 			return;
 		reply_pending_sleep();
 		phase = PHASE_AWAKE;
@@ -1256,11 +1330,36 @@ static void lifecycle(const char *what, DBusMessage *message)
 		schedule_crossfade();
 		if (prefs.signals & SIG_POWER)
 			start_signal(SHAPE_WAKE, "wake", accent(), 9, 1200, 0, 0, 0);
-	} else if (strcmp(what, "shutdown") == 0) {
+	} else if (strcmp(what, "boot") == 0) {
+		/* Once per boot (a restarted nuubUI plays its splash again). */
+		if (access(BOOT_MARKER, F_OK) == 0)
+			return;
+		{
+			int fd = open(BOOT_MARKER, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+
+			if (fd >= 0)
+				close(fd);
+		}
+		if (phase == PHASE_AWAKE && (prefs.signals & SIG_POWER))
+			start_signal(SHAPE_BOOT, "boot", accent(), 9,
+				     SPLASH_BOOT_FILL_MS + SPLASH_BOOT_FADE_MS, 0, 0, 0);
+	} else {
+		/* restart | reboot | poweroff | shutdown. The Quick Menu starts
+		 * the shape with its animation; nuubos-systemd's call that
+		 * follows finds it running (or finished) and changes nothing. */
+		bool restart = strcmp(what, "restart") == 0 || strcmp(what, "reboot") == 0;
+
 		reply_pending_sleep();
+		if (phase == PHASE_SHUTDOWN || sig.shape == SHAPE_RESTART || sig.shape == SHAPE_POWEROFF)
+			return;
 		if (phase == PHASE_AWAKE && (prefs.signals & SIG_POWER) && !hardware_off) {
 			sig.shape = SHAPE_NONE;
-			start_signal(SHAPE_FAREWELL, "farewell", accent(), 10, 900, 0, 0, 0);
+			if (restart)
+				start_signal(SHAPE_RESTART, "restart", accent(), 10,
+					     SPLASH_OUT_FADE_MS + SPLASH_RESTART_SWEEP_MS * SPLASH_RESTART_SWEEPS, 0, 0, 0);
+			else
+				start_signal(SHAPE_POWEROFF, "poweroff", accent(), 10,
+					     SPLASH_OUT_FADE_MS + SPLASH_POWEROFF_DRAIN_MS, 0, 0, 0);
 		} else {
 			phase = PHASE_SHUTDOWN;
 			hardware_off_now();
@@ -1797,8 +1896,10 @@ static DBusHandlerResult handle_message(DBusConnection *conn, DBusMessage *m, vo
 
 	if (dbus_message_is_method_call(m, INTERFACE_NAME, "Lifecycle")) {
 		if (!get_string(m, &a) ||
-		    (strcmp(a, "sleep") != 0 && strcmp(a, "wake") != 0 && strcmp(a, "shutdown") != 0))
-			invalid(m, "Phase must be sleep, wake or shutdown");
+		    (strcmp(a, "sleep") != 0 && strcmp(a, "wake") != 0 && strcmp(a, "shutdown") != 0 &&
+		     strcmp(a, "boot") != 0 && strcmp(a, "restart") != 0 && strcmp(a, "reboot") != 0 &&
+		     strcmp(a, "poweroff") != 0))
+			invalid(m, "Phase must be sleep, wake, shutdown, boot, restart, reboot or poweroff");
 		else
 			lifecycle(a, m);
 		return DBUS_HANDLER_RESULT_HANDLED;
@@ -1848,7 +1949,10 @@ static void switch_user(void)
 	load_prefs();
 	load_theme_accent();
 	preview_active = false;
-	if (sig.shape != SHAPE_SLEEP && sig.shape != SHAPE_FAREWELL)
+	/* Lifecycle shapes outlive a user switch (the default user is
+	 * activated while the boot splash runs). */
+	if (sig.shape != SHAPE_SLEEP && sig.shape != SHAPE_FAREWELL && sig.shape != SHAPE_BOOT &&
+	    sig.shape != SHAPE_RESTART && sig.shape != SHAPE_POWEROFF)
 		sig.shape = SHAPE_NONE;
 	schedule_crossfade();
 	emit_state();
@@ -1900,15 +2004,8 @@ int main(void)
 	timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
 
 	connect_sources();
-	/* The welcome plays once per boot, not when the service restarts. */
-	if (supported && access(BOOT_MARKER, F_OK) != 0) {
-		int fd = open(BOOT_MARKER, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
-
-		if (fd >= 0)
-			close(fd);
-		if (prefs.signals & SIG_POWER)
-			play_category(SIG_POWER);
-	}
+	/* The boot greeting is Lifecycle("boot"), sent by nuubUI when its boot
+	 * splash animation starts (once per boot, BOOT_MARKER). */
 	render();
 
 	while (running) {

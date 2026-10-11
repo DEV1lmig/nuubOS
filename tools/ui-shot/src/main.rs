@@ -78,7 +78,16 @@ fn strings() -> ModelRc<SharedString> {
     ModelRc::from(Rc::new(VecModel::from(v)))
 }
 
+/* Output scale of each target screen (nuubos-wl-output-apply): the CubeXX
+ * 720x720 and RG34XX 720x480 panels are denser than the RG40XX-V; 1.125
+ * gives the UI the 640 px width it is laid out for (640x640 / 640x427
+ * logical) with larger text. */
+fn output_scale(w: u32, h: u32) -> f32 {
+    if w == 720 && (h == 720 || h == 480) { 1.125 } else { 1.0 }
+}
+
 fn shot(win: &Rc<MinimalSoftwareWindow>, w: u32, h: u32, name: &str) {
+    win.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: output_scale(w, h) });
     win.set_size(slint::PhysicalSize::new(w, h));
     // Let 180 ms Home scroll animations settle.
     std::thread::sleep(std::time::Duration::from_millis(220));
@@ -115,7 +124,7 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
     qm.set_switch_user_visible(true);
     qm.set_confirm_face_position(2);
     qm.set_back_face_position(1);
-    let sizes = [(640u32, 480u32), (720, 720), (1280, 720), (1920, 1080)];
+    let sizes = [(640u32, 480u32), (720, 720), (720, 480), (1280, 720), (1920, 1080)];
     for (name, sel, music, dropdown) in [("qm_audio", 3, false, false), ("qm_music", 7, true, false), ("qm_poweroff", 2, true, false), ("qm_dropdown", 3, false, true)] {
         qm.set_selected_index(sel);
         qm.set_home_music_playing(music);
@@ -286,8 +295,7 @@ fn main() {
     let ui = HomeWindow::new().unwrap();
     ui.show().unwrap();
     ui.set_i18n_strings(strings());
-    ui.set_curtain_progress(1.0);
-    ui.set_line_progress(1.0);
+    ui.set_lifecycle_on(false);
     std::thread::sleep(std::time::Duration::from_millis(600));
     slint::platform::update_timers_and_animations();
 
@@ -331,7 +339,7 @@ fn main() {
     ];
     ui.set_wifi_networks(ModelRc::from(Rc::new(VecModel::from(nets))));
 
-    let sizes = [(640u32, 480u32), (720, 720), (1280, 720), (1920, 1080)];
+    let sizes = [(640u32, 480u32), (720, 720), (720, 480), (1280, 720), (1920, 1080)];
     let mut scenes: Vec<(&str, Box<dyn Fn(&HomeWindow)>)> = vec![
         ("home", Box::new(|ui| { ui.set_settings_open(false); })),
         ("general_preview", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_view(0); ui.set_settings_selected_index(0); ui.set_general_scroll_offset(0); })),
@@ -432,18 +440,6 @@ fn main() {
                 (&s(ui, 785), "", "", false, 0), (&s(ui, 786), "", "", false, 1), (&s(ui, 787), "", "", false, 1)]));
         })),
         ("restore", Box::new(|ui| { ui.set_settings_view(22); })),
-        ("start_game", Box::new(|ui| {
-            ui.set_details_active(true); ui.set_settings_view(57); ui.set_gen_index(0); ui.set_gen_scroll(0);
-            ui.set_details_title("Super Mario World".into()); ui.set_details_subtitle("".into());
-            ui.set_details_description("".into());
-            ui.set_gen_section("Super Mario World".into()); ui.set_gen_select(true);
-            let saved = |t: &str| s(ui, 766).replace("{0}", t);
-            ui.set_gen_rows(gen(&[(&s(ui, 763), &s(ui, 765), &saved("today • 21:14"), false, -1),
-                (&s(ui, 765), "", &saved("today • 21:14"), false, -1),
-                (&s(ui, 423).replace("{0}", "0"), "", &saved("yesterday • 18:02"), false, -1),
-                (&s(ui, 423).replace("{0}", "1"), "", &saved("today • 20:40"), false, -1),
-                (&s(ui, 764), "", "", false, -1)]));
-        })),
         ("game_details", Box::new(|ui| {
             ui.set_settings_open(true); ui.set_details_active(true); ui.set_settings_view(50); ui.set_gen_index(0);
             ui.set_details_title("Super Mario World".into()); ui.set_details_subtitle("Super Nintendo".into());
@@ -834,8 +830,31 @@ fn main() {
         ]))));
         ui.set_home_sheet_index(1); ui.set_home_sheet_open(true);
     })));
+    scenes.push(("start_game", Box::new(|ui| {
+        ui.set_home_sheet_open(false);
+        ui.set_start_sheet_title("Super Mario World".into()); ui.set_start_sheet_system("Super Nintendo".into());
+        ui.set_start_sheet_cover(art(72, 96, (40, 90, 200), (120, 40, 160), true)); ui.set_start_sheet_has_cover(true);
+        let saved = |t: &str| s(ui, 766).replace("{0}", t);
+        let item = |label: String, when: &str, tile: &str, latest: bool| StartSheetItem {
+            label: label.into(), detail: saved(when).into(), tile: tile.into(), latest };
+        ui.set_start_sheet_items(ModelRc::from(Rc::new(VecModel::from(vec![
+            item(s(ui, 423).replace("{0}", "3"), "today • 21:14", "3", true),
+            item(s(ui, 765), "today • 20:58", "", false),
+            item(s(ui, 423).replace("{0}", "2"), "today • 20:40", "2", false),
+            item(s(ui, 423).replace("{0}", "1"), "yesterday • 18:02", "1", false),
+            item(s(ui, 423).replace("{0}", "0"), "3 days ago • 22:31", "0", false),
+        ]))));
+        ui.set_start_sheet_index(1); ui.set_start_sheet_scroll(0); ui.set_start_sheet_open(true);
+    })));
+    scenes.push(("start_game_empty", Box::new(|ui| {
+        ui.set_start_sheet_title("Super Mario World".into()); ui.set_start_sheet_system("Super Nintendo".into());
+        ui.set_start_sheet_has_cover(false);
+        ui.set_start_sheet_items(ModelRc::default());
+        ui.set_start_sheet_index(0); ui.set_start_sheet_scroll(0); ui.set_start_sheet_open(true);
+    })));
     scenes.push(("home_find", Box::new(move |ui| {
         ui.set_home_sheet_open(false);
+        ui.set_start_sheet_open(false);
         ui.set_find_open(true); ui.set_find_zone(1); ui.set_find_query("mario".into());
         ui.set_find_chips(ModelRc::from(Rc::new(VecModel::from(vec![
             FindChip { label: "Super Nintendo".into(), active: true },

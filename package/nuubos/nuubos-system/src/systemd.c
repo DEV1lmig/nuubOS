@@ -1,10 +1,12 @@
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <limits.h>
 #include <linux/if_link.h>
+#include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -14,6 +16,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -37,6 +40,14 @@
 #define UI_CONTROL "/run/nuubos/ui-control"
 #define LIFECYCLE_LIGHTING "/usr/lib/nuubos/lifecycle-lighting"
 #define LIFECYCLE_PRE_POWER "/usr/lib/nuubos/lifecycle-pre-power"
+#define INPUT_DIR "/dev/input"
+#define HDMI_ENABLED "/sys/class/drm/card0-HDMI-A-1/enabled"
+/* Back-to-back sleeps while the lid stays closed (a key pressed in a bag
+ * wakes the device): bounded so a wake source that fires at once cannot
+ * keep the service in a suspend loop. */
+#define LID_MAX_RESLEEPS 8
+#define LONG_BITS (8 * sizeof(unsigned long))
+#define NBITS(x) (((x) + LONG_BITS - 1) / LONG_BITS)
 #define MAX_CLIENTS 16
 
 #ifndef NUUBOS_PRODUCT_VERSION
@@ -61,6 +72,7 @@ struct config_state {
     enum profile_mode requested_profile;
     int auto_battery_threshold; /* 0=off */
     int sleep_after_min;        /* 0=off */
+    int charge_limit;           /* 80..100 %, 100=off */
 };
 
 struct runtime_state {
@@ -72,6 +84,8 @@ struct runtime_state {
     long long stage_enter_ms;
     char last_wake_reason[24];
     long long last_sleep_elapsed_ms;
+    int lid_fd;                 /* clamshells (SP): gpio-keys SW_LID, else -1 */
+    bool lid_closed;
 
     /* Storage operations can copy many GiB. Keep them outside the Product
      * Service event loop and expose their state as ordinary Product state. */
@@ -188,6 +202,7 @@ static int atomic_save_config(const struct config_state *cfg)
     fprintf(f, "PERFORMANCE_PROFILE=%s\n", profile_name(cfg->requested_profile));
     fprintf(f, "AUTO_BATTERY_SAVER_THRESHOLD=%d\n", cfg->auto_battery_threshold);
     fprintf(f, "SLEEP_AFTER_MIN=%d\n", cfg->sleep_after_min);
+    fprintf(f, "CHARGE_LIMIT=%d\n", cfg->charge_limit);
     if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
         fclose(f); unlink(tmp); return -1;
     }
@@ -206,6 +221,7 @@ static int atomic_save_config(const struct config_state *cfg)
 #define DEFAULT_PROFILE PROFILE_AUTO
 #define DEFAULT_AUTO_BATTERY_THRESHOLD 20
 #define DEFAULT_SLEEP_AFTER_MIN 10
+#define DEFAULT_CHARGE_LIMIT 100
 #define DEFAULT_BACKUP_POLICY "WEEKLY"
 
 static void config_defaults(struct config_state *cfg)
@@ -213,6 +229,13 @@ static void config_defaults(struct config_state *cfg)
     cfg->requested_profile = DEFAULT_PROFILE;
     cfg->auto_battery_threshold = DEFAULT_AUTO_BATTERY_THRESHOLD;
     cfg->sleep_after_min = DEFAULT_SLEEP_AFTER_MIN;
+    cfg->charge_limit = DEFAULT_CHARGE_LIMIT;
+}
+
+/* Charge limit: 80..100 in steps of 5 (100 = charge to full). */
+static bool valid_charge_limit(int x)
+{
+    return x >= 80 && x <= 100 && x % 5 == 0;
 }
 
 static void load_config(struct config_state *cfg)
@@ -240,6 +263,9 @@ static void load_config(struct config_state *cfg)
         } else if (!strcmp(key, "SLEEP_AFTER_MIN")) {
             int x = atoi(val);
             if (x >= 0 && x <= 240) cfg->sleep_after_min = x;
+        } else if (!strcmp(key, "CHARGE_LIMIT")) {
+            int x = atoi(val);
+            if (valid_charge_limit(x)) cfg->charge_limit = x;
         }
     }
     fclose(f);
@@ -578,9 +604,11 @@ static void lighting_wake(void)
         fprintf(stderr, "systemd: lighting wake hook failed\n");
 }
 
-static void lighting_shutdown(void)
+/* restart | poweroff: the LED shape of the splash animation nuubUI starts
+ * right after (notify_ui_lifecycle). */
+static void lighting_shutdown(const char *action)
 {
-    if (run_lifecycle_helper(LIFECYCLE_LIGHTING, "shutdown") != 0)
+    if (run_lifecycle_helper(LIFECYCLE_LIGHTING, action) != 0)
         fprintf(stderr, "systemd: lighting shutdown hook failed\n");
 }
 
@@ -588,7 +616,7 @@ static void run_poweroff(struct runtime_state *st)
 {
     char *argv[]={"/sbin/poweroff",NULL};
     run_pre_power_hook("poweroff");
-    lighting_shutdown();
+    lighting_shutdown("poweroff");
     notify_ui_lifecycle("poweroff");
     usleep(500000); /* Intentional presentation interval for the shutdown curtain. */
     if (run_argv(argv) != 0)
@@ -600,7 +628,7 @@ static void run_restart(struct runtime_state *st)
 {
     char *argv[]={"/sbin/reboot",NULL};
     run_pre_power_hook("restart");
-    lighting_shutdown();
+    lighting_shutdown("restart");
     notify_ui_lifecycle("reboot");
     usleep(500000); /* Intentional presentation interval for the reboot curtain. */
     (void)run_argv(argv);
@@ -627,6 +655,99 @@ static void enter_sleep(struct runtime_state *st)
     lighting_wake();
     mark_activity(st);
     notify_subscribers();
+}
+
+static bool test_bit(const unsigned long *bits, unsigned int bit)
+{
+    return (bits[bit / LONG_BITS] >> (bit % LONG_BITS)) & 1UL;
+}
+
+/* Lid switch of the clamshells (RG35XX-SP, RG34XX-SP, RG-SP: gpio-keys
+ * SW_LID, a wake source in the device tree). Read-only and never grabbed:
+ * inputd ignores it (no mapped keys). -1 on devices without a lid. */
+static int open_lid_switch(bool *closed)
+{
+    DIR *dir = opendir(INPUT_DIR);
+    struct dirent *e;
+    int lid = -1;
+
+    if (!dir)
+        return -1;
+    while (lid < 0 && (e = readdir(dir)) != NULL) {
+        unsigned long ev[NBITS(EV_MAX + 1)] = { 0 };
+        unsigned long sw[NBITS(SW_MAX + 1)] = { 0 };
+        unsigned long now[NBITS(SW_MAX + 1)] = { 0 };
+        char path[288];
+        int fd;
+
+        if (strncmp(e->d_name, "event", 5) != 0)
+            continue;
+        snprintf(path, sizeof(path), INPUT_DIR "/%s", e->d_name);
+        fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        if (ioctl(fd, EVIOCGBIT(0, sizeof(ev)), ev) >= 0 && test_bit(ev, EV_SW) &&
+            ioctl(fd, EVIOCGBIT(EV_SW, sizeof(sw)), sw) >= 0 && test_bit(sw, SW_LID) &&
+            ioctl(fd, EVIOCGSW(sizeof(now)), now) >= 0) {
+            *closed = test_bit(now, SW_LID);
+            lid = fd;
+        } else {
+            close(fd);
+        }
+    }
+    closedir(dir);
+    return lid;
+}
+
+/* Current lid state after draining queued events (those of a sleep too). */
+static void refresh_lid(struct runtime_state *st)
+{
+    unsigned long now[NBITS(SW_MAX + 1)] = { 0 };
+    struct input_event ev[16];
+
+    if (st->lid_fd < 0)
+        return;
+    while (read(st->lid_fd, ev, sizeof(ev)) > 0)
+        ;
+    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        close(st->lid_fd);
+        st->lid_fd = -1;
+        st->lid_closed = false;
+        return;
+    }
+    if (ioctl(st->lid_fd, EVIOCGSW(sizeof(now)), now) >= 0)
+        st->lid_closed = test_bit(now, SW_LID);
+}
+
+/* HDMI is the active output (the output policy turns the panel off): a
+ * closed lid then is a docked console, not a request to sleep. */
+static bool hdmi_active(void)
+{
+    char v[32];
+
+    return read_text_file(HDMI_ENABLED, v, sizeof(v)) == 0 && !strncmp(v, "enabled", 7);
+}
+
+/* Closing the lid sleeps through the same path as Sleep in the Power OSD;
+ * opening it is the hardware wake (the switch wakes on release). Woken
+ * with the lid still closed, the console goes back to sleep. */
+static void lid_policy(struct runtime_state *st)
+{
+    bool was_closed = st->lid_closed;
+
+    refresh_lid(st);
+    if (!st->lid_closed || was_closed || st->idle_stage != IDLE_ACTIVE)
+        return;
+    for (int i = 0; i <= LID_MAX_RESLEEPS && st->lid_closed && !hdmi_active(); i++) {
+        enter_sleep(st);
+        refresh_lid(st);
+        if (!strcmp(st->last_wake_reason, "suspend-failed"))
+            break;
+        if (!st->lid_closed) {
+            snprintf(st->last_wake_reason, sizeof(st->last_wake_reason), "lid");
+            notify_subscribers();
+        }
+    }
 }
 
 static long long timeout_ms(int minutes)
@@ -722,6 +843,40 @@ static long long read_battery_power_mw(void)
         return uv / 1000 * (ua / 1000) / 1000;
     }
     return -1;
+}
+
+/* The console battery's charge limit (power_supply ABI; AXP717: kernel
+ * patch 0102, which also stops and resumes charging). NULL when the
+ * driver has no limit: Settings then hides it. */
+static const char *charge_limit_path(void)
+{
+    static const char *const paths[] = {
+        "/sys/class/power_supply/axp20x-battery/charge_control_end_threshold",
+        "/sys/class/power_supply/battery/charge_control_end_threshold",
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
+        if (access(paths[i], W_OK) == 0)
+            return paths[i];
+    return NULL;
+}
+
+static int apply_charge_limit(int limit)
+{
+    const char *path = charge_limit_path();
+    char v[16];
+    int fd, n, rc;
+
+    if (!path)
+        return -1;
+    fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    n = snprintf(v, sizeof(v), "%d\n", limit);
+    rc = write(fd, v, (size_t)n) == n ? 0 : -1;
+    close(fd);
+    if (rc != 0)
+        fprintf(stderr, "systemd: charge limit %d: %s\n", limit, strerror(errno));
+    return rc;
 }
 
 static void read_memory_kib(long long *total_kib, long long *available_kib);
@@ -888,6 +1043,8 @@ static void reply_status(int fd, const struct runtime_state *st)
         "profile.effective=%s\n"
         "auto_battery.threshold=%d\n"
         "sleep_after_min=%d\n"
+        "charge_limit=%d\n"
+        "charge_limit.supported=%d\n"
         "battery.percent=%d\n"
         "battery.state=%s\n"
         "cpu.freq_khz=%lld\n"
@@ -916,19 +1073,23 @@ static void reply_status(int fd, const struct runtime_state *st)
         "storage.job_exit=%d\n"
         "lifecycle.stage=%s\n"
         "lifecycle.last_wake=%s\n"
-        "lifecycle.last_sleep_ms=%lld\n",
+        "lifecycle.last_sleep_ms=%lld\n"
+        "lifecycle.lid=%s\n",
         NUUBOS_PRODUCT_VERSION,NUUBOS_BUILD_ID,
         profile_name(st->cfg.requested_profile),
         profile_name(st->effective_profile),
         st->cfg.auto_battery_threshold,
         st->cfg.sleep_after_min,
+        st->cfg.charge_limit,
+        charge_limit_path() ? 1 : 0,
         st->battery_percent,st->battery_state,
         cpu,gpu,tcpu,tgpu,mem_total_kib,mem_available_kib,uptime,model,kernel,ip,
         mode,active,health,tf2,cid,action,backup,due,reason,total,freeb,
         st->storage_job_state,st->storage_job_action,st->storage_job_exit_code,
         idle_stage_name(st->idle_stage),
         st->last_wake_reason,
-        st->last_sleep_elapsed_ms);
+        st->last_sleep_elapsed_ms,
+        st->lid_fd < 0 ? "none" : st->lid_closed ? "closed" : "open");
     (void)write_all(fd,buf);
 }
 
@@ -954,6 +1115,7 @@ static int reset_system_settings(struct runtime_state *st)
 
     config_defaults(&st->cfg);
     if(atomic_save_config(&st->cfg)!=0){fprintf(stderr,"systemd: reset: system config\n");rc=-1;}
+    (void)apply_charge_limit(st->cfg.charge_limit);
     mark_activity(st);
     refresh_battery(st);
     update_effective_profile(st,true);
@@ -1008,6 +1170,14 @@ static void handle_command(struct client *c, struct runtime_state *st, const cha
         st->cfg.auto_battery_threshold=x;
         if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
         refresh_battery(st); update_effective_profile(st,true);
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
+    }
+    if(sscanf(line,"SET CHARGE_LIMIT %d",&x)==1){
+        if(!valid_charge_limit(x)){(void)write_all(c->fd,"ERR invalid charge limit\n");return;}
+        if(!charge_limit_path()){(void)write_all(c->fd,"ERR unsupported\n");return;}
+        st->cfg.charge_limit=x;
+        if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
+        if(apply_charge_limit(x)!=0){(void)write_all(c->fd,"ERR apply failed\n");return;}
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
     if(sscanf(line,"SET SLEEP %d",&x)==1){
@@ -1127,11 +1297,14 @@ int main(void)
     for(int i=0;i<MAX_CLIENTS;i++)clients[i].fd=-1;
     mkdir("/run/nuubos",0755);
     load_config(&st.cfg);
+    (void)apply_charge_limit(st.cfg.charge_limit);
     st.idle_stage=IDLE_ACTIVE;
     st.stage_enter_ms=boottime_ms();
     snprintf(st.last_wake_reason,sizeof(st.last_wake_reason),"none");
     st.last_sleep_elapsed_ms=0;
     st.storage_job_pid=-1;
+    st.lid_closed=false;
+    st.lid_fd=open_lid_switch(&st.lid_closed);
     snprintf(st.storage_job_action,sizeof(st.storage_job_action),"none");
     snprintf(st.storage_job_state,sizeof(st.storage_job_state),"idle");
     st.storage_job_exit_code=0;
@@ -1153,11 +1326,12 @@ int main(void)
         }
         if(status_fd<0) status_fd=connect_unix(STATUS_SOCKET);
 
-        struct pollfd pf[3+MAX_CLIENTS];
-        int map[3+MAX_CLIENTS],n=0;
+        struct pollfd pf[4+MAX_CLIENTS];
+        int map[4+MAX_CLIENTS],n=0;
         pf[n]=(struct pollfd){listen_fd,POLLIN,0};map[n++]=-1;
         if(input_fd>=0){pf[n]=(struct pollfd){input_fd,POLLIN|POLLHUP|POLLERR,0};map[n++]=-3;}
         if(status_fd>=0){pf[n]=(struct pollfd){status_fd,POLLIN|POLLHUP|POLLERR,0};map[n++]=-4;}
+        if(st.lid_fd>=0){pf[n]=(struct pollfd){st.lid_fd,POLLIN,0};map[n++]=-5;}
         for(int i=0;i<MAX_CLIENTS;i++)if(clients[i].fd>=0){
             pf[n]=(struct pollfd){clients[i].fd,POLLIN|POLLHUP|POLLERR,0};map[n++]=i;
         }
@@ -1179,6 +1353,7 @@ int main(void)
                 if(strstr(b,"RAW ")) mark_activity(&st);
                 continue;
             }
+            if(map[j]==-5){lid_policy(&st);continue;}
             if(map[j]==-4){
                 if(pf[j].revents&(POLLHUP|POLLERR)){close(status_fd);status_fd=-1;continue;}
                 char b[128];ssize_t r=read(status_fd,b,sizeof(b));
@@ -1199,6 +1374,8 @@ int main(void)
         close(input_fd);
     if (status_fd >= 0)
         close(status_fd);
+    if (st.lid_fd >= 0)
+        close(st.lid_fd);
     close(listen_fd);
     unlink(SOCKET_PATH);unlink(PIDFILE);
     return 0;

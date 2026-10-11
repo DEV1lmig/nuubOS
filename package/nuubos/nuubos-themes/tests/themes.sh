@@ -44,6 +44,8 @@ ck "remove resets users" '[ "$(c remove neon)" = OK ] && c selected $U | grep -q
 ck "broken selection falls back" 'echo "THEME=ghost" >> "$R/state/users/$U/settings.conf" && c selected $U | grep -qx "id=nuubos"'
 ck "tokens resolve the user's mood" 'c select $U sakura >/dev/null && c tokens $U | grep -qx "accent=#ff6fae" && c tokens $U | grep -qx "id=sakura"'
 ck "tokens of the active user" 'mkdir -p "$R/run/nuubos/user" && echo $U > "$R/run/nuubos/user/active" && c tokens | grep -qx "id=sakura"'
+ck "splash palette of the active user" 'c splash-palette >/dev/null && grep -qx "accent=#ff6fae" "$R/etc/nuubos/splash.palette" && [ "$(wc -l < "$R/etc/nuubos/splash.palette")" = 4 ]'
+ck "splash palette rewritten only on change" 'c splash-palette >/dev/null && [ ! -e "$R/etc/nuubos/splash.palette.tmp" ]'
 ck "no staging left" '! ls -a "$R/userdata/themes" | grep -q "^\.stage"'
 [ "$FAIL" = 0 ] && echo "[PASS] themes"
 exit "$FAIL"

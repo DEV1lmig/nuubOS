@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 11 Oct 2026 10:15:00 +0200
+Subject: [PATCH] output: keep the boot splash at the output's logical size
+
+The first-frame splash (0001) is a buffer of the output's pixel size placed
+without a destination size, so it is laid out at one logical unit per pixel.
+When nuubos-wl-output-apply later gives the built-in panel a scale (1.125 on
+720x720 panels) the splash grew by that factor until nuubUI drew its own
+frame: a visible jump at every boot. Give the buffer the output's logical
+size at creation and on every layout change, so it stays one pixel per
+output pixel.
+
+---
+--- a/src/output.c
++++ b/src/output.c
+@@ -537,6 +537,38 @@
+ 
+ static struct wlr_scene_tree *boot_tree;
+ static bool boot_tree_released;
++/* nuubOS: the splash buffer, its output and pixel size, so it keeps the
++ * output's logical size when a scale is applied after the first frame
++ * (nuubos-wl-output-apply: 1.125 on 720x720 panels). */
++static struct wlr_scene_buffer *boot_buffer;
++static struct wlr_output *boot_output;
++static int boot_width, boot_height;
++
++/* One splash pixel per output pixel at any output scale. */
++static void
++nuubos_fit_boot_splash(void)
++{
++	struct output *output;
++
++	if (!boot_tree || !boot_buffer) {
++		return;
++	}
++	wl_list_for_each(output, &server.outputs, link) {
++		if (output->wlr_output != boot_output) {
++			continue;
++		}
++		float scale = boot_output->scale > 0 ? boot_output->scale : 1.0f;
++
++		wlr_scene_buffer_set_dest_size(boot_buffer,
++			(int)(boot_width / scale + 0.5f),
++			(int)(boot_height / scale + 0.5f));
++		if (output->scene_output) {
++			wlr_scene_node_set_position(&boot_tree->node,
++				output->scene_output->x, output->scene_output->y);
++		}
++		return;
++	}
++}
+ 
+ /*
+  * The first client toplevel draws its own matching boot frame, so the
+@@ -555,6 +587,8 @@
+ 	if (boot_tree) {
+ 		wlr_scene_node_destroy(&boot_tree->node);
+ 		boot_tree = NULL;
++		boot_buffer = NULL;
++		boot_output = NULL;
+ 		wlr_log(WLR_INFO, "nuubOS: released first-frame boot splash");
+ 	}
+ }
+@@ -623,8 +657,12 @@
+ 	struct lab_data_buffer *buffer =
+ 		buffer_create_from_data(pixels, width, height, width * 4);
+ 
+-	wlr_scene_buffer_create(boot_tree, &buffer->base);
++	boot_buffer = wlr_scene_buffer_create(boot_tree, &buffer->base);
+ 	wlr_buffer_drop(&buffer->base);
++	boot_output = wlr_output;
++	boot_width = width;
++	boot_height = height;
++	nuubos_fit_boot_splash();
+ 
+ 	wlr_log(WLR_INFO,
+ 		"nuubOS: installed root atomic first-frame boot splash %dx%d",
+@@ -945,6 +983,7 @@
+ {
+ 	output_update_all_usable_areas(/*layout_changed*/ true);
+ 	session_lock_update_for_layout_change();
++	nuubos_fit_boot_splash();
+ 
+ 	/*
+ 	 * "Move" each wlr_output_cursor (in per-output coordinates) to
+-- 
+2.51.0

@@ -47,6 +47,37 @@ if [ "$1" = "--hdmi-mode" ]; then
     exit $?
 fi
 
+# Built-in panel density: the 720x720 (RG CubeXX, ~258 ppi) and 720x480
+# (RG34XX family, ~254 ppi) panels are much denser than the 640x480
+# reference (RG40XX-V, ~200 ppi). 1.125 gives the UI a 640x640 / 640x427
+# logical screen: the width its layouts are made for, with text and
+# controls 12.5 % larger (docs/dev/ui.md). Other panels: 1.
+panel_scale()
+{
+    /usr/bin/wlr-randr 2>/dev/null | awk -v out="$1" '
+        /^[A-Za-z0-9-]+ / { name = $1 }
+        name == out && /current/ { split($1, wh, "x"); w = wh[1] + 0; h = wh[2] + 0 }
+        END { print (w == 720 && (h == 720 || h == 480)) ? "1.125" : "1" }'
+}
+
+current_scale()
+{
+    /usr/bin/wlr-randr 2>/dev/null | awk -v out="$1" '
+        /^[A-Za-z0-9-]+ / { name = $1 }
+        name == out && /^  Scale:/ { print $2 + 0 }'
+}
+
+# Scale of the built-in panel only (session start without HDMI): no mode
+# change, nothing when it already matches.
+if [ "$1" = "--panel-scale" ]; then
+    PANEL="$(/usr/bin/wlr-randr 2>/dev/null | awk '/^[A-Za-z0-9-]+ / && $1 !~ /^HDMI-A-/ { print $1; exit }')"
+    [ -n "$PANEL" ] || exit 0
+    WANT="$(panel_scale "$PANEL")"
+    [ "$(current_scale "$PANEL")" = "$WANT" ] && exit 0
+    /usr/bin/wlr-randr --output "$PANEL" --scale "$WANT" >/dev/null 2>&1
+    exit 0
+fi
+
 # Output scale for the current mode of $1 (see policy below).
 hdmi_scale()
 {
@@ -85,6 +116,7 @@ else
     PRIMARY="$(printf '%s\n' "$OUTPUTS" | head -n 1)"
     if [ -n "$PRIMARY" ]; then
         /usr/bin/wlr-randr --output "$PRIMARY" --on --preferred >/dev/null 2>&1 || true
+        /usr/bin/wlr-randr --output "$PRIMARY" --scale "$(panel_scale "$PRIMARY")" >/dev/null 2>&1 || true
         printf '%s\n' "$OUTPUTS" | while read -r OUTPUT; do
             [ -n "$OUTPUT" ] || continue
             [ "$OUTPUT" = "$PRIMARY" ] && continue

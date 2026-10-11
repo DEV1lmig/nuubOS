@@ -1,0 +1,21 @@
+[package]
+name = "nuubos-admind"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "nuubos-admind"
+path = "admind/main.rs"
+
+[dependencies]
+serde = "=1.0.229"
+serde_json = "=1.0.151"
+zbus = "=5.19.0"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"

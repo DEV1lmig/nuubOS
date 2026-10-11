@@ -7,7 +7,7 @@
  *   52/53 BIOS Files (EPIC-033)     nuubos-biosctl
  *   54 RetroAchievements (EPIC-017) nuubos-achievementsctl
  *   55 Game Hotkeys, 56 Performance Overlay   nuubos-emud SETTINGS / SET
- *   57 Start Game (Details shell)   nuubos-emud STATES, LAUNCH <mode>
+ *   Start Game (a Home bottom sheet) nuubos-emud STATES, LAUNCH <mode>
  *   63 Software Update (EPIC-048)   nuubos-updatectl, nuubos-update-apply
  *   66 Syncthing (EPIC-034)         nuubos-syncctl (per user)
  *
@@ -22,8 +22,7 @@
  *
  * 50 is the console game page GameDetailsPage (details-page: hero cover,
  * blurred backdrop, metadata chips, description, a row of actions), 51
- * and 57 a Settings shell of their own (details-active), all opened from
- * Home; 52-54 are Settings pages. This module keeps
+ * a Settings shell of its own (details-active), both opened from Home; 52-54 are Settings pages. This module keeps
  * no product state: every row reflects the last service reply and every
  * action is a service request. Long work (scraping) is a nuubos-jobd job
  * whose progress is the job's Live Notification.
@@ -143,9 +142,6 @@ struct State {
     gaming_keys: Vec<String>,
     /* The user's emulation settings (nuubos-emud SETTINGS). */
     emu: Vec<(String, String)>,
-    /* Start Game (57): the game's save states (slot, mtime, local hh:mm;
-     * slot -1 = the automatic state). */
-    states: Vec<(i32, i64, String)>,
     remote: Vec<(String, String)>,
     remote_password: String,
     update: Vec<(String, String)>,
@@ -572,21 +568,6 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                 rows.push((format!("ov:{field}"), r, on));
             }
         }
-        57 => {
-            /* Continue = the most recent state; then every state; then a
-             * fresh start. */
-            if let Some(newest) = st.states.iter().max_by_key(|s| s.1) {
-                let what = if newest.0 < 0 { tr(ui, 765, "Automatic Save") } else { tr_arg(ui, 423, "Slot {0}", &newest.0.to_string()) };
-                rows.push(("start:resume".into(), row(tr(ui, 763, "Continue"), what,
-                    tr_arg(ui, 766, "Saved {0}", &saved_when(ui, newest.1, &newest.2))), true));
-            }
-            for (slot, mtime, hhmm) in &st.states {
-                let title = if *slot < 0 { tr(ui, 765, "Automatic Save") } else { tr_arg(ui, 423, "Slot {0}", &slot.to_string()) };
-                rows.push((format!("start:slot:{slot}"), row(title, String::new(),
-                    tr_arg(ui, 766, "Saved {0}", &saved_when(ui, *mtime, hhmm))), true));
-            }
-            rows.push(("start:new".into(), row(tr(ui, 764, "Start from the Beginning"), String::new(), String::new()), true));
-        }
         _ => {}
     }
     rows
@@ -817,7 +798,7 @@ pub(crate) fn render(ui: &HomeWindow) {
         render_details(ui);
         return;
     }
-    if !(50..=57).contains(&view) && view != 63 && view != 66 {
+    if !(50..=56).contains(&view) && view != 63 && view != 66 {
         return;
     }
     let rows = STATE.with(|st| build_rows(ui, &st.borrow(), view));
@@ -839,7 +820,6 @@ pub(crate) fn render(ui: &HomeWindow) {
         54 => tr(ui, 584, "RetroAchievements"),
         55 => tr(ui, 772, "Game Hotkeys"),
         56 => tr(ui, 774, "Performance Overlay"),
-        57 => STATE.with(|st| st.borrow().details.title.clone()),
         63 => tr(ui, 732, "STORAGE & SOFTWARE"),
         _ => tr(ui, 727, "SERVICES"),
     };
@@ -986,29 +966,26 @@ pub fn open_details(ui: &HomeWindow, id: &str, title: &str, cover: Option<Image>
     load_details_then(ui, id.to_owned(), true);
 }
 
-/* Home: a long press on a game card. The rows come from emud STATES. */
-pub fn open_launch_menu(ui: &HomeWindow, id: &str, title: &str, cover: Option<Image>) {
-    ACTIVE.store(true, Ordering::SeqCst);
-    STATE.with(|st| {
-        let mut st = st.borrow_mut();
-        st.details = Details { id: id.to_owned(), title: title.to_owned(), available: true, ..Default::default() };
-        st.states.clear();
-        st.busy = false;
-    });
-    ui.set_details_active(true);
-    ui.set_details_title(title.into());
-    ui.set_details_subtitle("".into());
-    ui.set_details_description("".into());
-    ui.set_details_has_cover(cover.is_some());
-    ui.set_details_cover(cover.unwrap_or_default());
-    show(ui, 57);
-    ui.set_settings_open(true);
-    write_ui_context("settings");
+/* ---------------------------------------------------------------- */
+/* Start Game sheet (Confirm held on a game card)                   */
+/* ---------------------------------------------------------------- */
+
+thread_local! {
+    /* The game and its save states, newest first: (slot, mtime);
+     * slot -1 = the automatic state. */
+    static START: RefCell<(String, Vec<(i32, i64)>)> = RefCell::new((String::new(), Vec::new()));
+    /* The held card while emud lists its states (images stay on this thread). */
+    static START_CARD: RefCell<Option<crate::HomeCard>> = RefCell::new(None);
+}
+
+/* Opens once emud has listed the states, so the sheet rises complete. */
+pub fn open_start_sheet(ui: &HomeWindow, card: &crate::HomeCard) {
     let weak = ui.as_weak();
-    let id = id.to_owned();
+    let id = card.key.to_string();
+    START_CARD.with(|c| *c.borrow_mut() = Some(card.clone()));
     thread::spawn(move || {
         let reply = emulation(&format!("STATES\t{id}"), true);
-        let states: Vec<(i32, i64, String)> = reply
+        let mut states: Vec<(i32, i64, String)> = reply
             .lines()
             .filter_map(|l| l.strip_prefix("state="))
             .filter_map(|v| {
@@ -1016,15 +993,77 @@ pub fn open_launch_menu(ui: &HomeWindow, id: &str, title: &str, cover: Option<Im
                 Some((f.first()?.parse().ok()?, f.get(1)?.parse().ok()?, f.get(2).unwrap_or(&"").to_string()))
             })
             .collect();
+        states.sort_by(|a, b| b.1.cmp(&a.1));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            if !ACTIVE.load(Ordering::SeqCst) || ui.get_settings_view() != 57 {
+            let Some(card) = START_CARD.with(|c| c.borrow_mut().take()).filter(|c| c.key.as_str() == id) else { return };
+            if ui.get_settings_open() || crate::library::GAME_RUNNING.load(Ordering::SeqCst) {
                 return;
             }
-            STATE.with(|st| st.borrow_mut().states = states);
-            render(&ui);
+            let items: Vec<crate::StartSheetItem> = states
+                .iter()
+                .enumerate()
+                .map(|(i, (slot, mtime, hhmm))| crate::StartSheetItem {
+                    label: if *slot < 0 { tr(&ui, 765, "Automatic Save") } else { tr_arg(&ui, 423, "Slot {0}", &slot.to_string()) }.into(),
+                    detail: tr_arg(&ui, 766, "Saved {0}", &saved_when(&ui, *mtime, hhmm)).into(),
+                    tile: if *slot < 0 { String::new() } else { slot.to_string() }.into(),
+                    latest: i == 0,
+                })
+                .collect();
+            START.with(|s| *s.borrow_mut() = (id, states.iter().map(|s| (s.0, s.1)).collect()));
+            ui.set_start_sheet_title(card.title.clone());
+            ui.set_start_sheet_system(card.system_name.clone());
+            ui.set_start_sheet_has_cover(card.has_cover);
+            ui.set_start_sheet_cover(if card.has_cover { card.cover.clone() } else { Image::default() });
+            ui.set_start_sheet_items(ModelRc::from(Rc::new(VecModel::from(items))));
+            ui.set_start_sheet_index(0);
+            ui.set_start_sheet_scroll(0);
+            ui.set_start_sheet_open(true);
         });
     });
+}
+
+pub fn close_start_sheet(ui: &HomeWindow) {
+    ui.set_start_sheet_open(false);
+    ui.set_start_sheet_items(ModelRc::default());
+    ui.set_start_sheet_cover(Image::default());
+}
+
+/* Home input while the sheet is open: row 0 starts from the beginning,
+ * row n the n-th newest state. */
+pub fn start_sheet_action(ui: &HomeWindow, action: &str) {
+    let count = START.with(|s| s.borrow().1.len()) as i32 + 1;
+    match action {
+        "menu_up" | "menu_down" => {
+            play_ui_sound(action);
+            let next = (ui.get_start_sheet_index() + if action == "menu_up" { -1 } else { 1 }).rem_euclid(count);
+            ui.set_start_sheet_index(next);
+            /* Saves scroll under the fixed first row. */
+            let visible = ui.get_start_sheet_visible_rows().max(1);
+            let save = (next - 1).max(0);
+            let scroll = ui.get_start_sheet_scroll();
+            ui.set_start_sheet_scroll(if save < scroll { save } else if save >= scroll + visible { save - visible + 1 } else { scroll });
+        }
+        "menu_back" => {
+            play_ui_sound(action);
+            close_start_sheet(ui);
+        }
+        "menu_confirm" => {
+            play_ui_sound(action);
+            let index = ui.get_start_sheet_index();
+            let (id, states) = START.with(|s| s.borrow().clone());
+            let mode = match index {
+                0 => "new".to_owned(),
+                n => match states.get(n as usize - 1) {
+                    Some((slot, _)) => format!("slot:{slot}"),
+                    None => return,
+                },
+            };
+            close_start_sheet(ui);
+            crate::library::launch_with_mode(ui, &id, true, &mode);
+        }
+        _ => {}
+    }
 }
 
 pub fn leave_details(ui: &HomeWindow) {
@@ -1258,12 +1297,6 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
                     }
                 });
             });
-        }
-        k if k.starts_with("start:") => {
-            let id = d.id.clone();
-            let mode = k[6..].to_owned();
-            leave_details(ui);
-            crate::library::launch_with_mode(ui, &id, true, &mode);
         }
         "core" => open_core_choice(ui),
         "aspect" => open_aspect_choice(ui),
@@ -1688,7 +1721,7 @@ fn service_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     rows.push(("svc:smb".into(), toggle(tr(ui, 602, "File Sharing (SMB)"), get("smb") == "1",
         if address.is_empty() { String::new() } else { format!("\\\\{address}\\nuubOS") }), true));
     rows.push(("svc:web".into(), toggle(tr(ui, 603, "Web Administration"), get("web") == "1",
-        if address.is_empty() { String::new() } else { format!("http://{address}") }), true));
+        if address.is_empty() { String::new() } else { format!("https://{address}") }), true));
     rows.push(("password".into(), row(tr(ui, 172, "Password"),
         if st.remote_password.is_empty() { "••••-••••-••••".into() } else { st.remote_password.clone() },
         if st.remote_password.is_empty() { tr(ui, 608, "Press to show") }

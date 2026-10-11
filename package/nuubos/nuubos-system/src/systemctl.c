@@ -53,7 +53,7 @@ int main(int argc, char **argv)
     if (argc < 2) {
         fprintf(stderr,
                 "Usage: nuubos-systemctl status | set-profile <auto|battery-saver> | "
-                "set-auto-battery <0-50> | set-sleep <min> | "
+                "set-auto-battery <0-50> | set-charge-limit <80-100> | set-sleep <min> | "
                 "set-storage-backup-policy <off|daily|weekly|monthly> | "
                 "set-storage-mode <single|auto|dual> | storage-backup-now | "
                 "storage-move-back | storage-adopt <tf2-cid> | sleep | restart | poweroff | activity | reset-system-settings\n");
@@ -69,6 +69,8 @@ int main(int argc, char **argv)
         snprintf(command, sizeof(command), "SET PROFILE %s\n", argv[2]);
     else if (!strcmp(argv[1], "set-auto-battery") && argc == 3)
         snprintf(command, sizeof(command), "SET AUTO_BATTERY %s\n", argv[2]);
+    else if (!strcmp(argv[1], "set-charge-limit") && argc == 3)
+        snprintf(command, sizeof(command), "SET CHARGE_LIMIT %s\n", argv[2]);
     else if (!strcmp(argv[1], "set-sleep") && argc == 3)
         snprintf(command, sizeof(command), "SET SLEEP %s\n", argv[2]);
     else if (!strcmp(argv[1], "set-storage-backup-policy") && argc == 3) {

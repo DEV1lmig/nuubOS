@@ -11,13 +11,15 @@ NUUBOS_SFTP_SERVER_DEPENDENCIES = openssh
 
 # OpenSSH's Buildroot package builds the subsystem helper even when its
 # client/server install options are disabled. Install only that helper so
-# Dropbear remains the sole SSH daemon on nuubOS.
+# Dropbear remains the sole SSH daemon on nuubOS. Dropbear runs the
+# wrapper, which starts sessions in /userdata.
 define NUUBOS_SFTP_SERVER_BUILD_CMDS
 	test -x $(OPENSSH_DIR)/sftp-server
 endef
 
 define NUUBOS_SFTP_SERVER_INSTALL_TARGET_CMDS
-	$(INSTALL) -D -m 0755 $(OPENSSH_DIR)/sftp-server $(TARGET_DIR)/usr/libexec/sftp-server
+	$(INSTALL) -D -m 0755 $(OPENSSH_DIR)/sftp-server $(TARGET_DIR)/usr/libexec/sftp-server.bin
+	$(INSTALL) -D -m 0755 $(@D)/sftp-server $(TARGET_DIR)/usr/libexec/sftp-server
 	$(RM) -rf $(TARGET_DIR)/etc/ssh
 endef
 

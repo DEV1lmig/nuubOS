@@ -1,13 +1,18 @@
 config BR2_PACKAGE_NUUBOS_REMOTE
 	bool "nuubos-remote"
 	depends on BR2_USE_MMU
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	select BR2_PACKAGE_HOST_RUSTC
 	select BR2_PACKAGE_DROPBEAR
 	select BR2_PACKAGE_KSMBD_TOOLS
 	select BR2_PACKAGE_LIGHTTPD
+	select BR2_PACKAGE_LIGHTTPD_OPENSSL
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_CANTARELL
 	select BR2_PACKAGE_NUUBOS_LIBRARY
 	help
 	  EPIC-037/038/039: Remote Services, each disabled by default and
 	  switched in Settings: SSH/SCP/SFTP (Dropbear, root + device password),
-	  SMB file sharing (kernel ksmbd) and the authenticated Web
-	  administration (lighttpd), all with one random
-	  per-device credential kept in STATE.
+	  SMB file sharing (kernel ksmbd) and the Web administration (HTTPS,
+	  lighttpd + nuubos-admind, sign-in page with the device credential),
+	  all with one random per-device credential kept in STATE.

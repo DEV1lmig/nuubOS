@@ -10,7 +10,7 @@
  * applied. Single pass, two texture fetches: negligible on Mali-G31.
  */
 
-#pragma parameter CRT_SCANLINES "Scanline strength" 0.55 0.0 1.0 0.05
+#pragma parameter CRT_SCANLINES "Scanline strength" 0.25 0.0 1.0 0.05
 #pragma parameter CRT_BLEND "Horizontal blend" 0.30 0.0 0.5 0.05
 
 #if defined(VERTEX)
@@ -65,14 +65,17 @@ COMPAT_VARYING vec2 vTexCoord;
 uniform float CRT_SCANLINES;
 uniform float CRT_BLEND;
 #else
-#define CRT_SCANLINES 0.55
+#define CRT_SCANLINES 0.25
 #define CRT_BLEND 0.30
 #endif
 
 void main()
 {
     vec2 texel = vTexCoord * TextureSize;
-    vec2 scale = max(floor(OutputSize / InputSize + 0.01), vec2(1.0));
+    float s = OutputSize.y / InputSize.y;
+    /* A fractional vertical scale (4:3 on a square screen) gives lines 2
+     * or 3 rows: sample the pixel's own position. */
+    bool whole = abs(s - floor(s + 0.5)) < 0.01;
     vec2 base = floor(texel);
     vec2 f = texel - base;
 
@@ -87,13 +90,15 @@ void main()
 
     /* Beam: centred half an output row above the pixel centre, so at 2x
      * the first row is the beam and the second the gap. */
-    float centre = 0.5 - 0.5 / scale.y;
-    float row = (floor(f.y * scale.y) + 0.5) / scale.y;
+    float centre = whole ? 0.5 - 0.5 / s : 0.5;
+    float row = whole ? (floor(f.y * s) + 0.5) / s : f.y;
     float dy = row - centre;
     float lum = dot(col, vec3(0.299, 0.587, 0.114));
     float width = mix(0.20, 0.34, lum);
     float beam = exp(-(dy * dy) / (2.0 * width * width));
-    float strength = scale.y >= 2.0 ? CRT_SCANLINES : 0.0;
+    /* Light scanlines everywhere (user request 2026-10-11: 0.55 read as
+     * dark lines, on N64 and on fractional scales most). */
+    float strength = s >= 2.0 ? CRT_SCANLINES : 0.0;
     float scan = 1.0 - strength * (1.0 - beam);
 
     /* Gain back the light the gaps take: at 2x a gap row keeps ~0.5, so

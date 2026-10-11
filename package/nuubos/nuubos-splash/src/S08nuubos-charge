@@ -1,0 +1,17 @@
+#!/bin/sh
+# Charge screen: when the console was switched on by plugging in the
+# charger, nuubos-charge shows the battery instead of booting and returns
+# (boot continues) on Power/Start; it powers off when the charger is
+# unplugged. Any other power-on source returns at once.
+
+case "${1:-}" in
+    start)
+        /usr/bin/nuubos-charge >/run/nuubos/charge.log 2>&1
+        ;;
+    stop|restart)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}" >&2
+        exit 1
+        ;;
+esac

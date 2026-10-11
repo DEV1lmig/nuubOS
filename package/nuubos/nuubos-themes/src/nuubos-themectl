@@ -163,6 +163,17 @@ set_user_theme()
     { grep -v '^THEME=' "$f"; echo "THEME=$2"; } > "$f.tmp" && chmod 600 "$f.tmp" && mv "$f.tmp" "$f"
 }
 
+# nuubUI applies a Mood chosen elsewhere (Web administration) at once: one
+# line on its lifecycle FIFO. Opened read-write, so it never blocks when
+# nuubUI is not running.
+notify_ui()
+{
+    fifo="$R/run/nuubos/ui-control"
+    [ -p "$fifo" ] || return 0
+    { exec 3<>"$fifo" && echo mood >&3; exec 3>&-; } 2>/dev/null
+    return 0
+}
+
 case "${1:-}" in
     list) list ;;
     validate) validate "${2:-}" ;;
@@ -183,6 +194,7 @@ case "${1:-}" in
         valid_uuid "${2:-}" || { echo "ERR user"; exit 1; }
         theme_dir "${3:-}" >/dev/null || { echo "ERR theme"; exit 1; }
         set_user_theme "$2" "$3" || { echo "ERR user"; exit 1; }
+        notify_ui
         echo OK
         ;;
     selected)
@@ -204,5 +216,19 @@ case "${1:-}" in
         done
         echo "end=1"
         ;;
-    *) echo "Usage: nuubos-themectl list | validate DIR | install SRC | remove ID | select USER ID | selected USER | tokens [USER]" >&2; exit 2 ;;
+    splash-palette)
+        # The lifecycle splash colours (nuubos-splash-render.h): the active
+        # user's Mood, cached on the rootfs because the kernel splash runs
+        # before STATE is mounted. Rewritten only when it changes.
+        out="$R/etc/nuubos/splash.palette"
+        # Nobody signed in (user picker): keep the last user's colours.
+        u="${2:-$(cat "$R/run/nuubos/user/active" 2>/dev/null)}"
+        valid_uuid "$u" || { echo OK; exit 0; }
+        new="$("$0" tokens "$u" | sed -n 's/^\(background\|text\|accent\|surface\)=\(#[0-9a-fA-F]\{6\}\)$/\1=\2/p')"
+        [ -n "$new" ] || { echo "ERR tokens"; exit 1; }
+        [ "$(cat "$out" 2>/dev/null)" = "$new" ] && { echo OK; exit 0; }
+        mkdir -p "${out%/*}" && printf '%s\n' "$new" > "$out.tmp" && mv "$out.tmp" "$out" && sync || { echo "ERR storage"; exit 1; }
+        echo OK
+        ;;
+    *) echo "Usage: nuubos-themectl list | validate DIR | install SRC | remove ID | select USER ID | selected USER | tokens [USER] | splash-palette [USER]" >&2; exit 2 ;;
 esac

@@ -80,6 +80,23 @@ fn tool(args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/* With nobody signed in (user picker at boot), the Mood of the last user
+ * (else the default user), so the picker matches the boot splash. */
+fn last_user() -> String {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::os::unix::net::UnixStream::connect("/run/nuubos/usersd.sock") else {
+        return String::new();
+    };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let _ = s.write_all(b"STATUS\n");
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    let get = |k: &str| out.lines().find_map(|l| l.strip_prefix(k)).unwrap_or("").to_owned();
+    let last = get("last_user=");
+    if last.is_empty() { get("default_user=") } else { last }
+}
+
 fn safe_mode() -> bool {
     std::env::var("NUUBOS_SAFE_MODE").as_deref() == Ok("1")
 }
@@ -89,14 +106,20 @@ pub fn apply_active(ui: &HomeWindow) {
     let user = ui.get_active_user_id().to_string();
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let path = if user.is_empty() || safe_mode() {
+        let who = if user.is_empty() { last_user() } else { user.clone() };
+        let path = if who.is_empty() || safe_mode() {
             String::new()
         } else {
-            let out = tool(&["selected", &user]);
+            let out = tool(&["selected", &who]);
             out.lines().find_map(|l| l.strip_prefix("path=")).unwrap_or("").to_owned()
         };
         let tokens = load(&path);
         let name = current_name(&path);
+        /* The lifecycle splash (kernel, labwc, nuubUI) wears this Mood
+         * from the next restart or power off on. */
+        if !safe_mode() && !user.is_empty() {
+            let _ = tool(&["splash-palette"]);
+        }
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 apply(&ui, &tokens);

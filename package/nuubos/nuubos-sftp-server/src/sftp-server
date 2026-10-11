@@ -1,0 +1,4 @@
+#!/bin/sh
+# Dropbear's SFTP subsystem (EPIC-037). Clients start in the user storage,
+# the same folder SMB shares; absolute paths still work as root.
+exec /usr/libexec/sftp-server.bin -d /userdata "$@"

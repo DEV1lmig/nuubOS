@@ -29,23 +29,21 @@ log()
 log "mode=$MODE"
 
 #
-# v0.8.1 lifecycle animation:
-#   curtain close 460 ms
-#   small phase gap
-#   line contract 220 ms
-#   plus margin before ownership handoff
+# Lifecycle splash animation (nuubUI/Quick Menu src/splash.rs): fade-in
+# 280 ms, then two 900 ms sweeps (restart) or a 650 ms drain (power off),
+# ending on the raster nuubos-splash --prepare draws below.
 #
 if [ "${NUUBOS_LIFECYCLE_PREANIMATED:-0}" = "1" ]; then
     #
     # A system-wide Overlay client (currently Quick Menu) has already
-    # completed the exact v0.8.1 lifecycle animation and is holding the
+    # completed the lifecycle animation and is holding the
     # final raster on KMS. Do not trigger a second Home animation underneath.
     #
     log "slint-transition=preanimated-overlay"
 elif pidof nuubui-home >/dev/null 2>&1 && [ -p /run/nuubos/ui-control ]; then
     printf '%s\n' "$MODE" > /run/nuubos/ui-control
     log "slint-transition=sent"
-    sleep 0.80
+    if [ "$MODE" = reboot ]; then sleep 2.15; else sleep 1.00; fi
 else
     log "slint-transition=unavailable"
 fi
@@ -67,6 +65,11 @@ sync
 # Preserve the already-qualified v0.7.8 ownership handoff:
 # bypass normal wlroots DRM teardown and leave the final KMS scanout untouched.
 #
+# Keep the DRM device open past labwc: on its last close the kernel's
+# fbdev emulation would restore the 640x480 framebuffer (small on HDMI)
+# instead of leaving nuubUI's full-size final splash on screen.
+/usr/bin/nuubos-splash --hold >>"$LOG" 2>&1 && log "drm-hold=started"
+
 if pidof labwc >/dev/null 2>&1; then
     log "labwc-before=$(pidof labwc 2>/dev/null)"
     killall -9 labwc >>"$LOG" 2>&1 || true

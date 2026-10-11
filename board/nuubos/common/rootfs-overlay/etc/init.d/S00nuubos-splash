@@ -12,7 +12,10 @@ case "${1:-}" in
             exit 1
         fi
 
-        /usr/bin/nuubos-splash boot >"$LOGFILE" 2>&1
+        # KMS at each output's own mode (full size on HDMI too); the
+        # fbdev framebuffer only when KMS is not available.
+        /usr/bin/nuubos-splash --kms boot >"$LOGFILE" 2>&1 ||
+            /usr/bin/nuubos-splash boot >>"$LOGFILE" 2>&1
         ;;
     stop)
         ;;

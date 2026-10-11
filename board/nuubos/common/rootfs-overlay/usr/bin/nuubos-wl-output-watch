@@ -33,6 +33,9 @@ hdmi_policy_unmet()
 
 if hdmi_policy_unmet; then
     /usr/bin/nuubos-wl-output-apply
+elif ! /usr/bin/wlr-randr 2>/dev/null | grep -q '^HDMI-A-'; then
+    # Built-in panel only: its density scale (CubeXX 720x720 -> 1.125).
+    /usr/bin/nuubos-wl-output-apply --panel-scale
 fi
 
 udevadm monitor --udev --subsystem-match=drm 2>/dev/null | while read -r LINE; do

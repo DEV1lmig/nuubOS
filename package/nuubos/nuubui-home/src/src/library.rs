@@ -866,6 +866,7 @@ fn apply_snapshot(ui: &HomeWindow, snap: LibSnapshot) {
         ui.set_home_collections_index(0);
         ui.set_home_apps_index(0);
         ui.set_home_sheet_open(false);
+        crate::gameui::close_start_sheet(ui);
         ui.set_find_open(false);
         close_grid(ui);
         pick_empty_variant(ui);
@@ -906,7 +907,7 @@ fn launch_game(ui: &HomeWindow, card: &HomeCard) {
     launch_by_id(ui, card.key.as_str(), card.available);
 }
 
-/* Confirm held on a game card: Start Game (states, fresh start) after
+/* Confirm held on a game card: the Start Game sheet (fresh start, states) after
  * LONG_PRESS_MS; released before, the game resumes (EPIC-019). */
 const LONG_PRESS_MS: u64 = 600;
 
@@ -927,8 +928,7 @@ fn press_game(ui: &HomeWindow, card: &HomeCard) {
             return;
         }
         play_ui_sound("menu_confirm");
-        let cover = held.has_cover.then(|| held.cover.clone());
-        crate::gameui::open_launch_menu(&ui, held.key.as_str(), held.title.as_str(), cover);
+        crate::gameui::open_start_sheet(&ui, &held);
     });
     GAME_PRESS.with(|p| *p.borrow_mut() = Some((timer, card.clone())));
 }
@@ -1287,6 +1287,10 @@ fn move_grid(ui: &HomeWindow, delta: i32) -> bool {
 
 /* Home / library navigation. Returns nothing: every press is consumed. */
 pub fn handle_home_action(ui: &HomeWindow, action: &str) {
+    if ui.get_start_sheet_open() {
+        crate::gameui::start_sheet_action(ui, action);
+        return;
+    }
     if ui.get_home_sheet_open() {
         sheet_action(ui, action);
         return;

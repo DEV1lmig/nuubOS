@@ -1,0 +1,118 @@
+// The nuubOS logo (user decision 2026-10-10): the wordmark as a dot
+// matrix, "nuub" in Theme.text and "OS" in Theme.accent (the Mood). Same
+// dot table as nuubos-splash-render.h / src/splash_core.rs / www/app.js.
+// The grid pitch is snapped to whole physical pixels so the dots stay
+// crisp; the item is a cached layer (static content).
+import { Theme } from "../theme.slint";
+
+struct LogoDot { c: int, r: int, a: bool }
+
+export component NuubLogo inherits Rectangle {
+    /* Wanted height; the logo uses the largest crisp pitch that fits. */
+    in property <length> logo-height: 21px;
+    in property <color> text-color: Theme.text;
+    in property <color> accent-color: Theme.accent;
+    out property <length> cell: max(2phx, floor(root.logo-height / 7 / 1phx) * 1phx);
+    out property <length> gap: max(1phx, floor(root.cell / 6 / 1phx) * 1phx);
+    width: root.cell * 37;
+    height: root.cell * 7;
+    cache-rendering-hint: true;
+    for d in [
+        { c: 18, r: 0, a: false },
+        { c: 26, r: 0, a: true },
+        { c: 27, r: 0, a: true },
+        { c: 28, r: 0, a: true },
+        { c: 29, r: 0, a: true },
+        { c: 33, r: 0, a: true },
+        { c: 34, r: 0, a: true },
+        { c: 35, r: 0, a: true },
+        { c: 36, r: 0, a: true },
+        { c: 18, r: 1, a: false },
+        { c: 25, r: 1, a: true },
+        { c: 26, r: 1, a: true },
+        { c: 29, r: 1, a: true },
+        { c: 30, r: 1, a: true },
+        { c: 32, r: 1, a: true },
+        { c: 0, r: 2, a: false },
+        { c: 1, r: 2, a: false },
+        { c: 2, r: 2, a: false },
+        { c: 3, r: 2, a: false },
+        { c: 6, r: 2, a: false },
+        { c: 10, r: 2, a: false },
+        { c: 12, r: 2, a: false },
+        { c: 16, r: 2, a: false },
+        { c: 18, r: 2, a: false },
+        { c: 19, r: 2, a: false },
+        { c: 20, r: 2, a: false },
+        { c: 21, r: 2, a: false },
+        { c: 25, r: 2, a: true },
+        { c: 30, r: 2, a: true },
+        { c: 32, r: 2, a: true },
+        { c: 0, r: 3, a: false },
+        { c: 4, r: 3, a: false },
+        { c: 6, r: 3, a: false },
+        { c: 10, r: 3, a: false },
+        { c: 12, r: 3, a: false },
+        { c: 16, r: 3, a: false },
+        { c: 18, r: 3, a: false },
+        { c: 22, r: 3, a: false },
+        { c: 25, r: 3, a: true },
+        { c: 30, r: 3, a: true },
+        { c: 33, r: 3, a: true },
+        { c: 34, r: 3, a: true },
+        { c: 35, r: 3, a: true },
+        { c: 0, r: 4, a: false },
+        { c: 4, r: 4, a: false },
+        { c: 6, r: 4, a: false },
+        { c: 10, r: 4, a: false },
+        { c: 12, r: 4, a: false },
+        { c: 16, r: 4, a: false },
+        { c: 18, r: 4, a: false },
+        { c: 22, r: 4, a: false },
+        { c: 25, r: 4, a: true },
+        { c: 30, r: 4, a: true },
+        { c: 36, r: 4, a: true },
+        { c: 0, r: 5, a: false },
+        { c: 4, r: 5, a: false },
+        { c: 6, r: 5, a: false },
+        { c: 10, r: 5, a: false },
+        { c: 12, r: 5, a: false },
+        { c: 16, r: 5, a: false },
+        { c: 18, r: 5, a: false },
+        { c: 22, r: 5, a: false },
+        { c: 25, r: 5, a: true },
+        { c: 26, r: 5, a: true },
+        { c: 29, r: 5, a: true },
+        { c: 30, r: 5, a: true },
+        { c: 36, r: 5, a: true },
+        { c: 0, r: 6, a: false },
+        { c: 4, r: 6, a: false },
+        { c: 7, r: 6, a: false },
+        { c: 8, r: 6, a: false },
+        { c: 9, r: 6, a: false },
+        { c: 10, r: 6, a: false },
+        { c: 13, r: 6, a: false },
+        { c: 14, r: 6, a: false },
+        { c: 15, r: 6, a: false },
+        { c: 16, r: 6, a: false },
+        { c: 18, r: 6, a: false },
+        { c: 19, r: 6, a: false },
+        { c: 20, r: 6, a: false },
+        { c: 21, r: 6, a: false },
+        { c: 26, r: 6, a: true },
+        { c: 27, r: 6, a: true },
+        { c: 28, r: 6, a: true },
+        { c: 29, r: 6, a: true },
+        { c: 32, r: 6, a: true },
+        { c: 33, r: 6, a: true },
+        { c: 34, r: 6, a: true },
+        { c: 35, r: 6, a: true }
+    ] : Rectangle {
+        x: root.cell * d.c;
+        y: root.cell * d.r;
+        width: root.cell - root.gap;
+        height: root.cell - root.gap;
+        border-radius: (root.cell - root.gap) / 4;
+        background: d.a ? root.accent-color : root.text-color;
+    }
+}

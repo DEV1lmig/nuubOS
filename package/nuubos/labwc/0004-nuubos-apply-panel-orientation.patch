@@ -1,0 +1,53 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: apply the panel orientation of built-in panels
+
+The RG28XX panel is 480x640 mounted sideways; its device tree rotation
+reaches the DRM connector as "panel orientation", which wlroots maps to
+an output transform (wlr_drm_connector_get_panel_orientation) but labwc
+never applied. Set it when a DRM output is enabled, and draw the
+first-frame boot splash (patch 0001) at the logical size.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+
+--- a/src/output.c
++++ b/src/output.c
+@@ -582,6 +582,17 @@
+ 
+ 	int width = mode->width;
+ 	int height = mode->height;
++
++	/* A panel mounted sideways (RG28XX) is drawn through the output
++	 * transform: the splash buffer has the logical size. */
++	enum wl_output_transform transform =
++		(output->pending.committed & WLR_OUTPUT_STATE_TRANSFORM)
++		? output->pending.transform : wlr_output->transform;
++	if (transform % 2) {
++		int swap = width;
++		width = height;
++		height = swap;
++	}
+ 	uint32_t *pixels = malloc((size_t)width * (size_t)height * 4);
+ 
+ 	if (!pixels) {
+@@ -628,6 +639,21 @@
+ 	wlr_log(WLR_DEBUG, "enable output %s", wlr_output->name);
+ 	wlr_output_state_set_enabled(&output->pending, true);
+ 
++	/*
++	 * nuubOS: built-in panels mounted sideways or upside down (RG28XX:
++	 * 480x640 panel, device tree rotation) report it in the connector's
++	 * "panel orientation"; wlroots maps it, labwc never applied it.
++	 */
++	if (wlr_output_is_drm(wlr_output)) {
++		enum wl_output_transform transform =
++			wlr_drm_connector_get_panel_orientation(wlr_output);
++		if (transform != WL_OUTPUT_TRANSFORM_NORMAL) {
++			wlr_output_state_set_transform(&output->pending, transform);
++			wlr_log(WLR_INFO, "nuubOS: output %s panel orientation transform %d",
++				wlr_output->name, transform);
++		}
++	}
++
+ 	if (!output_test_auto(wlr_output, &output->pending,
+ 			/* is_client_request */ false)) {
+ 		wlr_log(WLR_INFO, "mode test failed for output %s",

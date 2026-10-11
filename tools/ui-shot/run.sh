@@ -3,7 +3,7 @@
 # Headless nuubUI layout snapshots.
 #
 # Renders the real nuubui-home Slint UI with the Slint software renderer at
-# 640x480, 720x720, 1280x720 and 1920x1080 for Settings and Quick Menu scenes and
+# 640x480, 720x720, 720x480, 1280x720 and 1920x1080 for Settings and Quick Menu scenes and
 # writes PNGs to output/ui-shot/<lang>/. Development aid only: nothing here is
 # shipped in the image, and it never replaces hardware qualification.
 #

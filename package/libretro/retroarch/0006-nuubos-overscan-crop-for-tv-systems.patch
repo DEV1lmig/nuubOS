@@ -1,0 +1,61 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: TV systems fill a square screen, sides cropped
+
+NUUBOS_RA_OVERSCAN_X=1 (nuubos-emud: TV systems on a square handheld
+screen only): a picture wider than the screen at full height fills the
+height as far as at most 8 % of its width (4 % a side) is cropped, and
+is scaled to that width beyond; patch 0003 crops the sides evenly. A 4:3
+game on the 720x720 RG CubeXX is 783x587 at the top instead of an
+integer 2x with large margins (or a 720x540 fit). Not integer scaled.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+
+--- a/gfx/video_driver.c
++++ b/gfx/video_driver.c
+@@ -2410,6 +2410,24 @@
+    return true;
+ }
+ 
++/* nuubOS: NUUBOS_RA_OVERSCAN_X=1 (set by nuubos-emud for TV systems on a
++ * square handheld screen) fills the height with a picture wider than the
++ * screen as far as at most 8 % of its width (4 % a side, within a
++ * TV's overscan) is cropped, scaled to fit beyond that: a 4:3 game on 720x720
++ * is 783x587 at the top, its sides cropped evenly (patch 0003), instead
++ * of a small integer 2x or a 720x540 fit. Not integer: the sharp bilinear
++ * or CRT shader keeps the pixels even. */
++static bool nuubos_overscan_x(void)
++{
++   static int on = -1;
++   if (on < 0)
++   {
++      const char *s = getenv("NUUBOS_RA_OVERSCAN_X");
++      on            = (s && *s == '1') ? 1 : 0;
++   }
++   return on == 1;
++}
++
+ /**
+  * video_viewport_get_scaled_integer:
+  * @vp            : Viewport handle
+@@ -2512,7 +2530,20 @@
+    /* Make sure that we don't get 0x scale ... */
+    else if (width >= content_width && height >= content_height)
+    {
+-      if (keep_aspect)
++      unsigned nuubos_w = (unsigned)roundf(height * aspect_ratio);
++
++      if (keep_aspect && nuubos_overscan_x() && nuubos_w > width)
++      {
++         unsigned nuubos_h = height;
++         if (nuubos_w * 0.92f > width)
++         {
++            nuubos_w = (unsigned)roundf(width / 0.92f);
++            nuubos_h = (unsigned)roundf(nuubos_w / aspect_ratio);
++         }
++         padding_x = (int)width  - (int)nuubos_w;
++         padding_y = (int)height - (int)nuubos_h;
++      }
++      else if (keep_aspect)
+       {
+          int8_t half_w       = 0;
+          int8_t half_h       = 0;

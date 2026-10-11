@@ -1,171 +1,142 @@
-//! nuubOS lifecycle splash, rendered procedurally at the exact physical
-//! output size.
-//!
-//! This MUST stay pixel-identical to the two other splash renderers so the
-//! kernel → compositor → UI → shutdown handoff never jumps:
-//!   - package/nuubos/nuubos-splash/src/nuubos-splash.c (fbdev)
-//!   - package/nuubos/labwc/0001-nuubos-root-atomic-first-frame.patch
-//! The same file is duplicated in nuubui-home/src/src/splash.rs.
+//! nuubOS lifecycle splash for Slint: the rasters of splash_core.rs (the
+//! port of nuubos-splash-render.h, pixel-identical to the kernel splash and
+//! labwc's first frame) as images, plus the track geometry the boot,
+//! restart and power-off animations draw on (docs/dev/ui.md "Lifecycle
+//! splash"). Identical copy in nuubui-home and nuubos-quick-menu (src/src/splash.rs).
 
+pub use crate::splash_core::{load_palette, Palette};
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
-const BG: [u8; 3] = [0x13, 0x15, 0x14];
-const FG: [u8; 3] = [0xE7, 0xE2, 0xD8];
-const SUB: [u8; 3] = [0x9E, 0xA6, 0x9F];
-const ACCENT: [u8; 3] = [0x5B, 0x86, 0xD6];
+/// Animation timing shared by nuubUI, the Quick Menu and nuubos-lightingd
+/// (its Lifecycle shapes run for the same time).
+pub const BOOT_FILL_MS: u64 = 700;
+pub const BOOT_FADE_MS: u64 = 320;
+pub const OUT_FADE_MS: u64 = 280;
+pub const RESTART_SWEEP_MS: u64 = 900;
+pub const RESTART_SWEEPS: u64 = 2;
+pub const POWEROFF_DRAIN_MS: u64 = 650;
 
-fn glyph_rows(c: char) -> &'static str {
-    match c {
-        'A' => " ### #   ##   #######   ##   ##   #",
-        'B' => "#### #   ##   ##### #   ##   ##### ",
-        'O' => " ### #   ##   ##   ##   ##   # ### ",
-        'P' => "#### #   ##   ##### #    #    #    ",
-        'R' => "#### #   ##   ##### #  # #   ##   #",
-        'S' => " #####    #     ###     #    ##### ",
-        'a' => "           ###     # #####   # ####",
-        'b' => "#    #    #### #   ##   ##   ##### ",
-        'd' => "    #    # #####   ##   ##   # ####",
-        'e' => "           ### #   #######     ####",
-        'f' => "  ##  #    ###  #    #    #    #   ",
-        'g' => "      #####   ##   # ####    # ### ",
-        'i' => "  #        ##    #    #    #   ### ",
-        'l' => " ##    #    #    #    #    #   ### ",
-        'm' => "          ## ### # ## # ##   ##   #",
-        'n' => "          #### #   ##   ##   ##   #",
-        'o' => "           ### #   ##   ##   # ### ",
-        'p' => "          #### #   ##   ##### #    ",
-        'r' => "          # ## ##  ##    #    #    ",
-        's' => "           #####     ###     ##### ",
-        't' => " #    #   ###   #    #    #  #  ## ",
-        'u' => "          #   ##   ##   ##   # ####",
-        'v' => "          #   ##   ##   # # #   #  ",
-        'w' => "          #   ##   ## # ## # # # # ",
-        'y' => "          #   ##   # ####    # ### ",
-        '.' => "                          ##   ##  ",
-        ' ' => "                                   ",
-        _ => "                                   ",
+/// The raster for "boot" | "reboot" | "poweroff" | "full" at physical size.
+pub fn image(mode: &str, width: u32, height: u32, palette: &Palette) -> Image {
+    let (w, h) = (width.max(1), height.max(1));
+    let px = crate::splash_core::render(w as i32, h as i32, mode, palette);
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+    for (dst, v) in buffer.make_mut_slice().iter_mut().zip(px) {
+        *dst = Rgba8Pixel { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8, a: 255 };
+    }
+    Image::from_rgba8(buffer)
+}
+
+/// Track rectangle in physical pixels: (x, y, width, height).
+pub fn track(width: u32, height: u32) -> (f32, f32, f32, f32) {
+    let g = crate::splash_core::geometry(width.max(1) as i32, height.max(1) as i32);
+    (g.track_x8 as f32 / 8.0, g.track_y8 as f32 / 8.0, g.track_w8 as f32 / 8.0, g.track_h8 as f32 / 8.0)
+}
+
+/// 0xRRGGBB as a Slint colour.
+pub fn color(v: u32) -> slint::Color {
+    slint::Color::from_rgb_u8((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+/// One frame of a lifecycle animation, over the rasters:
+/// `top` = "boot"/"reboot" raster, `base` = "poweroff" raster (power off
+/// only), `fill` = accent pill on the track between `from` and `to`
+/// (fractions of the track width).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub top_alpha: f32,
+    pub base_alpha: f32,
+    pub fill_from: f32,
+    pub fill_to: f32,
+    pub fill_alpha: f32,
+    pub done: bool,
+}
+
+/* M3 emphasized deceleration and a symmetric ease (no trigonometry). */
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+}
+
+fn ease_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Total length of an animation in milliseconds.
+pub fn duration_ms(kind: &str) -> u64 {
+    match kind {
+        "boot" => BOOT_FILL_MS + BOOT_FADE_MS,
+        "reboot" => OUT_FADE_MS + RESTART_SWEEP_MS * RESTART_SWEEPS,
+        _ => OUT_FADE_MS + POWEROFF_DRAIN_MS,
     }
 }
 
-struct Canvas {
-    buffer: SharedPixelBuffer<Rgba8Pixel>,
-    width: i32,
-    height: i32,
-}
-
-impl Canvas {
-    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, c: [u8; 3]) {
-        let x0 = x.max(0);
-        let y0 = y.max(0);
-        let x1 = (x + w).min(self.width);
-        let y1 = (y + h).min(self.height);
-        if x0 >= x1 || y0 >= y1 {
-            return;
-        }
-        let stride = self.width as usize;
-        let pixels = self.buffer.make_mut_slice();
-        let px = Rgba8Pixel { r: c[0], g: c[1], b: c[2], a: 255 };
-        for yy in y0..y1 {
-            let row = yy as usize * stride;
-            pixels[row + x0 as usize..row + x1 as usize].fill(px);
-        }
-    }
-
-    fn glyph(&mut self, x: i32, y: i32, ch: char, scale: i32, c: [u8; 3]) {
-        let rows = glyph_rows(ch).as_bytes();
-        for row in 0..7 {
-            for col in 0..5 {
-                if rows[(row * 5 + col) as usize] != b' ' {
-                    self.fill_rect(x + col * scale, y + row * scale, scale, scale, c);
+/// The frame of `kind` ("boot" | "reboot" | "poweroff") at `t` ms.
+/// boot: the track fills from its centre, then the splash fades out over
+/// nuubUI. reboot: the splash fades in, an accent segment sweeps the track
+/// twice, the reboot raster stays. poweroff: the splash fades in with a
+/// full track, which drains to its centre while the wordmark dims; the
+/// power-off raster stays. nuubos-lightingd plays the same shapes on the
+/// LEDs for the same times.
+pub fn frame(kind: &str, t: u64) -> Frame {
+    let f = |v: u64, d: u64| v as f32 / d as f32;
+    let mut out = Frame { top_alpha: 1.0, base_alpha: 0.0, fill_from: 0.0, fill_to: 0.0, fill_alpha: 0.0, done: false };
+    match kind {
+        "boot" => {
+            if t < BOOT_FILL_MS {
+                let e = ease_out(f(t, BOOT_FILL_MS));
+                out.fill_from = 0.5 - 0.5 * e;
+                out.fill_to = 0.5 + 0.5 * e;
+                out.fill_alpha = 1.0;
+            } else {
+                let a = 1.0 - ease_in_out(f(t - BOOT_FILL_MS, BOOT_FADE_MS));
+                out.top_alpha = a;
+                out.fill_to = 1.0;
+                out.fill_alpha = a;
+                out.done = t >= duration_ms("boot");
+                if out.done {
+                    out.top_alpha = 0.0;
+                    out.fill_alpha = 0.0;
                 }
             }
         }
-    }
-
-    fn text(&mut self, x: i32, y: i32, text: &str, scale: i32, tracking: i32, c: [u8; 3]) {
-        let mut cursor = x;
-        for ch in text.chars() {
-            self.glyph(cursor, y, ch, scale, c);
-            cursor += 6 * scale + tracking;
+        "reboot" => {
+            if t < OUT_FADE_MS {
+                out.top_alpha = ease_in_out(f(t, OUT_FADE_MS));
+            } else if t < duration_ms("reboot") {
+                /* One ease over both sweeps, like the LED laps
+                 * (nuubos-lightingd SHAPE_RESTART): no stop between them. */
+                let whole = ease_in_out(f(t - OUT_FADE_MS, RESTART_SWEEP_MS * RESTART_SWEEPS));
+                let p = (whole * RESTART_SWEEPS as f32).fract();
+                let seg = 0.32;
+                let head = p * (1.0 + seg);
+                out.fill_from = (head - seg).max(0.0);
+                out.fill_to = head.min(1.0);
+                out.fill_alpha = 1.0;
+            } else {
+                out.done = true;
+            }
+        }
+        _ => {
+            if t < OUT_FADE_MS {
+                let a = ease_in_out(f(t, OUT_FADE_MS));
+                out.top_alpha = a;
+                out.fill_to = 1.0;
+                out.fill_alpha = a;
+            } else if t < duration_ms("poweroff") {
+                let k = ease_in_out(f(t - OUT_FADE_MS, POWEROFF_DRAIN_MS));
+                out.base_alpha = 1.0;
+                out.top_alpha = 1.0 - k;
+                out.fill_from = 0.5 * k;
+                out.fill_to = 1.0 - 0.5 * k;
+                out.fill_alpha = 1.0;
+            } else {
+                out.base_alpha = 1.0;
+                out.top_alpha = 0.0;
+                out.done = true;
+            }
         }
     }
-}
-
-fn text_width(text: &str, scale: i32, tracking: i32) -> i32 {
-    let n = text.chars().count() as i32;
-    if n <= 0 {
-        return 0;
-    }
-    n * 6 * scale - scale + (n - 1) * tracking
-}
-
-fn subtitle_for_mode(mode: &str) -> &'static str {
-    match mode {
-        "reboot" | "restart" => "Reboot",
-        "poweroff" | "shutdown" => "Poweroff",
-        _ => "Small System. Big Adventures.",
-    }
-}
-
-/// Render the splash for `mode` ("boot", "reboot", "poweroff") at
-/// `width` x `height` physical pixels.
-pub fn render(mode: &str, width: u32, height: u32) -> Image {
-    let width = width.max(1);
-    let height = height.max(1);
-    let mut canvas = Canvas {
-        buffer: SharedPixelBuffer::new(width, height),
-        width: width as i32,
-        height: height as i32,
-    };
-
-    let title_scale = (canvas.height / 68).clamp(7, 14);
-    let subtitle_scale = (title_scale / 2).clamp(3, 6);
-    let tracking = (title_scale / 2).max(2);
-
-    canvas.fill_rect(0, 0, canvas.width, canvas.height, BG);
-
-    let left_w = text_width("nuub", title_scale, tracking);
-    let right_w = text_width("OS", title_scale, tracking);
-    let title_w = left_w + tracking + right_w;
-    let cx = canvas.width / 2;
-    let cy = canvas.height / 2;
-    let brand_y = cy - title_scale * 12;
-
-    let mut x = cx - title_w / 2;
-    canvas.text(x, brand_y, "nuub", title_scale, tracking, FG);
-    x += left_w + tracking;
-    canvas.text(x, brand_y, "OS", title_scale, tracking, ACCENT);
-
-    let line_w = (title_w + title_scale * 8).min(canvas.width - title_scale * 10);
-    let line_h = (title_scale / 2).max(3);
-    let line_y = brand_y + title_scale * 11;
-    canvas.fill_rect(cx - line_w / 2, line_y, line_w, line_h, ACCENT);
-
-    let subtitle = subtitle_for_mode(mode);
-    let sub_y = line_y + title_scale * 5;
-    canvas.text(
-        cx - text_width(subtitle, subtitle_scale, 0) / 2,
-        sub_y,
-        subtitle,
-        subtitle_scale,
-        0,
-        SUB,
-    );
-
-    Image::from_rgba8(canvas.buffer)
-}
-
-/// Curtain geometry matching the splash accent line: (split fraction of
-/// the height, line width fraction of the width, line height in physical px).
-pub fn geometry(width: u32, height: u32) -> (f32, f32, u32) {
-    let w = width.max(1) as i32;
-    let h = height.max(1) as i32;
-    let title_scale = (h / 68).clamp(7, 14);
-    let tracking = (title_scale / 2).max(2);
-    let title_w = text_width("nuub", title_scale, tracking) + tracking
-        + text_width("OS", title_scale, tracking);
-    let line_w = (title_w + title_scale * 8).min(w - title_scale * 10);
-    let line_h = (title_scale / 2).max(3);
-    let line_y = h / 2 - title_scale * 12 + title_scale * 11;
-    (line_y as f32 / h as f32, line_w as f32 / w as f32, line_h as u32)
+    out
 }

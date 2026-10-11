@@ -1,6 +1,8 @@
 #!/bin/sh
 #
-# Lifecycle hook for Product Lighting: sleep | wake | shutdown.
+# Lifecycle hook for Product Lighting: sleep | wake | shutdown, and the
+# splash animations boot | restart | reboot | poweroff (played in step with
+# them; the Quick Menu and nuubos-systemd call it).
 # nuubos-lightingd keeps the lifecycle phase in memory (nothing is
 # persisted), so an interrupted suspend or a power loss leaves no stale
 # state behind. "sleep" returns once the LEDs are dark.
@@ -10,7 +12,7 @@ ACTION="${1:-}"
 LEGACY=/state/config/nuubos-lifecycle-lighting-restore
 
 case "$ACTION" in
-    sleep|wake|shutdown) ;;
+    sleep|wake|shutdown|boot|restart|reboot|poweroff) ;;
     *)
         echo "nuubOS lifecycle lighting: invalid action '$ACTION'" >&2
         exit 2

@@ -4,23 +4,33 @@
 #
 ################################################################################
 
-NUUBOS_REMOTE_VERSION = 0.1.0
+NUUBOS_REMOTE_VERSION = 0.2.0
 NUUBOS_REMOTE_SITE = $(BR2_EXTERNAL_NUUBOS_PATH)/package/nuubos/nuubos-remote/src
 NUUBOS_REMOTE_SITE_METHOD = local
-NUUBOS_REMOTE_LICENSE = MIT
-NUUBOS_REMOTE_LICENSE_FILES = LICENSE
+NUUBOS_REMOTE_LICENSE = MIT, CC-BY-4.0 (icons)
+NUUBOS_REMOTE_LICENSE_FILES = LICENSE web/www/icons/LICENSE.txt
+NUUBOS_REMOTE_DEPENDENCIES = openssl
 
-define NUUBOS_REMOTE_INSTALL_TARGET_CMDS
+# The per-device TLS certificate helper (libcrypto).
+define NUUBOS_REMOTE_BUILD_CERT_HELPER
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -Wall -Wextra -o $(@D)/nuubos-web-cert \
+		$(@D)/nuubos-web-cert.c -lcrypto
+endef
+NUUBOS_REMOTE_POST_BUILD_HOOKS += NUUBOS_REMOTE_BUILD_CERT_HELPER
+
+define NUUBOS_REMOTE_INSTALL_FILES
+	mv -f $(TARGET_DIR)/usr/bin/nuubos-admind $(TARGET_DIR)/usr/sbin/nuubos-admind
+	$(INSTALL) -D -m 0755 $(@D)/nuubos-web-cert $(TARGET_DIR)/usr/sbin/nuubos-web-cert
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-remotectl $(TARGET_DIR)/usr/sbin/nuubos-remotectl
 	$(INSTALL) -D -m 0644 $(@D)/ksmbd.conf $(TARGET_DIR)/etc/nuubos/ksmbd.conf
 	$(INSTALL) -D -m 0644 $(@D)/web/lighttpd.conf $(TARGET_DIR)/etc/nuubos/web/lighttpd.conf
-	$(INSTALL) -D -m 0755 $(@D)/web/api.cgi $(TARGET_DIR)/usr/lib/nuubos/web/api.cgi
-	$(INSTALL) -D -m 0644 $(@D)/web/www/index.html $(TARGET_DIR)/usr/share/nuubos/web/index.html
-	$(INSTALL) -D -m 0644 $(@D)/web/www/app.js $(TARGET_DIR)/usr/share/nuubos/web/app.js
-	$(INSTALL) -D -m 0644 $(@D)/web/www/style.css $(TARGET_DIR)/usr/share/nuubos/web/style.css
+	# The 0.1 CGI interface and its static files are replaced as a whole.
+	rm -rf $(TARGET_DIR)/usr/share/nuubos/web $(TARGET_DIR)/usr/lib/nuubos/web
+	cd $(@D)/web/www && find . -type f -exec $(INSTALL) -D -m 0644 {} $(TARGET_DIR)/usr/share/nuubos/web/{} \;
 	# lighttpd's own example init script is not used: nuubos-remotectl
 	# starts it only when Web administration is enabled.
 	rm -f $(TARGET_DIR)/etc/init.d/S50lighttpd
 endef
+NUUBOS_REMOTE_POST_INSTALL_TARGET_HOOKS += NUUBOS_REMOTE_INSTALL_FILES
 
-$(eval $(generic-package))
+$(eval $(cargo-package))

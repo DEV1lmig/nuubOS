@@ -114,6 +114,9 @@
 #ifndef HDMI_ENABLED
 #define HDMI_ENABLED "/sys/class/drm/card0-HDMI-A-1/enabled"
 #endif
+#ifndef DRM_CLASS
+#define DRM_CLASS "/sys/class/drm"
+#endif
 #ifndef SYSTEM_ICONS
 #define SYSTEM_ICONS "/usr/share/nuubos/systems"
 #endif
@@ -160,7 +163,7 @@
 #define START_FAILURE_MS 5000
 #define LIBRARY_TIMEOUT_MS 3000
 #define SCREENSHOT_TIMEOUT_MS 5000
-#define MAX_RESTORE_KEYS 24
+#define MAX_RESTORE_KEYS 48
 /* Performance overlay: RetroArch frame rate sampled once a second. */
 #define OVERLAY_TICK_MS 1000
 
@@ -270,6 +273,10 @@ struct session {
 	int inotify_wd;
 	char input_buf[128];
 	size_t input_used;
+	/* Slot rotation: the progress of a closing game goes into the next
+	 * slot, saved by emud before RetroArch is asked to quit. */
+	bool quit_requested;
+	bool quit_saved;
 	/* A lifecycle hook waiting for PRE_POWER completion. */
 	int power_client;
 	char power_action[16];
@@ -1260,6 +1267,63 @@ static int game_render_height(const char *system)
 	return value[0] ? atoi(value) : GAME_HDMI_LINES;
 }
 
+/* The active output is a square built-in panel (RG CubeXX 720x720): an
+ * enabled non-HDMI connector whose first (preferred) mode is WxW. */
+static bool square_panel(void)
+{
+	DIR *dir = opendir(DRM_CLASS);
+	struct dirent *e;
+	bool square = false;
+
+	if (!dir)
+		return false;
+	while (!square && (e = readdir(dir)) != NULL) {
+		char path[PATH_MAX];
+		char value[32] = "";
+		unsigned w = 0, h = 0;
+		FILE *fp;
+
+		if (strncmp(e->d_name, "card0-", 6) || strstr(e->d_name, "HDMI"))
+			continue;
+		snprintf(path, sizeof(path), DRM_CLASS "/%s/enabled", e->d_name);
+		if (!(fp = fopen(path, "r")))
+			continue;
+		if (!fgets(value, sizeof(value), fp))
+			value[0] = '\0';
+		fclose(fp);
+		trim(value);
+		if (strcmp(value, "enabled"))
+			continue;
+		snprintf(path, sizeof(path), DRM_CLASS "/%s/modes", e->d_name);
+		if (!(fp = fopen(path, "r")))
+			continue;
+		if (fscanf(fp, "%ux%u", &w, &h) == 2 && w && w == h)
+			square = true;
+		fclose(fp);
+	}
+	closedir(dir);
+	return square;
+}
+
+/* A TV system's picture fills a square handheld screen's height as far as
+ * at most 12 % of its width (6 % a side, a TV's overscan) is cropped
+ * (RetroArch patch 0006, NUUBOS_RA_OVERSCAN_X; bezel.glsl OVERSCAN_X): a
+ * 4:3 game on the 720x720 RG CubeXX is 783x587, not an integer 2x with
+ * large margins (user decisions 2026-10-11: square screens only, never
+ * HDMI or 4:3/3:2 panels; integer 3x cropped PS1 too much). Only with the
+ * default presentation (or the per-game Integer Scaling). */
+static bool tv_overscan(const char *system, const struct game_overrides *o)
+{
+	char screen[16];
+
+	if (o->aspect[0] && strcmp(o->aspect, "integer"))
+		return false;
+	if (!square_panel()) /* HDMI turns the panel off */
+		return false;
+	system_screen(system, screen, sizeof(screen));
+	return !strcmp(screen, "crt");
+}
+
 /* systems.conf colour (field 6, #rrggbb) as 0..1 components. */
 static void system_colour(const char *system, float rgb[3])
 {
@@ -1291,6 +1355,46 @@ static void system_colour(const char *system, float rgb[3])
 			rgb[2] = (float)b / 255.0f;
 		}
 		break;
+	}
+	fclose(fp);
+}
+
+/* The Mood colours of the bezel (logo, matte): the lifecycle splash cache
+ * /etc/nuubos/splash.palette, written by nuubos-themectl for the active
+ * user; built-in nuubOS colours without it. */
+struct mood_colours {
+	float background[3], text[3], accent[3];
+};
+
+static void set_hex_rgb(float out[3], const char *v)
+{
+	unsigned int r, g, b;
+
+	if (sscanf(v, "#%02x%02x%02x", &r, &g, &b) == 3) {
+		out[0] = (float)r / 255.0f;
+		out[1] = (float)g / 255.0f;
+		out[2] = (float)b / 255.0f;
+	}
+}
+
+static void mood_colours(struct mood_colours *m)
+{
+	char line[128];
+	FILE *fp;
+
+	set_hex_rgb(m->background, "#0d0e10");
+	set_hex_rgb(m->text, "#f5f6f8");
+	set_hex_rgb(m->accent, "#3a86ff");
+	fp = fopen("/etc/nuubos/splash.palette", "r");
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp)) {
+		if (!strncmp(line, "background=", 11))
+			set_hex_rgb(m->background, line + 11);
+		else if (!strncmp(line, "text=", 5))
+			set_hex_rgb(m->text, line + 5);
+		else if (!strncmp(line, "accent=", 7))
+			set_hex_rgb(m->accent, line + 7);
 	}
 	fclose(fp);
 }
@@ -1499,7 +1603,10 @@ static void restore_user_keys(void)
 }
 
 /* Shader preset of the session: one pass, its parameters. */
-static int write_session_shader(const char *shader, const char *params)
+/* The session preset: one pass of shader, or for the bezel (cached = true)
+ * that pass into a feedback FBO and bezel-picture.glsl to the screen (bezel.glsl;
+ * the last pass has no scale: with one RetroArch would add a pass after it). */
+static int write_session_shader(const char *shader, bool cached, const char *params)
 {
 	char tmp[] = SESSION_SHADER ".tmp";
 	FILE *fp = fopen(tmp, "w");
@@ -1507,8 +1614,14 @@ static int write_session_shader(const char *shader, const char *params)
 
 	if (!fp)
 		return -1;
-	fprintf(fp, "shaders = \"1\"\nshader0 = \"%s\"\nfilter_linear0 = \"false\"\n%s",
-		shader, params);
+	fprintf(fp, "shaders = \"%d\"\nshader0 = \"%s\"\nfilter_linear0 = \"false\"\n",
+		cached ? 2 : 1, shader);
+	if (cached)
+		fputs("scale_type0 = \"viewport\"\nscale0 = \"1.000000\"\n"
+		      "feedback_pass = \"0\"\n"
+		      "shader1 = \"" SHADER_DIR "/bezel-picture.glsl\"\n"
+		      "filter_linear1 = \"false\"\n", fp);
+	fputs(params, fp);
 	rc = ferror(fp) ? -1 : 0;
 	if (fclose(fp) != 0)
 		rc = -1;
@@ -1579,32 +1692,42 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 
 	shader[0] = '\0';
 	if (bezel) {
-		char params[1536];
+		char params[2048];
 		char icon[PATH_MAX];
+		struct mood_colours mood;
 		float rgb[3];
 		bool has_icon;
 
 		system_colour(session.system, rgb);
+		mood_colours(&mood);
 		snprintf(icon, sizeof(icon), SYSTEM_ICONS "/%s.png", session.system);
 		has_icon = file_exists(icon);
-		/* An unused sampler still needs an image: the wordmark. */
+		/* An unused sampler still needs an image: the logo map. */
 		if (!has_icon)
-			copy_text(icon, sizeof(icon), SHADER_DIR "/bezel-wordmark.png");
+			copy_text(icon, sizeof(icon), SHADER_DIR "/bezel-logo.png");
 		snprintf(params, sizeof(params),
 			 "textures = \"SYSICON;BRAND\"\n"
 			 "SYSICON = \"%s\"\nSYSICON_linear = \"true\"\n"
 			 "SYSICON_mipmap = \"true\"\n"
-			 "BRAND = \"" SHADER_DIR "/bezel-wordmark.png\"\n"
+			 "BRAND = \"" SHADER_DIR "/bezel-logo.png\"\n"
 			 "BRAND_linear = \"false\"\n"
-			 "parameters = \"BEZEL_R;BEZEL_G;BEZEL_B;BEZEL_STYLE;HAS_ICON;CRT\"\n"
+			 "parameters = \"BEZEL_R;BEZEL_G;BEZEL_B;BEZEL_STYLE;HAS_ICON;CRT;OVERSCAN_X;"
+			 "MOOD_BG_R;MOOD_BG_G;MOOD_BG_B;MOOD_TEXT_R;MOOD_TEXT_G;MOOD_TEXT_B;"
+			 "MOOD_ACCENT_R;MOOD_ACCENT_G;MOOD_ACCENT_B\"\n"
 			 "BEZEL_R = \"%.3f\"\nBEZEL_G = \"%.3f\"\nBEZEL_B = \"%.3f\"\n"
-			 "BEZEL_STYLE = \"%d\"\nHAS_ICON = \"%d\"\nCRT = \"%d\"\n",
+			 "BEZEL_STYLE = \"%d\"\nHAS_ICON = \"%d\"\nCRT = \"%d\"\nOVERSCAN_X = \"%d\"\n"
+			 "MOOD_BG_R = \"%.3f\"\nMOOD_BG_G = \"%.3f\"\nMOOD_BG_B = \"%.3f\"\n"
+			 "MOOD_TEXT_R = \"%.3f\"\nMOOD_TEXT_G = \"%.3f\"\nMOOD_TEXT_B = \"%.3f\"\n"
+			 "MOOD_ACCENT_R = \"%.3f\"\nMOOD_ACCENT_G = \"%.3f\"\nMOOD_ACCENT_B = \"%.3f\"\n",
 			 icon, rgb[0], rgb[1], rgb[2], !strcmp(screen, "lcd") ? 1 : 0,
-			 has_icon ? 1 : 0, crt ? 1 : 0);
-		if (write_session_shader(SHADER_DIR "/bezel.glsl", params) == 0)
+			 has_icon ? 1 : 0, crt ? 1 : 0, tv_overscan(session.system, o) ? 1 : 0,
+			 mood.background[0], mood.background[1], mood.background[2],
+			 mood.text[0], mood.text[1], mood.text[2],
+			 mood.accent[0], mood.accent[1], mood.accent[2]);
+		if (write_session_shader(SHADER_DIR "/bezel.glsl", true, params) == 0)
 			copy_text(shader, sizeof(shader), SESSION_SHADER);
 	} else if (crt) {
-		if (write_session_shader(SHADER_DIR "/crt.glsl", "") == 0)
+		if (write_session_shader(SHADER_DIR "/crt.glsl", false, "") == 0)
 			copy_text(shader, sizeof(shader), SESSION_SHADER);
 	} else if (!o->filter[0] || !strcmp(o->filter, "sharp")) {
 		copy_text(shader, sizeof(shader), DEFAULT_SHADER_PRESET);
@@ -1729,11 +1852,11 @@ static int save_target(void)
 
 /* Saves into save_target() and selects that slot. */
 static bool begin_save(int slot, bool quiet);
-static bool save_next(void)
+static bool save_next(bool quiet)
 {
 	int target = save_target();
 
-	if (!begin_save(target, false))
+	if (!begin_save(target, quiet))
 		return false;
 	session.slot = target;
 	return true;
@@ -1749,6 +1872,7 @@ static void stop_watch(void)
 
 static void finish_power_wait(void);
 static void finish_screenshot(bool ok);
+static void request_quit(void);
 
 static void finish_pending(bool ok)
 {
@@ -1769,6 +1893,8 @@ static void finish_pending(bool ok)
 	if (kind == PENDING_SAVE)
 		log_msg("emud: save slot %d %s", slot, ok ? "written" : "failed");
 	finish_power_wait();
+	if (session.quit_requested)
+		request_quit();
 	notify_subscribers();
 }
 
@@ -1898,15 +2024,29 @@ static void process_watch(void)
 
 /* Writes the settings nuubOS enforces at every launch; RetroArch appends
  * them over the user's configuration (--appendconfig). */
+/* RetroArch notifications switched off for every session. */
+static const char *const ra_notification_keys[] = {
+	"notification_show_autoconfig", "notification_show_autoconfig_fails",
+	"notification_show_cheats_applied", "notification_show_patch_applied",
+	"notification_show_remap_load", "notification_show_config_override_load",
+	"notification_show_set_initial_disk", "notification_show_disk_control",
+	"notification_show_save_state", "notification_show_fast_forward",
+	"notification_show_screenshot", "notification_show_refresh_rate",
+	"notification_show_netplay_extra", "menu_show_load_content_animation",
+	NULL,
+};
+
 static int write_session_cfg(const char *ra_dir, const char *saves,
 			     const char *states, const char *screenshots,
 			     const struct game_overrides *o, const struct achievements *a,
 			     bool auto_load, const char **shader)
 {
 	char tmp[] = SESSION_CFG ".tmp";
+	bool auto_save = !session.settings.slot_rotation;
 	FILE *fp;
 	int player;
 	int rc;
+	int i;
 
 	if (mkdir_p(SESSION_DIR) != 0)
 		return -1;
@@ -1973,12 +2113,22 @@ static int write_session_cfg(const char *ra_dir, const char *saves,
 	remember_key("video_font_size");
 	fprintf(fp, "video_font_enable = \"true\"\nvideo_font_path = \"%s\"\n"
 		"video_font_size = \"32.000000\"\n", OSD_FONT);
-	/* Progress is kept when the game closes (.state.auto); auto_load
+	/* RetroArch's own notifications are off (nuubOS notifies save/load/
+	 * slot/fast-forward/screenshot itself); RetroAchievements popups are
+	 * separate widgets and stay (user request 2026-10-11). */
+	for (i = 0; ra_notification_keys[i]; i++) {
+		remember_key(ra_notification_keys[i]);
+		fprintf(fp, "%s = \"false\"\n", ra_notification_keys[i]);
+	}
+	remember_key("notification_show_screenshot_flash");
+	fprintf(fp, "notification_show_screenshot_flash = \"2\"\n");
+	/* Progress is kept when the game closes (.state.auto, or with slot
+	 * rotation the next slot, saved by emud: request_quit); auto_load
 	 * resumes from it when it is the most recent state. */
 	remember_key("savestate_auto_save");
 	remember_key("savestate_auto_load");
-	fprintf(fp, "savestate_auto_save = \"true\"\nsavestate_auto_load = \"%s\"\n",
-		auto_load ? "true" : "false");
+	fprintf(fp, "savestate_auto_save = \"%s\"\nsavestate_auto_load = \"%s\"\n",
+		auto_save ? "true" : "false", auto_load ? "true" : "false");
 	write_session_overrides(fp, a);
 	rc = ferror(fp) ? -1 : 0;
 	if (fclose(fp) != 0)
@@ -2091,6 +2241,7 @@ static const char *launch(const char *game, const char *mode)
 	int manual = 0;
 	int start = NO_STATE;
 	int render_height;
+	bool overscan;
 
 	if (session.state != SESSION_IDLE)
 		return "busy";
@@ -2218,6 +2369,7 @@ static const char *launch(const char *game, const char *mode)
 	}
 
 	render_height = game_render_height(session.system);
+	overscan = tv_overscan(session.system, &overrides);
 	pid = fork();
 	if (pid < 0) {
 		close(in_pipe[0]);
@@ -2269,6 +2421,8 @@ static const char *launch(const char *game, const char *mode)
 		setenv("WAYLAND_DISPLAY", "wayland-0", 1);
 		setenv("PIPEWIRE_RUNTIME_DIR", PIPEWIRE_RUNTIME, 1);
 		setenv("LANG", "C.UTF-8", 1);
+		if (overscan)
+			setenv("NUUBOS_RA_OVERSCAN_X", "1", 1);
 		if (render_height > 0) {
 			char lines[16];
 
@@ -2307,6 +2461,16 @@ static void request_quit(void)
 {
 	if (session.state != SESSION_RUNNING)
 		return;
+	/* With slot rotation RetroArch's automatic slot is off: the progress
+	 * goes into the next slot first (once; a failed save still quits). */
+	if (session.settings.slot_rotation && !session.quit_saved) {
+		session.quit_requested = true;
+		if (session.pending != PENDING_NONE)
+			return;
+		session.quit_saved = true;
+		if (save_next(true))
+			return;
+	}
 	session.state = SESSION_EXITING;
 	session.quit_deadline_ms = monotonic_ms() + QUIT_TIMEOUT_MS;
 	/* Unpause first: a paused RetroArch still reads commands, but the
@@ -2511,7 +2675,7 @@ static void handle_hotkey(const char *action)
 		return;
 	log_msg("emud: hotkey %s", action);
 	if (!strcmp(action, "save_state")) {
-		if (save_next())
+		if (save_next(false))
 			notify_subscribers();
 	} else if (!strcmp(action, "quit")) {
 		request_quit();
@@ -2806,7 +2970,7 @@ static void handle_command(struct client *c, char *line)
 	} else if (!strcmp(line, "SAVE_STATE")) {
 		if (!running(c))
 			return;
-		if (!save_next()) {
+		if (!save_next(false)) {
 			reply(c, "ERR busy\n");
 			return;
 		}
@@ -2896,12 +3060,17 @@ static void handle_command(struct client *c, char *line)
 		}
 		session.power_client = (int)(c - clients);
 		copy_text(session.power_action, sizeof(session.power_action), arg);
-		/* Progress is safe in the automatic slot before every power
-		 * action (CLAUDE §20.1); a state operation already running
-		 * completes first. */
+		/* Progress is safe before every power action (CLAUDE §20.1):
+		 * in the automatic slot, or with slot rotation in the next slot
+		 * (the quit before restart/poweroff then does not save again);
+		 * a state operation already running completes first. */
 		if (session.state == SESSION_RUNNING &&
-		    session.pending == PENDING_NONE)
-			(void)begin_save(AUTO_SLOT, true);
+		    session.pending == PENDING_NONE) {
+			if (!session.settings.slot_rotation)
+				(void)begin_save(AUTO_SLOT, true);
+			else if (save_next(true) && strcmp(arg, "sleep") != 0)
+				session.quit_saved = true;
+		}
 		finish_power_wait();
 	} else {
 		reply(c, "ERR unknown\n");

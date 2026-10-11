@@ -210,7 +210,7 @@ Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
 +};
 --- /dev/null
 +++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg28xx.dts
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,18 @@
 +// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 +/*
 + * Copyright (C) 2024 Ryan Walklin <ryan@testtoast.com>.
@@ -226,6 +226,8 @@ Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
 +
 +&panel {
 +	compatible = "anbernic,rg28xx-panel";
++	/* 480x640 panel mounted sideways (labwc applies the orientation) */
++	rotation = <270>;
 +};
 --- /dev/null
 +++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg34xx.dts

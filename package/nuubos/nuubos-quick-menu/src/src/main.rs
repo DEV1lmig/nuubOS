@@ -1,6 +1,7 @@
 mod gpu;
 mod ime;
 mod splash;
+mod splash_core;
 slint::include_modules!();
 
 use slint::platform::{
@@ -73,9 +74,6 @@ const REGIONAL_SOCKET: &str = "/run/nuubos/regionald.sock";
 const KEYBOARD_SURFACE_HEIGHT: u32 = 270;
 
 
-const LINE_STAGE_MS: u64 = 220;
-const CURTAIN_STAGE_MS: u64 = 460;
-const STAGE_GAP_MS: u64 = 18;
 const FRAME_INTERVAL_NS: u64 = 16_666_667;
 const VOLUME_OSD_TIMEOUT_MS: u64 = 1500;
 const TOAST_INFO_MS: u64 = 4000;
@@ -790,6 +788,14 @@ fn append_action_log(line: &str) {
 }
 
 fn users_command(command:&str)->std::io::Result<String>{let mut s=UnixStream::connect(USERS_SOCKET)?;s.set_read_timeout(Some(Duration::from_millis(700)))?;s.write_all(command.as_bytes())?;if !command.ends_with('\n'){s.write_all(b"\n")?;}s.shutdown(std::net::Shutdown::Write)?;let mut r=String::new();let _=s.read_to_string(&mut r);Ok(r)}
+/* No Quick Menu before a profile is in use or while nuubUI owns the whole
+ * screen for a guided flow: user picker, first setup, safe mode (nuubUI
+ * writes the context). The Power OSD stays available everywhere. */
+fn menu_allowed() -> bool {
+    let c = fs::read_to_string(UI_CONTEXT).unwrap_or_default();
+    !matches!(c.trim(), "user-picker" | "oob" | "safe-mode")
+}
+
 fn switch_user_available()->bool{let c=fs::read_to_string(UI_CONTEXT).unwrap_or_default();if !matches!(c.trim(),"home"|"settings"){return false;}let Ok(r)=users_command("STATUS") else{return false;};r.lines().find_map(|l|l.strip_prefix("count=")).and_then(|v|v.parse::<i32>().ok()).unwrap_or(0)>1}
 
 fn lifecycle_action(action: &'static str) -> Result<(), Box<dyn std::error::Error>> {
@@ -3676,8 +3682,6 @@ fn map_overlay(
 
     ui.set_lifecycle_active(false);
     ui.set_lifecycle_mode("".into());
-    ui.set_line_progress(1.0);
-    ui.set_curtain_progress(1.0);
     /* Opened by the power key: the Power OSD replaces the side sheet from
      * the first frame. */
     ui.set_menu_panel_visible(!ui.get_power_osd_open());
@@ -3890,11 +3894,6 @@ fn present(
     Ok(())
 }
 
-fn ease_in_out(progress: f32) -> f32 {
-    let p = progress.clamp(0.0, 1.0);
-    p * p * (3.0 - 2.0 * p)
-}
-
 fn pace_animation_frame(next_deadline: &mut Instant) {
     *next_deadline += Duration::from_nanos(FRAME_INTERVAL_NS);
 
@@ -3918,65 +3917,55 @@ fn animate_shutdown(
     qh: &QueueHandle<WaylandState>,
     conn: &Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let kind = if mode == "reboot" { "reboot" } else { "poweroff" };
     ui.set_lifecycle_mode(mode.into());
     if let Some((logical_width, logical_height)) = state.configured_size {
         /* Physical surface size: the same scale render_and_commit uses. */
         let scale120 = if state.viewport.is_some() { state.scale120.max(120) } else { 120 };
         let width = (logical_width * scale120 + 60) / 120;
         let height = (logical_height * scale120 + 60) / 120;
-        let (split, line_fraction, line_px) = splash::geometry(width, height);
-        ui.set_splash_image(splash::render(mode, width, height));
-        ui.set_splash_split(split);
-        ui.set_splash_line_fraction(line_fraction);
-        ui.set_splash_line_height(line_px as f32 * 120.0 / scale120 as f32);
+        let palette = splash::load_palette();
+        ui.set_splash_image(splash::image("reboot", width, height, &palette));
+        if kind == "poweroff" {
+            ui.set_splash_base(splash::image("poweroff", width, height, &palette));
+        }
+        let (x, y, w, h) = splash::track(width, height);
+        let k = 120.0 / scale120 as f32;
+        ui.set_splash_track_x(x * k);
+        ui.set_splash_track_y(y * k);
+        ui.set_splash_track_w(w * k);
+        ui.set_splash_track_h(h * k);
+        ui.set_splash_accent(splash::color(palette.accent));
     }
+    /* The LEDs play the same shape for the same time (nuubos-lightingd);
+     * nuubos-systemd's own lifecycle call later finds it already running. */
+    let _ = std::process::Command::new("/usr/lib/nuubos/lifecycle-lighting")
+        .arg(kind)
+        .stdin(std::process::Stdio::null())
+        .spawn();
     ui.set_lifecycle_active(true);
-    ui.set_line_progress(1.0);
-    ui.set_curtain_progress(1.0);
-    redraw_overlay(ui, queue, state, qh, conn)?;
 
-    let curtain_start = Instant::now();
-    let mut curtain_deadline = curtain_start;
-
+    let start = Instant::now();
+    let mut deadline = start;
     loop {
-        let elapsed = curtain_start.elapsed().as_millis() as u64;
-        let progress = (elapsed as f32 / CURTAIN_STAGE_MS as f32).min(1.0);
-        ui.set_curtain_progress(1.0 - ease_in_out(progress));
+        let f = splash::frame(kind, start.elapsed().as_millis() as u64);
+        ui.set_splash_top_alpha(f.top_alpha);
+        ui.set_splash_base_alpha(f.base_alpha);
+        ui.set_splash_fill_from(f.fill_from);
+        ui.set_splash_fill_to(f.fill_to);
+        ui.set_splash_fill_alpha(f.fill_alpha);
         redraw_overlay(ui, queue, state, qh, conn)?;
-
-        if progress >= 1.0 {
+        if f.done {
             break;
         }
-
-        pace_animation_frame(&mut curtain_deadline);
-    }
-
-    thread::sleep(Duration::from_millis(STAGE_GAP_MS));
-
-    let line_start = Instant::now();
-    let mut line_deadline = line_start;
-
-    loop {
-        let elapsed = line_start.elapsed().as_millis() as u64;
-        let progress = (elapsed as f32 / LINE_STAGE_MS as f32).min(1.0);
-        ui.set_line_progress(1.0 - ease_in_out(progress));
-        redraw_overlay(ui, queue, state, qh, conn)?;
-
-        if progress >= 1.0 {
-            break;
-        }
-
-        pace_animation_frame(&mut line_deadline);
+        pace_animation_frame(&mut deadline);
     }
 
     /*
-     * Hold the exact qualified final lifecycle raster on the Overlay layer.
-     * The lifecycle finalizer preserves this KMS scanout while Labwc exits.
+     * Hold the final lifecycle raster (identical to nuubos-splash's) on the
+     * Overlay layer: the lifecycle finalizer preserves this KMS scanout
+     * while Labwc exits.
      */
-    ui.set_curtain_progress(0.0);
-    ui.set_line_progress(0.0);
-    redraw_overlay(ui, queue, state, qh, conn)?;
-
     Ok(())
 }
 
@@ -4320,7 +4309,9 @@ fn handle_event(
         return Ok(());
     }
 
-    if *mapped || event.action == "quick_menu" {
+    /* A Quick Menu key that opens nothing (user picker, setup, safe mode)
+     * stays silent. */
+    if *mapped || (event.action == "quick_menu" && menu_allowed()) {
         let lifecycle_confirm = event.action == "menu_confirm"
             && *mapped
             && if ui.get_power_osd_open() {
@@ -4399,7 +4390,7 @@ fn handle_event(
                 flush_brightness(ui, brightness_dirty)?;
                 unmap_overlay(ui, queue, state, conn);
                 *mapped = false;
-            } else {
+            } else if menu_allowed() {
                 map_overlay(ui, queue, state, qh, conn)?;
                 *mapped = true;
             }

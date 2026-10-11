@@ -98,6 +98,11 @@ int main(int argc, char **argv)
 		perror(dev);
 		return 1;
 	}
+	/* The first opener of a DRM device becomes its master: a grab taken
+	 * while labwc starts would steal the display from it (black screen,
+	 * "Could not make device fd drm master"). Give it up at once; reading
+	 * framebuffers needs no master (root). */
+	drmDropMaster(fd);
 	res = drmModeGetResources(fd);
 	if (!res) {
 		perror("GetResources");

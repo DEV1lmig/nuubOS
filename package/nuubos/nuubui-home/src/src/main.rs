@@ -8,6 +8,7 @@ mod lighting;
 mod mediaui;
 mod moonlight;
 mod splash;
+mod splash_core;
 mod steamlink;
 mod themes;
 mod webui;
@@ -43,9 +44,6 @@ const REGIONAL_SOCKET: &str = "/run/nuubos/regionald.sock";
 const UI_CONTEXT: &str = "/run/nuubos/ui-context";
 const I18N_DIR: &str = "/usr/share/nuubos/i18n";
 
-const LINE_STAGE_MS: u64 = 220;
-const CURTAIN_STAGE_MS: u64 = 460;
-const STAGE_GAP_MS: u64 = 18;
 
 static SYSTEM_INFO_GATE: OnceLock<Arc<(Mutex<bool>, Condvar)>> = OnceLock::new();
 /* Initial setup (OOB) is running: controller navigation belongs to it. The
@@ -163,6 +161,8 @@ struct SystemSnapshot {
     effective_profile: String,
     auto_battery_threshold: i32,
     sleep_after_min: i32,
+    charge_limit: i32,
+    charge_limit_supported: bool,
     cpu_freq_khz: i64,
     gpu_freq_hz: i64,
     cpu_temp_millic: i64,
@@ -199,6 +199,8 @@ impl Default for SystemSnapshot {
             effective_profile: "auto".into(),
             auto_battery_threshold: 0,
             sleep_after_min: 0,
+            charge_limit: 100,
+            charge_limit_supported: false,
             cpu_freq_khz: -1,
             gpu_freq_hz: -1,
             cpu_temp_millic: -1,
@@ -508,6 +510,7 @@ fn apply_users(ui:&HomeWindow,s:&USnap,picker:&Arc<AtomicBool>){
         ui.set_user_picker_index(i);
         ui.set_user_picker_scroll(0);
     }
+    if open != ui.get_user_picker_open() { sync_picker_capture(ui, open); }
     picker.store(open,Ordering::SeqCst);
     ui.set_user_picker_forced(s.selection);
     ui.set_user_picker_open(open);
@@ -596,6 +599,8 @@ fn parse_system_snapshot(reply: &str) -> SystemSnapshot {
             "profile.effective" => s.effective_profile = value.to_owned(),
             "auto_battery.threshold" => s.auto_battery_threshold = value.parse().unwrap_or(0),
             "sleep_after_min" => s.sleep_after_min = value.parse().unwrap_or(0),
+            "charge_limit" => s.charge_limit = value.parse().unwrap_or(100),
+            "charge_limit.supported" => s.charge_limit_supported = value == "1",
             "cpu.freq_khz" => s.cpu_freq_khz = value.parse().unwrap_or(-1),
             "gpu.freq_hz" => s.gpu_freq_hz = value.parse().unwrap_or(-1),
             "temp.cpu_millic" => s.cpu_temp_millic = value.parse().unwrap_or(-1),
@@ -644,6 +649,11 @@ fn apply_system_snapshot(ui: &HomeWindow, s: &SystemSnapshot) {
     ui.set_system_effective_profile(s.effective_profile.clone().into());
     ui.set_system_auto_battery_threshold(s.auto_battery_threshold);
     ui.set_system_sleep_after_min(s.sleep_after_min);
+    if ui.get_system_charge_limit_supported() != s.charge_limit_supported {
+        ui.set_system_charge_limit_supported(s.charge_limit_supported);
+        rebuild_power_devices(ui);
+    }
+    ui.set_system_charge_limit(s.charge_limit);
 
     ui.set_system_cpu_clock(if s.cpu_freq_khz >= 0 {
         format!("{:.2} GHz", s.cpu_freq_khz as f64 / 1_000_000.0).into()
@@ -2406,6 +2416,25 @@ fn open_auto_battery_dropdown(ui: &HomeWindow) {
     );
 }
 
+fn open_charge_limit_dropdown(ui: &HomeWindow) {
+    let options = [80, 85, 90, 95, 100]
+        .into_iter()
+        .map(|value| {
+            (
+                value.to_string(),
+                if value == 100 { tr(ui, 54, "Off") } else { format!("{}%", value) },
+            )
+        })
+        .collect();
+    open_settings_choice(
+        ui,
+        "system-charge-limit",
+        &tr(ui, 900, "Charge Limit"),
+        options,
+        ui.get_system_charge_limit().to_string().as_str(),
+    );
+}
+
 fn open_sleep_timeout_dropdown(ui: &HomeWindow) {
     let values = [0, 1, 2, 5, 10, 15, 30, 45, 60, 120];
     let options = values
@@ -2600,6 +2629,9 @@ fn apply_settings_choice(ui: &HomeWindow) {
         }
         "system-auto-battery" => {
             system_set(ui, format!("SET AUTO_BATTERY {}", value));
+        }
+        "system-charge-limit" => {
+            system_set(ui, format!("SET CHARGE_LIMIT {}", value));
         }
         "system-sleep" => {
             system_set(ui, format!("SET SLEEP {}", value));
@@ -3624,6 +3656,11 @@ fn open_network_detail(ui: &HomeWindow, network: WifiNetworkEntry, return_view: 
     fetch_wifi_ip_configuration(ui, ssid, false);
 }
 
+/* Controllers & Input rows: RGB Lighting (the last) only with RGB hardware. */
+fn controllers_menu_rows(ui: &HomeWindow) -> i32 {
+    if ui.get_lighting_supported() { 4 } else { 3 }
+}
+
 fn move_model_selection(current: i32, count: i32, delta: i32) -> i32 {
     if count <= 0 {
         return 0;
@@ -4131,6 +4168,21 @@ fn input_command(command: &str) -> std::io::Result<String> {
 /* Controller navigation capture for the foreground nuubUI (Home, library,
  * Settings, OOB). inputd still calls it the Settings capture; it is
  * released only when the UI exits (later: while a game/app runs). */
+/* While the user picker is up the Quick Menu must not open (context
+ * "user-picker", checked by the Quick Menu) and Home keeps the navigation
+ * keys (the capture Settings, OOB and safe mode use). Closing it restores
+ * both unless one of those still needs them. */
+fn sync_picker_capture(ui: &HomeWindow, open: bool) {
+    let keep = open || ui.get_settings_open() || OOB_ACTIVE.load(Ordering::SeqCst) || SAFE_SCREEN.load(Ordering::SeqCst);
+    /* The Quick Menu reads the context: no menu on the picker. */
+    if open {
+        write_ui_context("user-picker");
+    } else if !OOB_ACTIVE.load(Ordering::SeqCst) && !SAFE_SCREEN.load(Ordering::SeqCst) {
+        write_ui_context(if ui.get_settings_open() { "settings" } else { "home" });
+    }
+    thread::spawn(move || set_ui_capture(keep));
+}
+
 fn set_ui_capture(enabled: bool) {
     let command = if enabled {
         "SETTINGS OPEN"
@@ -4436,13 +4488,17 @@ fn safe_confirm(ui: &HomeWindow, row: i32, settings_active: &Arc<AtomicBool>) {
 const SYSTEM_ROWS: i32 = 5;
 /* Settings → Power (settings-view 69, category 5): POWER (0 Performance
  * Profile, 1 Automatic Battery Saver, 2 Sleep After) | BATTERY (3 Charge,
- * 4 Health, read-only) | CONNECTED DEVICES (from 5, read-only, at least one
- * row: "none"). */
+ * 4 Health, read-only; 5 Charge Limit when the battery driver has one) |
+ * CONNECTED DEVICES (after them, read-only, at least one row: "none"). */
 const POWER_VIEW: i32 = 69;
-const POWER_DEVICES_START: i32 = 5;
+const POWER_CHARGE_LIMIT_ROW: i32 = 5;
+
+fn power_devices_start(ui: &HomeWindow) -> i32 {
+    if ui.get_system_charge_limit_supported() { 6 } else { 5 }
+}
 
 fn power_row_count(ui: &HomeWindow) -> i32 {
-    POWER_DEVICES_START + (ui.get_power_devices().row_count() as i32).max(1)
+    power_devices_start(ui) + (ui.get_power_devices().row_count() as i32).max(1)
 }
 
 fn update_power_scroll(ui: &HomeWindow) {
@@ -4451,7 +4507,7 @@ fn update_power_scroll(ui: &HomeWindow) {
         ui.get_power_index(),
         power_row_count(ui),
         ui.get_power_scroll_offset(),
-        (3, POWER_DEVICES_START, 0),
+        (3, power_devices_start(ui), 0),
     ));
 }
 
@@ -4964,12 +5020,13 @@ fn handle_settings_action(
                 _ => {}
             }
         }
+        /* No RGB Lighting row without RGB hardware. */
         10 => match action {
             "menu_up" => ui.set_controllers_menu_index(
-                move_model_selection(ui.get_controllers_menu_index(), 4, -1)
+                move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), -1)
             ),
             "menu_down" => ui.set_controllers_menu_index(
-                move_model_selection(ui.get_controllers_menu_index(), 4, 1)
+                move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), 1)
             ),
             "menu_confirm" => match ui.get_controllers_menu_index() {
                 0 => {
@@ -5151,6 +5208,7 @@ fn handle_settings_action(
                 0 => open_system_profile_dropdown(ui),
                 1 => open_auto_battery_dropdown(ui),
                 2 => open_sleep_timeout_dropdown(ui),
+                POWER_CHARGE_LIMIT_ROW if ui.get_system_charge_limit_supported() => open_charge_limit_dropdown(ui),
                 /* Battery and device rows are read-only. */
                 _ => {}
             },
@@ -5326,6 +5384,12 @@ fn route_input_action(
         return;
     }
     if user_picker_active.load(Ordering::SeqCst) && matches!(action,"menu_left"|"menu_right"|"menu_up"|"menu_down"|"menu_confirm"|"menu_back"){let a=action.to_owned();let w=weak.clone();let p=user_picker_active.clone();let _=slint::invoke_from_event_loop(move||if let Some(ui)=w.upgrade(){handle_user_picker(&ui,&a,&p);});return;}
+    /* Nothing else on the user picker: no Settings (Start), no Home
+     * shortcuts; the Quick Menu is held off by the input capture
+     * (sync_picker_capture). */
+    if user_picker_active.load(Ordering::SeqCst) {
+        return;
+    }
     /* Over a game Home is hidden underneath. */
     if library::GAME_RUNNING.load(Ordering::SeqCst)
         || moonlight::STREAM_RUNNING.load(Ordering::SeqCst)
@@ -5799,6 +5863,7 @@ fn handle_user_picker(ui:&HomeWindow,a:&str,p:&Arc<AtomicBool>){
                         if ok {
                             ui.set_user_picker_open(false);
                             picker.store(false,Ordering::SeqCst);
+                            sync_picker_capture(&ui, false);
                             /* Product Audio resolves /run/nuubos/userdata on each
                              * new track. Restart Home Music so the newly active
                              * user's library becomes authoritative immediately. */
@@ -5818,6 +5883,7 @@ fn handle_user_picker(ui:&HomeWindow,a:&str,p:&Arc<AtomicBool>){
         "menu_back" if !ui.get_user_picker_forced()=>{
             ui.set_user_picker_open(false);
             p.store(false,Ordering::SeqCst);
+            sync_picker_capture(&ui, false);
             thread::spawn(move||{let _=users_command("CANCEL_SWITCH");});
         },
         _=>{}
@@ -5833,47 +5899,85 @@ fn clear_ready() {
     let _ = fs::remove_file(UI_READY);
 }
 
-/// Render the lifecycle splash for `mode` at the window's physical size.
+/* The splash palette as it was when nuubUI started: the boot animation
+ * must continue the raster the kernel and labwc showed, even if the Mood
+ * cache is rewritten meanwhile (themes::apply_active). */
+static BOOT_PALETTE: OnceLock<splash::Palette> = OnceLock::new();
+
+thread_local! {
+    static SPLASH_TIMER: Timer = Timer::default();
+}
+
+/// Rasters and track geometry of the lifecycle splash for `mode` at the
+/// window's physical size.
 fn prepare_splash(ui: &HomeWindow, mode: &str) {
     let size = ui.window().size();
     let scale = ui.window().scale_factor().max(0.1);
-    let (split, line_fraction, line_px) = splash::geometry(size.width, size.height);
-    ui.set_splash_image(splash::render(mode, size.width, size.height));
-    ui.set_splash_split(split);
-    ui.set_splash_line_fraction(line_fraction);
-    ui.set_splash_line_height(line_px as f32 / scale);
+    let palette = if mode == "boot" {
+        *BOOT_PALETTE.get_or_init(splash::load_palette)
+    } else {
+        splash::load_palette()
+    };
+    ui.set_splash_image(splash::image(if mode == "boot" { "boot" } else { "reboot" }, size.width, size.height, &palette));
+    if mode == "poweroff" {
+        ui.set_splash_base(splash::image("poweroff", size.width, size.height, &palette));
+    }
+    let (x, y, w, h) = splash::track(size.width, size.height);
+    ui.set_splash_track_x(x / scale);
+    ui.set_splash_track_y(y / scale);
+    ui.set_splash_track_w(w / scale);
+    ui.set_splash_track_h(h / scale);
+    ui.set_splash_accent(splash::color(palette.accent));
 }
 
+fn apply_splash_frame(ui: &HomeWindow, f: &splash::Frame) {
+    ui.set_splash_top_alpha(f.top_alpha);
+    ui.set_splash_base_alpha(f.base_alpha);
+    ui.set_splash_fill_from(f.fill_from);
+    ui.set_splash_fill_to(f.fill_to);
+    ui.set_splash_fill_alpha(f.fill_alpha);
+}
+
+/// Plays a lifecycle animation ("boot" | "reboot" | "poweroff"), one frame
+/// per vsync-ish tick, from splash::frame. Boot ends by hiding the layer;
+/// restart and power off keep their final raster for the kernel handoff.
+fn run_splash(ui: &HomeWindow, kind: &str) {
+    prepare_splash(ui, kind);
+    ui.set_transition_mode(kind.into());
+    ui.set_lifecycle_on(true);
+    apply_splash_frame(ui, &splash::frame(kind, 0));
+    let start = std::time::Instant::now();
+    let weak = ui.as_weak();
+    let kind = kind.to_owned();
+    SPLASH_TIMER.with(|timer| {
+        timer.start(slint::TimerMode::Repeated, Duration::from_millis(16), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let f = splash::frame(&kind, start.elapsed().as_millis() as u64);
+            apply_splash_frame(&ui, &f);
+            if f.done {
+                if kind == "boot" {
+                    ui.set_lifecycle_on(false);
+                }
+                SPLASH_TIMER.with(|t| t.stop());
+            }
+        });
+    });
+}
+
+/* nuubos-systemd and lifecycle-finalize both announce the mode: the
+ * second announcement must not restart the animation. */
 fn start_shutdown_transition(ui: &HomeWindow, mode: String) {
-    prepare_splash(ui, &mode);
-    ui.set_transition_mode(mode.into());
-    ui.set_curtain_progress(0.0);
-
-    let weak = ui.as_weak();
-    Timer::single_shot(
-        Duration::from_millis(CURTAIN_STAGE_MS + STAGE_GAP_MS),
-        move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.set_line_progress(0.0);
-            }
-        },
-    );
+    let kind = if mode == "reboot" { "reboot" } else { "poweroff" };
+    if ui.get_lifecycle_on() && ui.get_transition_mode() == kind {
+        return;
+    }
+    run_splash(ui, kind);
 }
 
+/* The LEDs play the boot shape (nuubos-lightingd) in step with it. */
 fn start_boot_transition(ui: &HomeWindow) {
-    prepare_splash(ui, "boot");
-    ui.set_transition_mode("boot".into());
-    ui.set_line_progress(1.0);
-
-    let weak = ui.as_weak();
-    Timer::single_shot(
-        Duration::from_millis(LINE_STAGE_MS + STAGE_GAP_MS),
-        move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.set_curtain_progress(1.0);
-            }
-        },
-    );
+    lighting::lifecycle("boot");
+    run_splash(ui, "boot");
 }
 
 fn start_lifecycle_listener(ui: &HomeWindow) {
@@ -5890,6 +5994,17 @@ fn start_lifecycle_listener(ui: &HomeWindow) {
                     };
 
                     let mode = line.trim().to_owned();
+                    /* A Mood chosen in the Web administration
+                     * (nuubos-themectl select announces it). */
+                    if mode == "mood" {
+                        let weak = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                themes::apply_active(&ui);
+                            }
+                        });
+                        continue;
+                    }
                     if mode != "reboot" && mode != "poweroff" {
                         continue;
                     }
@@ -5937,10 +6052,16 @@ fn main() -> Result<(), slint::PlatformError> {
     select_renderer();
     let ui = HomeWindow::new()?;
     ui.window().set_fullscreen(true);
+    /* The first frame continues the boot raster (kernel, labwc). */
+    let _ = BOOT_PALETTE.get_or_init(splash::load_palette);
+    prepare_splash(&ui, "boot");
 
     apply_language(&ui, "en");
     let user_picker_active=Arc::new(AtomicBool::new(false));
     refresh_users(&ui,&user_picker_active); refresh_regional(&ui);
+    /* Also with nobody signed in yet: the user picker wears the last
+     * user's Mood (themes::apply_active). */
+    if ui.get_active_user_id().is_empty() { themes::apply_active(&ui); }
     start_users_listener(&ui,user_picker_active.clone()); start_regional_listener(&ui);
     start_localization_listener(&ui); start_status_listener(&ui);
     start_wifi_product_listener(&ui);
@@ -5999,13 +6120,66 @@ fn main() -> Result<(), slint::PlatformError> {
         show_safe_screen(&ui);
         thread::spawn(|| set_ui_capture(true));
     } else if !OOB_ACTIVE.load(Ordering::SeqCst) {
-        write_ui_context("home");
+        write_ui_context(if user_picker_active.load(Ordering::SeqCst) { "user-picker" } else { "home" });
+    }
+    /* The boot animation (and its LED shape) starts once Home really
+     * renders smoothly: three frames in a row less than 50 ms apart. At boot
+     * nuubUI's own start-up work (models, avatars, Mood) keeps the UI thread
+     * busy for seconds, and an animation started earlier ran while no frame
+     * could be drawn: nothing was seen (user reports 2026-10-10). Until
+     * then the still splash stays, identical to labwc's frame; a probe timer
+     * asks for frames; after 4 s it starts anyway. The software renderer has
+     * no rendering notifier: a fixed delay there. */
+    {
+        let weak = ui.as_weak();
+        let started = Rc::new(std::cell::Cell::new(false));
+        let smooth = Rc::new(std::cell::Cell::new(0u32));
+        let last = Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+        let probe = Rc::new(Timer::default());
+        let begin = {
+            let weak = weak.clone();
+            let started = started.clone();
+            let probe = probe.clone();
+            move || {
+                if started.replace(true) {
+                    return;
+                }
+                probe.stop();
+                if let Some(ui) = weak.upgrade() {
+                    start_boot_transition(&ui);
+                }
+            }
+        };
+        let on_frame = begin.clone();
+        let hooked = ui.window().set_rendering_notifier(move |state, _| {
+            if !matches!(state, slint::RenderingState::AfterRendering) {
+                return;
+            }
+            let now = std::time::Instant::now();
+            let quick = last.get().map(|t| now.duration_since(t) < Duration::from_millis(50)).unwrap_or(false);
+            last.set(Some(now));
+            smooth.set(if quick { smooth.get() + 1 } else { 0 });
+            if smooth.get() >= 3 {
+                on_frame();
+            }
+        });
+        if hooked.is_ok() {
+            let weak = weak.clone();
+            probe.start(slint::TimerMode::Repeated, Duration::from_millis(16), move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.window().request_redraw();
+                }
+            });
+            let fallback = begin.clone();
+            Timer::single_shot(Duration::from_millis(4000), move || fallback());
+        } else {
+            Timer::single_shot(Duration::from_millis(400), move || begin());
+        }
     }
     let weak = ui.as_weak();
     Timer::single_shot(Duration::from_millis(220), move || {
         if let Some(ui) = weak.upgrade() {
             mark_ready();
-            start_boot_transition(&ui);
             /* nuubUI is up: an installed update is kept (EPIC-048). Never
              * from safe mode, which exists because nuubUI kept failing. */
             if std::env::var("NUUBOS_SAFE_MODE").as_deref() != Ok("1") {

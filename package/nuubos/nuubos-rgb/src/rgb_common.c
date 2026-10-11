@@ -13,7 +13,11 @@
  * state and must not activate any RGB hardware.
  *
  * CubeXX has 16 LEDs arranged as two independent 8-LED rings.
- * Ring ownership/order is hardware-qualified before the topology is frozen.
+ *
+ * Every ring: position 0 is the upper right LED and positions run
+ * clockwise, 45 degrees apart (position 3 at the bottom, lightingd
+ * RING_BOTTOM). CubeXX: qualified 2026-10-11 with locate 0 on both
+ * rings (the two rings are wired in opposite directions).
  *
  * led_indexes lists the physical LED at each position around a ring, in
  * order: nuubos-rgbd maps logical frames (zone by zone, position by
@@ -31,13 +35,13 @@ static const struct nuubos_rgb_topology topologies[] = {
 				.name = "left-stick",
 				.type = NUUBOS_RGB_ZONE_RING,
 				.led_count = 8,
-				.led_indexes = { 8, 9, 10, 11, 12, 13, 14, 15 },
+				.led_indexes = { 15, 14, 13, 12, 11, 10, 9, 8 },
 			},
 			{
 				.name = "right-stick",
 				.type = NUUBOS_RGB_ZONE_RING,
 				.led_count = 8,
-				.led_indexes = { 1, 2, 3, 4, 5, 6, 7, 0 },
+				.led_indexes = { 1, 0, 7, 6, 5, 4, 3, 2 },
 			},
 		},
 	},

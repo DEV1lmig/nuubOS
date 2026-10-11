@@ -26,3 +26,4 @@ Global notifications/OSD above applications and fullscreen games: volume, emulat
 - New toasts play a cue only for warnings/errors (`error`) and saved screenshots (`screenshot`), Notification Sounds toggle; ordinary cards are silent.
 - Steam Link toasts `stream.steamlink.rolledback` (automatic) / `stream.steamlink.restored` (manual).
 - GAME row "RetroArch Advanced" is now "RetroArch" (string 421).
+- No Quick Menu while nuubUI writes ui-context `user-picker`, `oob` or `safe-mode` (`menu_allowed()`); the menu key is then silent too: the `quick-settings` cue plays only when the menu actually opens/closes (user request 2026-10-11).
