@@ -28,7 +28,7 @@ open(ud + '/users/' + user + '/saves/snes/Mario (USA).srm', 'w').write('save')
 exe = t + '/libraryd'
 subprocess.check_call(['gcc', '-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror',
     '-DRUN_ROOT="%s"' % run, '-DUSERDATA_ROOT="%s"' % ud, '-DSHARE_ROOT="%s"' % share,
-    src + '/libraryd.c', '-o', exe, '-lpthread'])
+    '-DSTATE_ROOT="%s"' % (t + '/state'), src + '/libraryd.c', '-o', exe, '-lpthread'])
 proc = subprocess.Popen([exe], stderr=open(t + '/log', 'w'))
 fails = 0
 def check(name, cond):

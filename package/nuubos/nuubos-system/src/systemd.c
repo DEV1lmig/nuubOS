@@ -602,13 +602,34 @@ static long long timeout_ms(int minutes)
     return (long long)minutes * 60000LL;
 }
 
+/* nuubUI's full-screen operation (system update, SD2 restore: ui-context
+ * "operation") must not be put to sleep (EPIC-048: critical OTA/storage
+ * phases inhibit suspend). */
+static bool operation_running(void)
+{
+    char c[32] = "";
+    FILE *f = fopen("/run/nuubos/ui-context", "r");
+
+    if (f) {
+        if (!fgets(c, sizeof(c), f))
+            c[0] = '\0';
+        fclose(f);
+    }
+    return !strncmp(c, "operation", 9);
+}
+
 static void idle_policy_tick(struct runtime_state *st)
 {
     long long elapsed = boottime_ms() - st->stage_enter_ms;
 
     if (st->idle_stage == IDLE_ACTIVE && st->cfg.sleep_after_min > 0 &&
-        elapsed >= timeout_ms(st->cfg.sleep_after_min))
-        enter_sleep(st);
+        elapsed >= timeout_ms(st->cfg.sleep_after_min)) {
+        /* The idle time starts over instead. */
+        if (operation_running())
+            mark_activity(st);
+        else
+            enter_sleep(st);
+    }
 }
 
 static long long read_cpu_freq_khz(void)
@@ -821,13 +842,14 @@ static void read_key_value_file(const char *path,
 }
 
 /* Storage (docs/dev/platform.md "SD2 = games card"): SD1 health from the
- * storage selector, the games card from nuubos-storagectl, the backup to
- * it from nuubos-sd2-backup. They write these files and poke STORAGE
+ * storage selector, the games card from nuubos-storagectl, the console
+ * backup from nuubos-sd2-backup. They write these files and poke STORAGE
  * CHANGED; the free space is measured here at every snapshot. */
 struct storage_view {
     char sd1_health[32], sd1_action[32];
     char sd2_slot[8], sd2_state[24], sd2_cid[96], sd2_fs[16], sd2_label[64], sd2_prompt[16];
     char backup_enabled[8], backup_items[96], backup_last[24], backup_result[16], backup_card[16];
+    char backup_dest[8], backup_available[4], backup_found[4];
     unsigned long long userdata_total, userdata_free, sd2_total, sd2_free;
 };
 
@@ -856,6 +878,8 @@ static void read_storage(struct storage_view *v)
     snprintf(v->sd2_prompt, sizeof(v->sd2_prompt), "none");
     snprintf(v->backup_enabled, sizeof(v->backup_enabled), "1");
     snprintf(v->backup_card, sizeof(v->backup_card), "none");
+    snprintf(v->backup_available, sizeof(v->backup_available), "0");
+    snprintf(v->backup_found, sizeof(v->backup_found), "0");
     read_key_value_file(sd1, "STORAGE_HEALTH", v->sd1_health, sizeof(v->sd1_health));
     read_key_value_file(sd1, "ACTION_REQUIRED", v->sd1_action, sizeof(v->sd1_action));
     read_key_value_file(sd2, "SD2_SLOT", v->sd2_slot, sizeof(v->sd2_slot));
@@ -869,6 +893,9 @@ static void read_storage(struct storage_view *v)
     read_key_value_file(backup, "LAST", v->backup_last, sizeof(v->backup_last));
     read_key_value_file(backup, "RESULT", v->backup_result, sizeof(v->backup_result));
     read_key_value_file(backup, "CARD", v->backup_card, sizeof(v->backup_card));
+    read_key_value_file(backup, "DEST", v->backup_dest, sizeof(v->backup_dest));
+    read_key_value_file(backup, "AVAILABLE", v->backup_available, sizeof(v->backup_available));
+    read_key_value_file(backup, "FOUND", v->backup_found, sizeof(v->backup_found));
     space_of("/userdata", &v->userdata_total, &v->userdata_free);
     if (!strcmp(v->sd2_state, "ready") || !strcmp(v->sd2_state, "readonly"))
         space_of("/media/sd2", &v->sd2_total, &v->sd2_free);
@@ -930,6 +957,9 @@ static void reply_status(int fd, const struct runtime_state *st)
         "storage.backup.last=%s\n"
         "storage.backup.result=%s\n"
         "storage.backup.card=%s\n"
+        "storage.backup.dest=%s\n"
+        "storage.backup.available=%s\n"
+        "storage.backup.found=%s\n"
         "lifecycle.stage=%s\n"
         "lifecycle.last_wake=%s\n"
         "lifecycle.last_sleep_ms=%lld\n"
@@ -947,6 +977,7 @@ static void reply_status(int fd, const struct runtime_state *st)
         sv.sd2_slot,sv.sd2_state,sv.sd2_cid,sv.sd2_fs,sv.sd2_label,sv.sd2_prompt,
         sv.sd2_total,sv.sd2_free,
         sv.backup_enabled,sv.backup_items,sv.backup_last,sv.backup_result,sv.backup_card,
+        sv.backup_dest,sv.backup_available,sv.backup_found,
         idle_stage_name(st->idle_stage),
         st->last_wake_reason,
         st->last_sleep_elapsed_ms,
@@ -1049,7 +1080,8 @@ static void handle_command(struct client *c, struct runtime_state *st, const cha
     if(!strcmp(line,"STORAGE CHANGED")){
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
-    /* BACKUP_ITEM first: "SET STORAGE BACKUP %s" also matches its prefix. */
+    /* "SET STORAGE BACKUP " (with the space) never matches BACKUP_ITEM or
+     * BACKUP_DEST. */
     if(!strncmp(line,"SET STORAGE BACKUP ",19) && sscanf(line,"SET STORAGE BACKUP %63s",val)==1){
         char *argv[]={"/usr/sbin/nuubos-sd2-backup","set","enabled",val,NULL};
         if(strcmp(val,"0") && strcmp(val,"1")){(void)write_all(c->fd,"ERR invalid value\n");return;}
@@ -1064,6 +1096,12 @@ static void handle_command(struct client *c, struct runtime_state *st, const cha
             if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR backup settings failed\n");return;}
             (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
         }
+    }
+    if(sscanf(line,"SET STORAGE BACKUP_DEST %63s",val)==1){
+        char *argv[]={"/usr/sbin/nuubos-sd2-backup","set","dest",val,NULL};
+        if(strcmp(val,"sd2") && strcmp(val,"sd1") && strcmp(val,"usb")){(void)write_all(c->fd,"ERR invalid value\n");return;}
+        if(run_argv(argv)!=0){(void)write_all(c->fd,"ERR backup settings failed\n");return;}
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
     /* Quick games-card actions (the long ones are jobs: sd2-format,
      * sd2-prepare, sd2-backup, sd2-restore). */

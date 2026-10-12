@@ -20,10 +20,9 @@ define NUUBOS_FILES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-filesctl $(TARGET_DIR)/usr/bin/nuubos-filesctl
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-mediactl $(TARGET_DIR)/usr/sbin/nuubos-mediactl
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-sharesctl $(TARGET_DIR)/usr/sbin/nuubos-sharesctl
-	$(INSTALL) -D -m 0755 $(@D)/nuubos-backupctl $(TARGET_DIR)/usr/bin/nuubos-backupctl
 	$(INSTALL) -D -m 0644 $(@D)/72-nuubos-removable.rules \
 		$(TARGET_DIR)/lib/udev/rules.d/72-nuubos-removable.rules
-	for j in file-copy file-move backup-user restore-user; do \
+	for j in file-copy file-move; do \
 		$(INSTALL) -D -m 0644 $(@D)/$$j.job $(TARGET_DIR)/usr/share/nuubos/jobs/$$j.job || exit 1; \
 	done
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/media

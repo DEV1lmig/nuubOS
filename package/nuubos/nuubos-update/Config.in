@@ -5,9 +5,11 @@ config BR2_PACKAGE_NUUBOS_UPDATE
 	select BR2_PACKAGE_LIBCURL
 	select BR2_PACKAGE_CA_CERTIFICATES
 	select BR2_PACKAGE_LIBSODIUM
+	select BR2_PACKAGE_ZLIB
 	help
 	  EPIC-048 OTA updates: signed release manifest (Ed25519, public
-	  key from board/nuubos/common/ota/update-key.pub), resumable
-	  verified download, installation on the next restart with a
-	  rollback of the replaced system files when the new system does
-	  not reach nuubUI.
+	  key from board/nuubos/common/ota/update-key.pub) per release
+	  channel on GitHub Releases, resumable verified download,
+	  installation into the inactive A/B system slot and automatic
+	  return to the previous slot (U-Boot trial boots) when the new
+	  system does not reach nuubUI.

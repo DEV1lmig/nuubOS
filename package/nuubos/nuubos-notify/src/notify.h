@@ -58,6 +58,7 @@
  *                           [name=]    (stream could not start / was lost)
  *   stream.steamlink.installed version=   (Valve Steam Link downloaded)
  *   stream.steamlink.failed reason=network|space|archive|write
+ *   sync.request            name=      (a device asks to sync: nuubos-syncd)
  *
  * Values are percent-encoded. Sending is fire-and-forget and never blocks:
  * a missing or busy router simply drops a transient notification.

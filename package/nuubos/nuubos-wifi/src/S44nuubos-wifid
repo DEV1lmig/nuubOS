@@ -42,9 +42,12 @@ ensure_wpa()
     # network is saved and wifid and the status listener can attach.
     if [ ! -e "$WPA_CONF" ]; then
         mkdir -p "${WPA_CONF%/*}"
-        (umask 077 && printf 'ctrl_interface=/var/run/wpa_supplicant\ncountry=IT\nupdate_config=1\n' > "$WPA_CONF") || return 0
+        (umask 077 && printf 'ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\n' > "$WPA_CONF") || return 0
     fi
     [ -r "$WPA_CONF" ] || return 0
+    # The regulatory domain follows the user's region (regionald); drop
+    # the fixed country older releases wrote.
+    (umask 077 && sed -i '/^country=/d' "$WPA_CONF") 2>/dev/null || true
     wpa_supplicant -B -D nl80211 -i wlan0 -c "$WPA_CONF" >/dev/null 2>&1 || true
 }
 

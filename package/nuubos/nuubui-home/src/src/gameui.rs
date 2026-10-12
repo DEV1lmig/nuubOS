@@ -9,14 +9,14 @@
  *   55 Game Hotkeys, 56 Performance Overlay   nuubos-emud SETTINGS / SET
  *   Start Game (a Home bottom sheet) nuubos-emud STATES, LAUNCH <mode>
  *   63 Software Update (EPIC-048)   nuubos-updatectl, nuubos-update-apply
- *   66 Syncthing (EPIC-034)         nuubos-syncctl (per user)
+ *   66 Syncthing (EPIC-034)         syncui.rs (nuubos-syncd)
  *
  * Settings → Gaming (68) itself is built here too (gaming-rows): the
  * RetroAchievements account, the ScreenScraper account and bulk scraping
  * (EPIC-015, nuubos-scraper, nuubos-jobd) and BIOS Files.
  *
  * The optional network services (Remote Services EPIC-037/039 through
- * nuubos-remotectl, Syncthing) are also rows of Settings → Connectivity,
+ * nuubos-remotectl) are also rows of Settings → Connectivity,
  * section SERVICES (connectivity-services), built here from the same
  * replies.
  *
@@ -146,7 +146,10 @@ struct State {
     remote_password: String,
     update: Vec<(String, String)>,
     update_result: String,
-    sync: Vec<(String, String)>,
+    /* The update job running from this page ("download" | "install"), its
+     * progress 0..100: its row becomes a progress bar. */
+    update_job: String,
+    update_progress: i32,
     /* Row keys of Connectivity's SERVICES section, in order. */
     service_keys: Vec<String>,
     /* Row keys of the page on screen, in GenRow order. */
@@ -500,54 +503,45 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                     armed_detail(&st.armed, "ra-signout", tr(ui, 191, "Press again to confirm"), String::new())), true));
             }
         }
-        66 => {
-            let get = |k: &str| st.sync.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).unwrap_or_default();
-            let enabled = get("enabled") == "1";
-            rows.push(("sync-enabled".into(), toggle(tr(ui, 669, "Syncthing"), enabled,
-                if get("failed") == "1" { tr(ui, 677, "Syncthing stopped unexpectedly") }
-                else { tr(ui, 670, "Keeps your saves in sync with your other devices. It is not a backup.") }), true));
-            if enabled && !get("device_id").is_empty() {
-                rows.push(("info".into(), row(tr(ui, 671, "This Console's ID"), String::new(),
-                    format!("{}  •  {}", get("device_id"), tr(ui, 672, "Add it on your other device; it then appears here to accept"))), false));
-                for (kind, idx, fallback) in [("saves", 673, "Saves"), ("states", 674, "Save States"), ("screenshots", 675, "Screenshots")] {
-                    let on = st.sync.iter().any(|(k, v)| k == "folder" && v == &format!("{kind}\t1"));
-                    rows.push((format!("sync-folder:{kind}"), toggle(tr(ui, idx, fallback), on, String::new()), true));
-                }
-                for (k, v) in &st.sync {
-                    let f: Vec<&str> = v.split('\t').collect();
-                    if k == "pending" && f.len() >= 2 {
-                        rows.push((format!("sync-accept:{}", f[0]), row(if f[1].is_empty() { f[0].to_owned() } else { f[1].to_owned() },
-                            String::new(), tr(ui, 676, "Wants to connect • press to accept")), true));
-                    } else if k == "device" && f.len() >= 3 {
-                        let key = format!("sync-remove:{}", f[0]);
-                        rows.push((key.clone(), row(if f[1].is_empty() { f[0].to_owned() } else { f[1].to_owned() },
-                            if f[2] == "1" { tr(ui, 198, "Connected") } else { tr(ui, 159, "Not connected") },
-                            armed_detail(&st.armed, &key, tr(ui, 191, "Press again to confirm"), String::new())), true));
-                    }
-                }
-            }
-        }
         63 => {
             let get = |k: &str| st.update.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).unwrap_or_default();
             let build = get("build");
             rows.push(("info".into(), row(tr(ui, 485, "Version"),
                 if build.is_empty() { get("current") } else { format!("{} • {}", get("current"), build) }, String::new()), false));
+
             if get("provider") != "available" {
                 rows.push(("info".into(), row(tr(ui, 655, "Updates are not available in this build"), String::new(), String::new()), false));
             } else {
                 let available = get("available") == "1";
+                let channel = get("channel");
+                let mut channel_row = nav(tr(ui, 985, "Update Channel"), channel_name(ui, &channel));
+                if channel != "stable" {
+                    channel_row.detail = tr(ui, 989, "Beta and Alpha get new versions first and may have bugs").into();
+                }
+                rows.push(("update-channel".into(), channel_row, !st.busy));
+                rows.push(("update-auto".into(), toggle(tr(ui, 992, "Check Automatically"), get("auto") == "1",
+                    tr(ui, 993, "Once a day, when connected to Wi-Fi")), true));
                 let check_value = if st.busy { tr(ui, 488, "Checking…") }
                     else if available { tr_arg(ui, 652, "nuubOS {0} available", &get("version")) }
                     else if !st.update_result.is_empty() { st.update_result.clone() }
                     else { String::new() };
                 rows.push(("update-check".into(), row(tr(ui, 487, "Check for Updates"), check_value, String::new()), !st.busy));
-                if available && get("downloaded") != "1" {
-                    rows.push(("update-download".into(), row(tr(ui, 653, "Download"), String::new(), get("notes")), !st.busy));
+                if st.update_job == "download" {
+                    rows.push(("update-busy".into(), progress_row(tr(ui, 660, "Downloading update"), st.update_progress), false));
+                } else if available && get("downloaded") != "1" {
+                    rows.push(("update-download".into(), row(tr(ui, 653, "Download"), String::new(), String::new()), !st.busy));
                 }
-                if available && get("downloaded") == "1" {
+                if st.update_job == "install" {
+                    rows.push(("update-busy".into(), progress_row(tr(ui, 984, "Installing update"), st.update_progress), false));
+                } else if available && get("downloaded") == "1" {
+                    let detail = if get("battery") == "low" { tr(ui, 1012, "Charge the battery above 30% to install") }
+                        else { tr(ui, 657, "Your games, saves and settings are kept") };
                     rows.push(("update-install".into(), row(tr(ui, 654, "Install and Restart"), String::new(),
-                        armed_detail(&st.armed, "update-install", tr(ui, 191, "Press again to confirm"),
-                            tr(ui, 657, "Your games, saves and settings are kept"))), true));
+                        armed_detail(&st.armed, "update-install", tr(ui, 191, "Press again to confirm"), detail)), !st.busy));
+                }
+                /* What's New: the release notes, on their own full screen. */
+                if available && !release_notes(&get("notes")).is_empty() {
+                    rows.push(("update-notes".into(), nav(tr(ui, 1005, "What's New"), String::new()), true));
                 }
             }
         }
@@ -717,7 +711,7 @@ fn render_details(ui: &HomeWindow) {
     ui.set_gen_select_label("".into());
 }
 
-/* Backdrop: a small, box-blurred copy of the screenshot (or the cover),
+/* Backdrop: a small, box-blurred copy of the cover,
  * stretched under the page; cheap to decode and to draw. */
 fn blurred(src: &Image) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     let (mut buf, _) = crate::library::shape_cover(src, 72, 0.0)?;
@@ -807,7 +801,11 @@ pub(crate) fn render(ui: &HomeWindow) {
         render_details(ui);
         return;
     }
-    if !(50..=56).contains(&view) && view != 63 && view != 66 {
+    if view == crate::syncui::VIEW {
+        crate::syncui::render_page(ui);
+        return;
+    }
+    if !(50..=56).contains(&view) && view != 63 {
         return;
     }
     let rows = STATE.with(|st| build_rows(ui, &st.borrow(), view));
@@ -934,7 +932,7 @@ fn load_details_then(ui: &HomeWindow, id: String, open: bool) {
         let load = |p: &str| if p.is_empty() { None } else { Image::load_from_path(std::path::Path::new(p)).ok() };
         let cover_src = load(&d.cover);
         let cover = cover_src.as_ref().and_then(|i| crate::library::shape_cover(i, target, radius)).map(|c| c.0);
-        let backdrop = load(d.meta("screenshot")).or(cover_src).as_ref().and_then(blurred);
+        let backdrop = cover_src.as_ref().and_then(blurred);
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             if (!open && !ACTIVE.load(Ordering::SeqCst)) || STATE.with(|st| st.borrow().details.id != d.id) {
@@ -1225,6 +1223,10 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-filter" => game_set(ui, "filter", value),
         "emu-slots" => emu_set(ui, "slots", value),
         "game-fill" => start_bulk(ui, value),
+        "update-channel" => {
+            STATE.with(|st| st.borrow_mut().update_result.clear());
+            tool_then(ui, "/usr/bin/nuubos-updatectl", vec!["channel".into(), value], None, |ui, _| refresh_update(ui));
+        }
         "game-source" => tool_then(ui, "/usr/bin/nuubos-scraper", vec!["provider".into(), "set".into(), value],
             None, |ui, _| refresh_gaming(ui)),
         c if c.starts_with("emu-hotkey:") => emu_set(ui, &format!("hotkey_{}", &c[11..]), value),
@@ -1411,9 +1413,9 @@ fn source_name(id: &str) -> &'static str {
 
 fn source_detail(ui: &HomeWindow, id: &str) -> String {
     match id {
-        "thegamesdb" => tr(ui, 794, "Covers, screenshots and descriptions in English. A free private API key gives more requests."),
-        "libretro" => tr(ui, 795, "Covers and screenshots only. No account needed."),
-        _ => tr(ui, 793, "Covers, screenshots, descriptions and ratings in your language. A free ScreenScraper account gives more requests."),
+        "thegamesdb" => tr(ui, 794, "Covers and descriptions in English. A free private API key gives more requests."),
+        "libretro" => tr(ui, 795, "Covers only. No account needed."),
+        _ => tr(ui, 793, "Covers, descriptions and ratings in your language. A free ScreenScraper account gives more requests."),
     }
 }
 
@@ -1481,6 +1483,16 @@ fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     let mut bios = nav(tr(ui, 576, "BIOS Files"), String::new());
     bios.detail = tr(ui, 581, "Copy BIOS files to the bios folder on the SD card. nuubOS never includes them.").into();
     rows.push(("bios".into(), bios, true));
+    /* SYNCTHING (USER): its page and, once on, the setup guide. */
+    let (value, detail, enabled) = crate::syncui::summary(ui);
+    let mut sync = nav(tr(ui, 669, "Syncthing"), value);
+    sync.detail = detail.into();
+    rows.push(("sync".into(), sync, true));
+    if enabled {
+        let mut add = nav(tr(ui, 1028, "Add a Device"), String::new());
+        add.detail = tr(ui, 1029, "Another console, a computer or a phone").into();
+        rows.push(("sync-add".into(), add, true));
+    }
     rows
 }
 
@@ -1502,10 +1514,12 @@ fn render_gaming(ui: &HomeWindow) {
         let mut st = st.borrow_mut();
         let rows = gaming_rows(ui, &st);
         st.gaming_keys = rows.iter().map(|r| r.0.clone()).collect();
-        /* LIBRARY (DEVICE) starts after the user's rows. */
+        /* LIBRARY (DEVICE) starts after the user's rows, SYNCTHING (USER)
+         * after the library. */
         let split = rows.iter().position(|r| r.0 == "scan")
             .unwrap_or(rows.len()) as i32;
         ui.set_gaming_split(split);
+        ui.set_gaming_split2(rows.iter().position(|r| r.0 == "sync").unwrap_or(0) as i32);
         let select = rows.get(ui.get_gaming_index().max(0) as usize).map(|r| r.2).unwrap_or(false);
         let armed = st.armed.clone();
         let rows = rows.into_iter()
@@ -1567,6 +1581,8 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
             }
             match key.as_str() {
                 "ra" => open_achievements(ui),
+                "sync" => open_sync(ui),
+                "sync-add" => crate::syncui::open_guide(ui),
                 "bios" => open_bios(ui),
                 "boot_screens" | "slot_rotation" | "bezels" | "crt" => {
                     let on = STATE.with(|st| emu_get(&st.borrow(), &key) == "1");
@@ -1752,14 +1768,6 @@ fn service_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     rows.push(("regen".into(), row(tr(ui, 606, "Regenerate Password"), String::new(),
         armed_detail(&st.armed, "regen", tr(ui, 191, "Press again to confirm"),
             tr(ui, 607, "The old password stops working"))), true));
-    let sync = |k: &str| st.sync.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).unwrap_or_default();
-    rows.push(("open-sync".into(), nav(tr(ui, 669, "Syncthing"),
-        if sync("enabled") == "1" { tr(ui, 222, "On") } else { tr(ui, 54, "Off") }),
-        true));
-    if let Some(r) = rows.last_mut() {
-        r.1.detail = if sync("failed") == "1" { tr(ui, 677, "Syncthing stopped unexpectedly") }
-            else { tr(ui, 670, "Keeps your saves in sync with your other devices. It is not a backup.") }.into();
-    }
     rows
 }
 
@@ -1804,13 +1812,11 @@ pub fn refresh_services(ui: &HomeWindow) {
             out.lines().filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned()))).collect()
         };
         let remote = pairs(run_tool("/usr/sbin/nuubos-remotectl", &["status"], None));
-        let sync = pairs(run_tool("/usr/bin/nuubos-syncctl", &["status"], None));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             STATE.with(|st| {
                 let mut st = st.borrow_mut();
                 st.remote = remote;
-                st.sync = sync;
             });
             render_services(&ui);
         });
@@ -1854,7 +1860,6 @@ pub fn services_confirm(ui: &HomeWindow, index: i32) {
                 });
             }
         }
-        "open-sync" => open_sync(ui),
         _ => {}
     }
 }
@@ -1862,12 +1867,41 @@ pub fn services_confirm(ui: &HomeWindow, index: i32) {
 pub fn open_update(ui: &HomeWindow) {
     STATE.with(|st| {
         let mut st = st.borrow_mut();
-        st.busy = false;
+        /* A download or installation still running keeps its bar. */
+        if st.update_job.is_empty() {
+            st.busy = false;
+        }
         st.update_result.clear();
     });
     set_back(ui, 19);
     show(ui, 63);
     refresh_update(ui);
+}
+
+/* Release notes from the manifest (one line, "\n" = new line, "\\" = \):
+ * the non-empty lines, bullets dropped. */
+fn release_notes(escaped: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut chars = escaped.chars();
+    while let Some(c) = chars.next() {
+        match (c, chars.clone().next()) {
+            ('\\', Some('n')) => { text.push('\n'); chars.next(); }
+            ('\\', Some('\\')) => { text.push('\\'); chars.next(); }
+            _ => text.push(c),
+        }
+    }
+    text.lines()
+        .map(|l| l.trim().trim_start_matches(['-', '*', '•']).trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn channel_name(ui: &HomeWindow, id: &str) -> String {
+    match id {
+        "beta" => tr(ui, 987, "Beta"),
+        "alpha" => tr(ui, 988, "Alpha"),
+        _ => tr(ui, 986, "Stable"),
+    }
 }
 
 fn refresh_update(ui: &HomeWindow) {
@@ -1882,12 +1916,12 @@ fn refresh_update(ui: &HomeWindow) {
         if let Some(r) = apply.lines().find_map(|l| l.strip_prefix("result=")) {
             pairs.push(("result".into(), r.to_owned()));
         }
+        /* An installation needs the battery above 30 %. */
+        if let Some(b) = apply.lines().find_map(|l| l.strip_prefix("battery=")) {
+            pairs.push(("battery".into(), b.to_owned()));
+        }
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let result = pairs.iter().find(|(k, _)| k == "result").map(|(_, v)| v.clone()).unwrap_or_default();
-            if result == "rolled-back" {
-                notice(&ui, tr(&ui, 658, "The previous version was restored"));
-            }
             STATE.with(|st| st.borrow_mut().update = pairs);
             render(&ui);
         });
@@ -1895,22 +1929,94 @@ fn refresh_update(ui: &HomeWindow) {
 }
 
 pub fn open_sync(ui: &HomeWindow) {
-    set_back(ui, 1);
-    show(ui, 66);
-    refresh_sync(ui);
+    set_back(ui, GAMING_VIEW);
+    show(ui, crate::syncui::VIEW);
 }
 
-fn refresh_sync(ui: &HomeWindow) {
+/* A row whose operation is running: a bar in place of its detail line,
+ * the percentage as its value. */
+fn progress_row(title: String, percent: i32) -> GenRow {
+    GenRow {
+        progress_shown: true,
+        progress: percent.clamp(0, 100) as f32 / 100.0,
+        ..row(title, format!("{}%", percent.clamp(0, 100)), String::new())
+    }
+}
+
+/* Install and Restart (or Try Again): the job backs the console up to SD2,
+ * writes the inactive system slot and restarts into it (EPIC-048), on the
+ * full-screen operation screen (user request 2026-10-12: no game or other
+ * action meanwhile); the restart takes over from the screen. */
+pub fn start_install(ui: &HomeWindow) {
+    start_update_job(ui, "install");
+    crate::storageui::show_op_screen(ui, crate::storageui::OP_UPDATE);
+    job_with_progress(ui, vec!["update-install".into()], |ui, p| {
+        update_job_progress(ui, p);
+        ui.set_op_progress(p);
+    }, |ui, out| {
+        if out.starts_with("ERR") {
+            STATE.with(|st| {
+                let mut st = st.borrow_mut();
+                st.busy = false;
+                st.update_job.clear();
+            });
+            crate::storageui::op_failed(ui);
+            if out.contains("battery") {
+                notice(ui, tr(ui, 1012, "Charge the battery above 30% to install"));
+            }
+        } else {
+            ui.set_op_progress(100);
+        }
+        refresh_update(ui);
+    });
+}
+
+fn start_update_job(ui: &HomeWindow, job: &str) {
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.busy = true;
+        st.update_job = job.to_owned();
+        st.update_progress = 0;
+    });
+    render(ui);
+}
+
+fn update_job_progress(ui: &HomeWindow, percent: i32) {
+    STATE.with(|st| st.borrow_mut().update_progress = percent);
+    render(ui);
+}
+
+/* Run a job and follow its progress (`jobctl run --progress`: jobd's own
+ * events, no polling): `progress` gets 0..100 on each change, `done` the
+ * job's final line (its result, or "ERR <state> <reason>"). */
+pub(crate) fn job_with_progress(ui: &HomeWindow, args: Vec<String>, progress: fn(&HomeWindow, i32),
+                                done: fn(&HomeWindow, String)) {
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let pairs: Vec<(String, String)> = run_tool("/usr/bin/nuubos-syncctl", &["status"], None)
-            .lines()
-            .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
-            .collect();
+        let mut result = String::new();
+        let mut all = vec!["run".to_owned(), "--progress".to_owned()];
+        all.extend(args);
+        if let Ok(mut child) = Command::new("/usr/bin/nuubos-jobctl").args(&all)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+        {
+            if let Some(out) = child.stdout.take() {
+                for line in BufReader::new(out).lines().map_while(Result::ok) {
+                    match line.strip_prefix("@progress ").and_then(|p| p.trim().parse::<i32>().ok()) {
+                        Some(p) if p >= 0 => {
+                            let weak = weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() { progress(&ui, p.min(100)); }
+                            });
+                        }
+                        Some(_) => {}
+                        None => result = line.trim().to_owned(),
+                    }
+                }
+            }
+            let _ = child.wait();
+        }
         let _ = slint::invoke_from_event_loop(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            STATE.with(|st| st.borrow_mut().sync = pairs);
-            render(&ui);
+            if let Some(ui) = weak.upgrade() { done(&ui, result); }
         });
     });
 }
@@ -1987,37 +2093,37 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
                     None, |ui, _| refresh_achievements(ui));
             }
         }
-        (66, "sync-enabled") => {
-            let on = STATE.with(|st| st.borrow().sync.iter().any(|(k, v)| k == "enabled" && v == "1"));
-            tool_then(ui, "/usr/bin/nuubos-syncctl", vec![if on { "disable".into() } else { "enable".into() }], None, |ui, _| {
-                /* Syncthing needs a moment to create its identity: the
-                 * page refreshes when the state arrives. */
-                refresh_sync(ui);
-                let weak = ui.as_weak();
-                slint::Timer::single_shot(std::time::Duration::from_secs(3), move || {
-                    if let Some(ui) = weak.upgrade() { refresh_sync(&ui); }
-                });
+        (66, k) => crate::syncui::page_confirm(ui, k),
+        (63, "update-notes") => {
+            let (version, notes) = STATE.with(|st| {
+                let st = st.borrow();
+                let get = |k: &str| st.update.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).unwrap_or_default();
+                (get("version"), get("notes"))
             });
+            let text = release_notes(&notes).iter().map(|l| format!("•  {l}")).collect::<Vec<_>>().join("\n\n");
+            ui.set_notes_title(format!("{} • nuubOS {version}", tr(ui, 1005, "What's New")).into());
+            ui.set_notes_text(text.into());
+            ui.set_notes_scroll(0.0);
+            ui.set_notes_open(true);
         }
-        (66, k) if k.starts_with("sync-folder:") => {
-            let kind = k[12..].to_owned();
-            let on = STATE.with(|st| st.borrow().sync.iter().any(|(key, v)| key == "folder" && v == &format!("{kind}\t1")));
-            tool_then(ui, "/usr/bin/nuubos-syncctl", vec!["folder".into(), kind, if on { "off".into() } else { "on".into() }], None,
-                |ui, _| refresh_sync(ui));
+        (63, "update-channel") => {
+            let current = STATE.with(|st| st.borrow().update.iter().find(|(k, _)| k == "channel").map(|(_, v)| v.clone()))
+                .unwrap_or_default();
+            let options = ["stable", "beta", "alpha"].iter().map(|id| (id.to_string(), channel_name(ui, id))).collect();
+            open_settings_choice(ui, "update-channel", &tr(ui, 985, "Update Channel"), options, &current);
         }
-        (66, k) if k.starts_with("sync-accept:") => {
-            tool_then(ui, "/usr/bin/nuubos-syncctl", vec!["accept".into(), k[12..].to_owned()], None, |ui, _| refresh_sync(ui));
-        }
-        (66, k) if k.starts_with("sync-remove:") => {
-            if arm_or(ui, k) {
-                tool_then(ui, "/usr/bin/nuubos-syncctl", vec!["remove".into(), k[12..].to_owned()], None, |ui, _| refresh_sync(ui));
-            }
+        (63, "update-auto") => {
+            let on = STATE.with(|st| st.borrow().update.iter().any(|(k, v)| k == "auto" && v == "1"));
+            tool_then(ui, "/usr/bin/nuubos-updatectl", vec!["auto".into(), if on { "off".into() } else { "on".into() }], None,
+                |ui, _| refresh_update(ui));
         }
         (63, "update-check") => {
             STATE.with(|st| st.borrow_mut().busy = true);
             render(ui);
             tool_then(ui, "/usr/bin/nuubos-updatectl", vec!["check".into()], None, |ui, out| {
-                let text = if out.starts_with("OK current") { tr(ui, 489, "Up to date") }
+                /* "OK none": nothing published on the channel yet. */
+                let text = if out.starts_with("OK current") || out.starts_with("OK none") { tr(ui, 489, "Up to date") }
+                    else if out.contains("server") { tr(ui, 1013, "The update service cannot be reached. Try again later") }
                     else if out.contains("signature") { tr(ui, 656, "The update could not be verified") }
                     else if out.contains("network") { tr(ui, 494, "Check the network connection") }
                     else if out.contains("unavailable") { tr(ui, 655, "Updates are not available in this build") }
@@ -2031,28 +2137,30 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
             });
         }
         (63, "update-download") => {
-            STATE.with(|st| st.borrow_mut().busy = true);
-            render(ui);
-            tool_then(ui, "/usr/bin/nuubos-jobctl", vec!["run".into(), "update-download".into()], None, |ui, out| {
-                STATE.with(|st| st.borrow_mut().busy = false);
+            start_update_job(ui, "download");
+            job_with_progress(ui, vec!["update-download".into()], update_job_progress, |ui, out| {
+                STATE.with(|st| {
+                    let mut st = st.borrow_mut();
+                    st.busy = false;
+                    st.update_job.clear();
+                });
                 if out.starts_with("ERR") {
                     notice(ui, if out.contains("checksum") || out.contains("signature") {
-                        tr(ui, 656, "The update could not be verified") } else { tr(ui, 93, "Failed") });
+                        tr(ui, 656, "The update could not be verified") }
+                        else if out.contains("space") { tr(ui, 493, "Not enough free space") }
+                        else if out.contains("server") { tr(ui, 1013, "The update service cannot be reached. Try again later") }
+                        else { tr(ui, 93, "Failed") });
                 }
                 refresh_update(ui);
             });
         }
+        (63, "update-install") if STATE.with(|st| st.borrow().update.iter().any(|(k, v)| k == "battery" && v == "low")) => {
+            notice(ui, tr(ui, 1012, "Charge the battery above 30% to install"));
+            refresh_update(ui);
+        }
         (63, "update-install") => {
             if arm_or(ui, "update-install") {
-                tool_then(ui, "/usr/sbin/nuubos-update-apply", vec!["install".into()], None, |ui, out| {
-                    if out.starts_with("OK") {
-                        /* Installed by the lifecycle restart (pre-power hook). */
-                        thread::spawn(|| { let _ = run_tool("/usr/bin/nuubos-systemctl", &["restart"], None); });
-                    } else {
-                        notice(ui, tr(ui, 656, "The update could not be verified"));
-                        refresh_update(ui);
-                    }
-                });
+                start_install(ui);
             }
         }
         _ => {}
@@ -2079,7 +2187,7 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
                     let back = STATE.with(|st| st.borrow().back);
                     navigate_settings_view(ui, if back > 0 { back } else { 19 });
                     if back == 1 {
-                        /* Syncthing's state on the SERVICES row. */
+                        /* The SERVICES rows. */
                         refresh_services(ui);
                     } else if back == GAMING_VIEW {
                         /* The RetroAchievements account on its row. */
@@ -2100,6 +2208,27 @@ fn set_achievements(ui: &HomeWindow, field: &str, on: bool) {
     tool_then(ui, "/usr/bin/nuubos-achievementsctl",
         vec!["set".into(), active_user(), field.into(), if on { "1".into() } else { "0".into() }],
         None, |ui, _| refresh_achievements(ui));
+}
+
+/* The release notes screen: Up/Down scroll a few lines, Left/Right a page,
+ * Back or A closes. */
+pub fn notes_action(ui: &HomeWindow, action: &str) {
+    let line = 60.0;
+    let page = (ui.get_notes_page() - line).max(line);
+    let max = ui.get_notes_scroll_max();
+    let scroll = ui.get_notes_scroll().min(max);
+    let next = match action {
+        "menu_up" => scroll - line,
+        "menu_down" => scroll + line,
+        "menu_left" => scroll - page,
+        "menu_right" => scroll + page,
+        "menu_back" | "menu_confirm" => {
+            ui.set_notes_open(false);
+            return;
+        }
+        _ => return,
+    };
+    ui.set_notes_scroll(next.clamp(0.0, max));
 }
 
 /* Settings confirmation dialog (only Turn On Hardcore Mode for now):

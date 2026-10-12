@@ -1,0 +1,6 @@
+# EPIC-048: write the downloaded update into the inactive system slot, then restart into it.
+COMMAND=/usr/sbin/nuubos-update-apply install restart
+SCOPE=device
+CANCEL=1
+RETRY=1
+ARGS=0

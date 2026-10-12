@@ -1,74 +1,160 @@
 #!/bin/sh
 # Host test: OTA verification (real updatectl, OpenSSL-signed manifest,
-# local HTTP server) and install/rollback/confirm on a fake root.
+# local HTTP server laid out like GitHub Releases) and the A/B slot flow
+# (install, trial, confirm, U-Boot fallback with STATE restore) on files.
 # Run: sh package/nuubos/nuubos-update/tests/update.sh
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../src"
+PARTS="$HERE/../../../../board/nuubos/common/rootfs-overlay/usr/lib/nuubos/partitions.sh"
 T="$(mktemp -d)"
 trap 'kill "$HTTP" 2>/dev/null; rm -rf "${T:?}"' EXIT
 FAIL=0
 ck() { if eval "$2"; then :; else echo "[FAIL] $1"; FAIL=1; fi; }
 R="$T/r"; U="$R/userdata/.nuubos-update"; W="$T/www"
-mkdir -p "$R/usr/bin" "$R/etc" "$R/usr/share/nuubos" "$R/state" "$R/userdata" "$W"
+mkdir -p "$R/etc" "$R/usr/share/nuubos" "$R/state/update" "$R/userdata" "$T/slots" "$T/boot" "$W"
 echo 'VERSION_ID=0.5' > "$R/etc/os-release"
-echo "old-a" > "$R/usr/bin/a"; chmod 755 "$R/usr/bin/a"; echo keep > "$R/usr/bin/untouched"
+echo 100 > "$R/usr/share/nuubos/build-serial"
 
-# Release: payload (rootfs tar.gz) + signed manifest.
-mkdir -p "$T/root/usr/bin" "$T/root/usr/lib/new" "$T/root/dev" "$T/root/userdata"
-echo "new-a" > "$T/root/usr/bin/a"; chmod 755 "$T/root/usr/bin/a"
-echo "new-b" > "$T/root/usr/lib/new/b"; echo "x" > "$T/root/userdata/never"
-(cd "$T/root" && tar -czf "$W/nuubos-rootfs-0.6.tar.gz" .)
-SHA="$(sha256sum "$W/nuubos-rootfs-0.6.tar.gz" | cut -d' ' -f1)"; SIZE="$(wc -c < "$W/nuubos-rootfs-0.6.tar.gz")"
-printf 'format=1\nversion=0.6\nbuild=test\npayload=nuubos-rootfs-0.6.tar.gz\nsize=%s\nsha256=%s\nnotes=https://example.invalid/0.6\n' "$SIZE" "$SHA" > "$W/nuubos-update.manifest"
+# Release: system image, payload (gzip of it) in its tag, signed manifest
+# in the channel release.
+head -c 3000000 /dev/urandom > "$T/system.img"
+mkdir -p "$W/v0.6-200" "$W/channel-alpha" "$W/channel-beta"
+gzip -c "$T/system.img" > "$W/v0.6-200/nuubos-system-0.6.img.gz"
+P="$W/v0.6-200/nuubos-system-0.6.img.gz"
+SHA="$(sha256sum < "$P" | cut -d' ' -f1)"; SIZE="$(wc -c < "$P")"
+ISHA="$(sha256sum < "$T/system.img" | cut -d' ' -f1)"; ISIZE="$(wc -c < "$T/system.img")"
 openssl genpkey -algorithm ed25519 -out "$T/key.pem" 2>/dev/null
-openssl pkeyutl -sign -inkey "$T/key.pem" -rawin -in "$W/nuubos-update.manifest" -out "$W/nuubos-update.manifest.sig"
+manifest() # CHANNEL SERIAL FILE
+{
+    printf 'format=2\nchannel=%s\nversion=0.6\nserial=%s\nbuild=test\npayload=v0.6-200/nuubos-system-0.6.img.gz\nsize=%s\nsha256=%s\nimage_size=%s\nimage_sha256=%s\nnotes=- First item\\n- Second \\\\ item\n' \
+        "$1" "$2" "$SIZE" "$SHA" "$ISIZE" "$ISHA" > "$3"
+    openssl pkeyutl -sign -inkey "$T/key.pem" -rawin -in "$3" -out "$3.sig"
+}
+manifest alpha 200 "$W/channel-alpha/nuubos-update.manifest"
+# A beta manifest served under the alpha channel must not be offered.
+manifest beta 300 "$W/channel-beta/nuubos-update.manifest"
 PUB="$(openssl pkey -in "$T/key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')"
 PORT=$((20000 + $$ % 20000))
 (cd "$W" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1) & HTTP=$!
 sleep 1
-gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
-    -DUPDATE_URL="\"http://127.0.0.1:$PORT\"" -DUPDATE_PUBKEY_HEX="\"$PUB\"" -DUPDATE_DIR="\"$U\"" \
-    -DOS_RELEASE="\"$R/etc/os-release\"" -DBUILD_ID_FILE="\"$R/usr/share/nuubos/build-id\"" \
-    "$SRC/updatectl.c" -o "$T/updatectl" -lcurl -lsodium || exit 1
-gcc -std=c11 -D_GNU_SOURCE -Wno-format-truncation -DUPDATE_URL="\"http://127.0.0.1:$PORT\"" \
-    -DUPDATE_DIR="\"$T/nokey\"" "$SRC/updatectl.c" -o "$T/updatectl-nokey" -lcurl -lsodium || exit 1
+cc_updatectl() # OUTPUT [EXTRA...]
+{
+    out="$1"; shift
+    gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
+        -DUPDATE_URL="\"http://127.0.0.1:$PORT\"" -DUPDATE_DIR="\"$U\"" -DOS_RELEASE="\"$R/etc/os-release\"" \
+        -DBUILD_ID_FILE="\"$R/usr/share/nuubos/build-id\"" -DBUILD_SERIAL_FILE="\"$R/usr/share/nuubos/build-serial\"" \
+        -DCHANNEL_FILE="\"$R/state/update/channel\"" -DAUTO_FILE="\"$R/state/update/auto-off\"" -DUPDATE_DEFAULT_CHANNEL='"alpha"' "$@" \
+        "$SRC/updatectl.c" -o "$out" -lcurl -lsodium -lz
+}
+cc_updatectl "$T/updatectl" -DUPDATE_PUBKEY_HEX="\"$PUB\"" || exit 1
+cc_updatectl "$T/updatectl-nokey" || exit 1
 C="$T/updatectl"
 
 ck "no key: unavailable" '"$T/updatectl-nokey" check | grep -q "ERR unavailable"'
+ck "default channel alpha" '[ "$($C channel)" = alpha ] && $C status | grep -q "channel=alpha"'
 ck "check finds 0.6" '$C check | grep -q "OK available 0.6"'
-ck "status" '$C status | grep -q "available=1" && $C status | grep -q "notes=https://example.invalid/0.6"'
+ck "status with escaped release notes" '$C status | grep -q "available=1" && $C status | grep -qxF "notes=- First item\\n- Second \\\\ item"'
+echo 300 > "$R/usr/share/nuubos/build-serial"
+ck "older serial never offered" '$C check | grep -q "OK current" && $C status | grep -q "available=0" && $C download | grep -q "ERR current"'
+echo 100 > "$R/usr/share/nuubos/build-serial"
+cp "$W/channel-beta/nuubos-update.manifest" "$W/channel-alpha/nuubos-update.manifest"
+cp "$W/channel-beta/nuubos-update.manifest.sig" "$W/channel-alpha/nuubos-update.manifest.sig"
+ck "other channel's manifest not offered" '$C check | grep -q "OK current"'
+manifest alpha 200 "$W/channel-alpha/nuubos-update.manifest"
+ck "invalid channel refused" '$C channel nightly | grep -q "ERR channel"'
+ck "channel switch" '[ "$($C channel beta)" = OK ] && [ "$($C channel)" = beta ] && $C check | grep -q "OK available 0.6"'
+ck "channel switch forgets the offer" '[ "$($C channel alpha)" = OK ] && $C status | grep -q "available=0"'
+ck "nothing published on the channel (404): OK none, not a network error" '[ "$($C channel stable)" = OK ] && [ "$($C check)" = "OK none" ] && $C status | grep -q "available=0" && [ "$($C channel alpha)" = OK ]'
+$C check >/dev/null
+
 # Resume: start with a correct prefix of the payload.
-head -c 100 "$W/nuubos-rootfs-0.6.tar.gz" > "$U/payload.part"
+head -c 100 "$P" > "$U/payload.part"
 OUT="$(NUUBOS_JOB_ID=1 $C download)"
-ck "download (resumed) verified" 'echo "$OUT" | grep -q "@result downloaded" && cmp -s "$U/payload" "$W/nuubos-rootfs-0.6.tar.gz"'
+ck "download (resumed) verified" 'echo "$OUT" | grep -q "@result downloaded" && cmp -s "$U/payload" "$P"'
 ck "verify" '[ "$($C verify)" = OK ]'
-
 # Tampered manifest is refused, the good one kept.
-cp "$W/nuubos-update.manifest" "$T/good.manifest"
-sed -i 's/version=0.6/version=9.9/' "$W/nuubos-update.manifest"
-ck "tampered manifest rejected" '$C check | grep -q "ERR signature" && grep -q "version=0.6" "$U/manifest"'
-cp "$T/good.manifest" "$W/nuubos-update.manifest"
+cp "$W/channel-alpha/nuubos-update.manifest" "$T/good.manifest"
+sed -i 's/serial=200/serial=999/' "$W/channel-alpha/nuubos-update.manifest"
+ck "tampered manifest rejected" '$C check | grep -q "ERR signature" && grep -q "serial=200" "$U/manifest"'
+cp "$T/good.manifest" "$W/channel-alpha/nuubos-update.manifest"
 # Corrupt payload part is not kept.
-echo garbage > "$T/bad.part"; rm -f "$U/payload"; cp "$T/bad.part" "$U/payload.part"
-cp "$W/nuubos-rootfs-0.6.tar.gz" "$T/real.tgz"; echo corrupt >> "$W/nuubos-rootfs-0.6.tar.gz"
+rm -f "$U/payload"; echo garbage > "$U/payload.part"
+cp "$P" "$T/real.gz"; echo corrupt >> "$P"
 ck "corrupt download rejected" '$C download | grep -q "ERR" && [ ! -f "$U/payload" ] && [ ! -f "$U/payload.part" ]'
-cp "$T/real.tgz" "$W/nuubos-rootfs-0.6.tar.gz"; $C download >/dev/null
+cp "$T/real.gz" "$P"; $C download >/dev/null
 
-A() { NUUBOS_ROOT="$R" NUUBOS_UPDATECTL="$C" sh "$SRC/nuubos-update-apply" "$@"; }
-ck "install marks pending" '[ "$(A install)" = "OK restart-required" ] && A status | grep -q "pending=1"'
-ck "sleep never installs" 'A apply sleep; A status | grep -q "pending=1" && [ "$(cat "$R/usr/bin/a")" = old-a ]'
+# Slots: A running, B inactive.
+: > "$T/slots/a.img"; : > "$T/slots/b.img"
+echo "root=/dev/mmcblk0p1 nuubos.slot=a rootwait" > "$T/cmdline"
+printf '#!/bin/sh\necho "$@" >> "%s/notified.log"\n' "$T" > "$T/notifyctl"; chmod +x "$T/notifyctl"
+# SD2 backup stand-in: progress, a marker, then success or the failure in sd2.fail.
+printf '#!/bin/sh\n[ "$1 $2" = "run update" ] || exit 2\necho "@progress 50"\n[ -f "%s/sd2.fail" ] && { echo "@error card"; exit 1; }\ndate > "%s/sd2.backup"\necho "@progress 100"\n' "$T" "$T" > "$T/sd2backup"; chmod +x "$T/sd2backup"
+mkdir -p "$T/ps/axp20x-battery"; echo 1 > "$T/ps/axp20x-battery/present"; echo 80 > "$T/ps/axp20x-battery/capacity"
+A() { NUUBOS_ROOT="$R" NUUBOS_UPDATECTL="$C" NUUBOS_SD2_BACKUP="$T/sd2backup" NUUBOS_BATTERY_DIR="$T/ps" NUUBOS_NOTIFYCTL="$T/notifyctl" NUUBOS_PARTITIONS="$PARTS" NUUBOS_CMDLINE="$T/cmdline" \
+      NUUBOS_TEST_SLOTS="$T/slots" NUUBOS_TEST_BOOTPART="$T/boot" sh "$SRC/nuubos-update-apply" "$@"; }
+ck "write rejects a corrupt payload" 'cp "$U/payload" "$T/p"; echo x >> "$U/payload"; $C write "$T/slots/b.img" | grep -q "ERR checksum"; R1=$?; cp "$T/p" "$U/payload"; [ $R1 = 0 ]'
+echo 30 > "$T/ps/axp20x-battery/capacity"
+ck "battery at 30%: refused, nothing written" 'A status | grep -qx "battery=low" && NUUBOS_JOB_ID=1 A install | grep -qx "@error battery" && [ ! -s "$T/slots/b.img" ] && [ ! -f "$T/sd2.backup" ]'
+echo 31 > "$T/ps/axp20x-battery/capacity"
+ck "battery above 30%: allowed" 'A status | grep -qx "battery=ok"'
+OUT="$(NUUBOS_JOB_ID=1 A install)"
+ck "install writes slot B" 'cmp -s "$T/slots/b.img" "$T/system.img" && echo "$OUT" | grep -q "@result restart-required" && echo "$OUT" | grep -q "@progress 100"'
+ck "SD2 backup first, its progress on 0..15" '[ -f "$T/sd2.backup" ] && echo "$OUT" | grep -qx "@progress 7" && echo "$OUT" | grep -qx "@progress 15" && ! echo "$OUT" | grep -q "@progress 50"'
+ck "running slot untouched" '[ ! -s "$T/slots/a.img" ]'
+ck "pending" 'A status | grep -q "pending=1" && A status | grep -q "slot=a"'
+ck "sleep never applies" 'A apply sleep; A status | grep -q "pending=1" && [ ! -f "$T/boot/nuubos-slot.cfg" ]'
+echo old > "$R/state/settings"
 A apply restart
-ck "applied" '[ "$(cat "$R/usr/bin/a")" = new-a ] && [ -f "$R/usr/lib/new/b" ] && A status | grep -q "applied=1"'
-ck "mode kept" '[ -x "$R/usr/bin/a" ]'
-ck "userdata never written by payload" '[ ! -e "$R/userdata/never" ]'
-ck "untouched kept" '[ "$(cat "$R/usr/bin/untouched")" = keep ]'
-A boot; A boot
-ck "two boots: still applied" 'A status | grep -q "attempts=2"'
+ck "apply: B on trial" 'grep -qx "nuubos_slot=a" "$T/boot/nuubos-slot.cfg" && grep -qx "nuubos_try=b" "$T/boot/nuubos-slot.cfg" && grep -qx "nuubos_tries=3" "$T/boot/nuubos-slot.cfg" && A status | grep -q "trying=b"'
+ck "STATE copied on slot A" 'tar -tf "$R/var/lib/nuubos-update/state.tar" | grep -q settings'
+# Trial boot of B: nothing to do until nuubUI confirms.
+echo "root=/dev/mmcblk0p5 nuubos.slot=b rootwait" > "$T/cmdline"
+echo migrated > "$R/state/settings"
 A boot
-ck "third unconfirmed boot rolls back" '[ "$(cat "$R/usr/bin/a")" = old-a ] && [ ! -e "$R/usr/lib/new/b" ] && [ ! -d "$R/usr/lib/new" ] && A status | grep -q "result=rolled-back"'
-ck "rolled-back mode kept" '[ -x "$R/usr/bin/a" ]'
-# Install again and confirm.
-A install >/dev/null; A apply restart; A boot
-ck "confirm keeps update" '[ "$(A confirm)" = OK ] && [ "$(cat "$R/usr/bin/a")" = new-a ] && A status | grep -q "result=ok" && [ ! -f "$U/rollback.tar" ]'
+ck "trial boot keeps STATE" '[ "$(cat "$R/state/settings")" = migrated ] && A status | grep -q "trying=b"'
+ck "confirm keeps B" '[ "$(A confirm)" = OK ] && grep -qx "nuubos_slot=b" "$T/boot/nuubos-slot.cfg" && grep -qx "nuubos_try=none" "$T/boot/nuubos-slot.cfg" && A status | grep -q "result=ok" && [ ! -f "$U/payload" ]'
+ck "installed announced once" 'grep -qx "post update.result update.installed version=0.5" "$T/notified.log" && [ "$(wc -l < "$T/notified.log")" = 1 ]'
+ck "confirm again is a no-op" '[ "$(A confirm)" = OK ] && [ "$(wc -l < "$T/notified.log")" = 1 ]'
+
+# Next update from B into A, which never starts: U-Boot falls back to B.
+# A failed SD2 backup does not stop it, and its error is not the update's.
+$C download >/dev/null
+touch "$T/sd2.fail"
+OUT="$(NUUBOS_JOB_ID=1 A install)"
+ck "failed SD2 backup: update goes on" 'echo "$OUT" | grep -q "@result restart-required" && ! echo "$OUT" | grep -q "@error"'
+rm -f "$T/sd2.fail"
+ck "install writes slot A from B" 'cmp -s "$T/slots/a.img" "$T/system.img" && A status | grep -q "pending=1"'
+SNAP="$R/var/lib/nuubos-update"
+rm -f "$SNAP/state.tar"
+echo before > "$R/state/settings"
+A apply poweroff
+ck "apply: A on trial" 'grep -qx "nuubos_slot=b" "$T/boot/nuubos-slot.cfg" && grep -qx "nuubos_try=a" "$T/boot/nuubos-slot.cfg"'
+# The new system ran once and migrated STATE, then U-Boot gave up on it.
+echo migrated > "$R/state/settings"; echo new > "$R/state/added-by-new"
+A boot
+ck "fallback restores STATE" '[ "$(cat "$R/state/settings")" = before ] && [ ! -e "$R/state/added-by-new" ]'
+ck "fallback reported" 'A status | grep -q "result=rolled-back" && ! A status | grep -q "trying=a" && grep -qx "nuubos_try=none" "$T/boot/nuubos-slot.cfg" && grep -qx "nuubos_slot=b" "$T/boot/nuubos-slot.cfg"'
+A confirm >/dev/null
+ck "rollback announced once at nuubUI ready" 'grep -qx "post update.result update.rolledback" "$T/notified.log" && A confirm >/dev/null && [ "$(grep -c rolledback "$T/notified.log")" = 1 ]'
+ck "fallback done once" 'echo later > "$R/state/settings"; A boot; [ "$(cat "$R/state/settings")" = later ]'
+# A restore cut short by a power loss is finished at the next boot.
+cp "$R/state/settings" "$T/s"; tar -C "$R/state" -cf "$SNAP/state.tar" .; touch "$SNAP/restoring"; rm -f "$R/state/settings"
+A boot
+ck "interrupted restore finished" '[ "$(cat "$R/state/settings")" = later ] && [ ! -f "$SNAP/restoring" ]'
+# Daily automatic check: notifies a new release once, at most once a day.
+: > "$T/notified.log"
+mkdir -p "$R/run"; rm -f "$R/state/update/notified" "$R/state/update/last-check" "$U/manifest"
+echo 100 > "$R/usr/share/nuubos/build-serial"
+AU() { NUUBOS_ROOT="$R" NUUBOS_UPDATECTL="$C" NUUBOS_NOTIFYCTL="$T/notifyctl" sh "$SRC/nuubos-update-auto"; }
+ck "auto on by default" '[ "$($C auto)" = on ] && $C status | grep -q "auto=1"'
+AU
+ck "auto check notifies" 'grep -q "post update.available update.available version=0.6" "$T/notified.log" && [ -f "$R/state/update/last-check" ]'
+AU
+ck "at most once a day" '[ "$(wc -l < "$T/notified.log")" = 1 ]'
+echo 0 > "$R/state/update/last-check"; AU
+ck "same release announced once" '[ "$(wc -l < "$T/notified.log")" = 1 ] && [ "$(cat "$R/state/update/last-check")" != 0 ]'
+echo 0 > "$R/state/update/last-check"; rm -f "$R/state/update/notified"
+ck "auto off: no check" '[ "$($C auto off)" = OK ] && AU; [ "$(cat "$R/state/update/last-check")" = 0 ] && [ "$(wc -l < "$T/notified.log")" = 1 ] && $C status | grep -q "auto=0"'
+ck "auto on again" '[ "$($C auto on)" = OK ] && AU; [ "$(wc -l < "$T/notified.log")" = 2 ]'
 [ "$FAIL" = 0 ] && echo "[PASS] update"
 exit "$FAIL"

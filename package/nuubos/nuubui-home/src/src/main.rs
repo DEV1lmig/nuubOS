@@ -7,10 +7,12 @@ mod library;
 mod lighting;
 mod mediaui;
 mod moonlight;
+mod qr;
 mod splash;
 mod splash_core;
 mod steamlink;
 mod storageui;
+mod syncui;
 mod themes;
 mod webui;
 slint::include_modules!();
@@ -60,9 +62,6 @@ pub(crate) fn oob_active() -> bool {
     OOB_ACTIVE.load(Ordering::SeqCst)
 }
 
-pub(crate) fn oob_notice(ui: &HomeWindow, text: String) {
-    ui.set_oob_notice(text.into());
-}
 
 /* Open Settings on a page from outside it (Home, an application shell). */
 pub(crate) fn open_settings_at(ui: &HomeWindow, view: i32) {
@@ -2543,10 +2542,11 @@ fn apply_settings_choice(ui: &HomeWindow) {
     match context.as_str() {
         c if c.starts_with("moonlight-") => moonlight::apply_choice(c, &value),
         "theme" => themes::select(ui, value),
-        c if c.starts_with("game-") || c.starts_with("emu-") => gameui::apply_choice(ui, c, value),
+        c if c.starts_with("game-") || c.starts_with("emu-") || c == "update-channel" => gameui::apply_choice(ui, c, value),
         c if c.starts_with("files-") || c.starts_with("share-") || c.starts_with("backup-") => filesui::apply_choice(ui, c, value),
         c if c.starts_with("find-") => findui::apply_choice(ui, c, value),
         c if storageui::owns_choice(c) => storageui::apply_choice(ui, c, value),
+        c if syncui::owns_choice(c) => syncui::apply_choice(ui, c, value),
         "player-assignment" => {
             let player_index = ui.get_player_assignment_index().max(0) as usize;
             let Some(assignment) = ui.get_player_assignments().row_data(player_index) else {
@@ -4542,6 +4542,15 @@ fn handle_settings_action(
     play_ui_sound(action);
     let view = ui.get_settings_view();
     if ui.get_datetime_picker_open(){datetime::action(ui,action);return;}
+    if ui.get_notes_open() {
+        gameui::notes_action(ui, action);
+        return;
+    }
+    /* The Syncthing guide covers Settings and owns the input. */
+    if syncui::guide_open() {
+        syncui::guide_action(ui, action);
+        return;
+    }
     if ui.get_settings_dialog_open() {
         gameui::dialog_action(ui, action);
         return;
@@ -5270,6 +5279,25 @@ fn route_input_action(
     if action == "power" {
         return;
     }
+    /* The restore screen owns the input: buttons only after a failure. */
+    if storageui::op_screen_active() {
+        if matches!(
+            action,
+            "menu_up" | "menu_down" | "menu_left" | "menu_right" | "menu_confirm"
+        ) {
+            let action = action.to_owned();
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    if ui.get_op_failed() {
+                        play_ui_sound(&action);
+                    }
+                    storageui::handle_op_action(&ui, &action);
+                }
+            });
+        }
+        return;
+    }
     if SAFE_SCREEN.load(Ordering::SeqCst) {
         if matches!(
             action,
@@ -5972,7 +6000,7 @@ fn main() -> Result<(), slint::PlatformError> {
     /* Also with nobody signed in yet: the user picker wears the last
      * user's Mood (themes::apply_active). */
     if ui.get_active_user_id().is_empty() { themes::apply_active(&ui); }
-    start_users_listener(&ui,user_picker_active.clone()); start_regional_listener(&ui);
+    start_users_listener(&ui,user_picker_active.clone()); start_regional_listener(&ui); syncui::start_listener(&ui);
     start_localization_listener(&ui); start_status_listener(&ui);
     start_wifi_product_listener(&ui);
     start_bluetooth_product_listener(&ui);

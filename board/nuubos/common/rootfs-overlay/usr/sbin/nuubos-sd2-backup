@@ -1,17 +1,22 @@
 #!/bin/sh
-# nuubOS backup of SD1 to the games card (docs/dev/platform.md "SD2 = games
-# card"): if SD1 has to be reformatted, nothing is lost.
+# nuubOS console backup (docs/dev/platform.md "Console backup"): one backup
+# of everything SD1 holds, on the destination the user chose: the games
+# card (SD2, the default where there is a card slot), SD1 itself or a USB
+# drive. The name stays from when SD2 was the only destination.
 #
 #   refresh                     publish /run/nuubos/storage/backup.status
-#   set enabled 0|1 | set item NAME 0|1 | reset
+#   set enabled 0|1 | set item NAME 0|1 | set dest sd2|sd1|usb | reset
 #   trigger session-end|attach  submit an automatic run when it is due
-#   run auto|manual             job worker (sd2-backup-auto, sd2-backup)
-#   list                        backup=<dir>\t<sid>\t<model>\t<created>\t<users>\t<this> ... end=1
-#   restore DIR                 job worker (sd2-restore): restart required after it
+#   run auto|manual|update      job worker (sd2-backup-auto, sd2-backup)
+#   list                        backup=<dir>\t<sid>\t<model>\t<created>\t<users>\t<this>\t<where> ... end=1
+#   users DIR                   user=<id>\t<name> ... end=1 (the profiles in a backup)
+#   restore DIR [USER]          job worker (sd2-restore): the whole console,
+#                               or one profile; restart required after it
 #   archive                     keep this console's old backup aside and start a new one
 #
-# Layout: /media/sd2/nuubos-backup/<SID>/ (SID = H700 chip id: the same
-# console after an SD1 reformat) with data/<item>/... and MANIFEST, written
+# Layout: <volume>/nuubos-backup/<SID>/ (SID = H700 chip id: the same
+# console after an SD1 reformat; <volume> = /media/sd2, /userdata or the
+# USB drive's /media/<name>) with data/<item>/... and MANIFEST, written
 # last; versions/<stamp>/ keeps what the last 3 runs replaced or deleted.
 # Files are copied one by one through a temporary name (rsync), so a run
 # cut short leaves the previous copy of every file intact.
@@ -25,21 +30,42 @@
 # library, screenshots, bios, covers can be switched off (all on by
 # default). Never: secrets (users/*/secrets, Wi-Fi, Bluetooth, remote
 # access, SSH, scraper accounts, Syncthing and Moonlight keys).
+#
+# A restore is all or nothing: every area is first copied next to the live
+# one and checked (nothing live changes meanwhile), then all are swapped.
+# The journal in STATE lists the areas: an interrupted copy is cleaned up,
+# an interrupted swap is completed (every copy was already checked).
 
 MOUNT=/media/sd2
 CARD_STATUS=/run/nuubos/storage/sd2.status
 RUN_STATUS=/run/nuubos/storage/backup.status
 CONF=/state/storage/sd2-backup.conf
 STATE=/state/storage/sd2-backup.state
+JOURNAL=/state/storage/restore.journal
+LOCK=/run/nuubos/storage/backup.lock
+LOG=/userdata/logs/nuubos-backup.log
+SD1_BASE=/userdata/nuubos-backup
 ITEMS_ALL="saves states library screenshots bios covers"
 KEEP_VERSIONS=3
 DAY=86400
 
 job() { [ -n "${NUUBOS_JOB_ID:-}" ]; }
 progress() { job && echo "@progress $1"; return 0; }
-fail() { if job; then echo "@error $1"; else echo "ERR $1"; fi; refresh; exit 1; }
-log() { logger -t nuubos-sd2-backup "$*" 2>/dev/null; return 0; }
+fail() { log "failed: $1"; if job; then echo "@error $1"; else echo "ERR $1"; fi; refresh; exit 1; }
 value() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }
+
+# Kept on SD1 across restarts (a failure must be explainable afterwards),
+# trimmed to its last lines.
+log()
+{
+    logger -t nuubos-sd2-backup "$*" 2>/dev/null
+    mkdir -p "${LOG%/*}" 2>/dev/null || return 0
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG" 2>/dev/null
+    if [ "$(wc -c < "$LOG" 2>/dev/null)" -gt 262144 ] 2>/dev/null; then
+        tail -n 1000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+    fi
+    return 0
+}
 
 sid()
 {
@@ -57,10 +83,19 @@ items()
 
 has_item() { case ",$(items)," in *",$1,"*) return 0 ;; esac; return 1; }
 
+# The chosen destination; by default the games card where the board has a
+# slot (it survives an SD1 reformat), else SD1.
+dest()
+{
+    v="$(value "$CONF" DEST)"
+    case "$v" in sd2|sd1|usb) echo "$v"; return ;; esac
+    if [ "$(value "$CARD_STATUS" SD2_SLOT)" = 1 ]; then echo sd2; else echo sd1; fi
+}
+
 write_conf()
 {
     mkdir -p "${CONF%/*}"
-    printf 'ENABLED=%s\nITEMS=%s\n' "$1" "$2" > "$CONF.tmp" && mv "$CONF.tmp" "$CONF" && sync
+    printf 'ENABLED=%s\nITEMS=%s\nDEST=%s\n' "$1" "$2" "$3" > "$CONF.tmp" && mv "$CONF.tmp" "$CONF" && sync
 }
 
 write_state()
@@ -73,48 +108,92 @@ write_state()
     } > "$STATE.tmp" && mv "$STATE.tmp" "$STATE" && sync
 }
 
-card_writable()
+card_state() { value "$CARD_STATUS" SD2_STATE; }
+
+# The first USB drive mounted read-write under /media (never the games card).
+usb_mount()
 {
-    [ "$(value "$CARD_STATUS" SD2_STATE)" = ready ] && [ -d "$MOUNT" ]
+    awk '$2 ~ "^/media/[^/]+$" && $2 != "/media/sd2" && $4 ~ /(^|,)rw(,|$)/ { print $2; exit }' /proc/mounts
 }
 
-root_dir() { echo "$MOUNT/nuubos-backup/$(sid)"; }
+# Base folder (…/nuubos-backup) of the destination when it can be written,
+# else nothing. With "read", a read-only games card is enough.
+dest_base()
+{
+    case "$(dest)" in
+        sd2)
+            case "$(card_state)" in
+                ready) echo "$MOUNT/nuubos-backup" ;;
+                readonly) [ "${1:-}" = read ] && echo "$MOUNT/nuubos-backup" ;;
+            esac
+            ;;
+        sd1) echo "$SD1_BASE" ;;
+        usb) m="$(usb_mount)"; [ -n "$m" ] && echo "$m/nuubos-backup" ;;
+    esac
+}
 
-# Status for nuubos-systemd and the UI: enabled, items, last success, the
-# card's state for this console (none: no backup here, linked: ours,
-# conflict: this console's backup made by another SD1 (e.g. before a
-# reformat), restorable: only other consoles' backups on the card).
+# Every backup folder this console can see: games card, SD1, USB drives.
+all_manifests()
+{
+    for m in "$SD1_BASE"/*/MANIFEST /media/*/nuubos-backup/*/MANIFEST; do
+        [ -f "$m" ] && [ "$(value "$m" NUUBOS_BACKUP_FORMAT)" = 1 ] && echo "$m"
+    done
+}
+
+# Status for nuubos-systemd and the UI: enabled, items, destination and
+# whether it is there, last success, the destination's state for this
+# console (none: no backup there, linked: ours, conflict: this console's
+# backup made by another SD1 (e.g. before a reformat), restorable: only
+# other consoles' backups there) and whether any backup can be restored.
 refresh()
 {
+    recover
     link=none
-    if card_writable || [ "$(value "$CARD_STATUS" SD2_STATE)" = readonly ]; then
-        root="$(root_dir)"
+    base="$(dest_base read)"
+    if [ -n "$base" ]; then
+        available=1
+        root="$base/$(sid)"
         if [ -f "$root/MANIFEST" ]; then
             if [ "$(value "$root/MANIFEST" TOKEN)" = "$(value "$STATE" TOKEN)" ]; then
                 link=linked
             else
                 link=conflict
             fi
-        elif ls "$MOUNT"/nuubos-backup/*/MANIFEST >/dev/null 2>&1; then
+        elif ls "$base"/*/MANIFEST >/dev/null 2>&1; then
             link=restorable
         fi
+    else
+        available=0
     fi
+    found=0; [ -n "$(all_manifests)" ] && found=1
+    [ "$(dest)" = sd2 ] && [ "$(card_state)" = readonly ] && available=0
     mkdir -p "${RUN_STATUS%/*}"
     {
         if enabled; then echo "ENABLED=1"; else echo "ENABLED=0"; fi
         echo "ITEMS=$(items)"
+        echo "DEST=$(dest)"
+        echo "AVAILABLE=$available"
         echo "LAST=$(value "$STATE" LAST)"
         echo "RESULT=$(value "$STATE" RESULT)"
         echo "CARD=$link"
+        echo "FOUND=$found"
     } > "$RUN_STATUS.tmp" && mv "$RUN_STATUS.tmp" "$RUN_STATUS"
     nuubos-systemctl storage-changed >/dev/null 2>&1
     return 0
 }
 
+# One backup or restore at a time (fd 9 stays open until the tool exits).
+lock()
+{
+    mkdir -p "${LOCK%/*}"
+    exec 9>"$LOCK"
+    flock -n 9
+}
+
 # rsync of one source into data/<dest>; replaced and deleted files go to
 # this run's version folder. 24 = files vanished meanwhile (fine), 23 = some
-# files could not be copied (a name the card's filesystem refuses): logged,
-# the rest of the backup is still good.
+# files could not be copied (a name the destination's filesystem refuses):
+# logged, the rest of the backup is still good.
 mirror()
 {
     src="$1"; dest="$2"; shift 2
@@ -122,11 +201,12 @@ mirror()
     mkdir -p "$DATA/$dest" || return 1
     rsync -rt --modify-window=2 --omit-dir-times --delete \
         --backup --backup-dir="$VERSION/$dest" \
-        "$@" "$src/" "$DATA/$dest/" 2>>/run/nuubos/sd2-backup.log
+        "$@" "$src/" "$DATA/$dest/" 2>>"$LOG"
     case $? in
         0|24) return 0 ;;
         23) log "some files of $src were not copied"; return 0 ;;
     esac
+    log "copy of $src failed"
     return 1
 }
 
@@ -136,9 +216,12 @@ user_items() { for f in "$@"; do echo "--include=/*/$f/***"; done; }
 backup_run()
 {
     mode="$1"
-    card_writable || fail card
-    [ "$mode" = manual ] || enabled || { echo "@result off"; exit 0; }
-    root="$(root_dir)"
+    # Manual and pre-update backups run even with automatic backups off.
+    [ "$mode" = manual ] || [ "$mode" = update ] || enabled || { echo "@result off"; exit 0; }
+    base="$(dest_base)"
+    [ -n "$base" ] || fail card
+    lock || fail busy
+    root="$base/$(sid)"
     [ -n "$(sid)" ] || fail device
     token="$(value "$STATE" TOKEN)"
     if [ -f "$root/MANIFEST" ] && [ "$(value "$root/MANIFEST" TOKEN)" != "$token" ]; then
@@ -190,7 +273,8 @@ backup_run()
             covers)
                 mirror /userdata/library/covers covers/covers || fail storage
                 mirror /userdata/library/metadata covers/metadata || fail storage
-                mirror /userdata/library/screenshots covers/screenshots || fail storage
+                # Game screenshots are no longer scraped: an old copy goes.
+                rm -rf "$DATA/covers/screenshots"
                 ;;
         esac
         progress $((10 + n * 80 / 6))
@@ -222,9 +306,11 @@ backup_run()
 
 trigger()
 {
+    refresh
     enabled || exit 0
-    card_writable || exit 0
-    root="$(root_dir)"
+    base="$(dest_base)"
+    [ -n "$base" ] || exit 0
+    root="$base/$(sid)"
     if [ -f "$root/MANIFEST" ] && [ "$(value "$root/MANIFEST" TOKEN)" != "$(value "$STATE" TOKEN)" ]; then
         exit 0
     fi
@@ -239,133 +325,268 @@ trigger()
     exit 0
 }
 
+# Where a backup folder is: sd2, sd1 or usb:<volume>.
+where()
+{
+    case "$1" in
+        "$MOUNT"/*) echo sd2 ;;
+        "$SD1_BASE"/*) echo sd1 ;;
+        /media/*) v="${1#/media/}"; echo "usb:${v%%/*}" ;;
+    esac
+}
+
 list()
 {
     me="$(sid)"
-    for m in "$MOUNT"/nuubos-backup/*/MANIFEST; do
-        [ -f "$m" ] || continue
-        [ "$(value "$m" NUUBOS_BACKUP_FORMAT)" = 1 ] || continue
+    for m in $(all_manifests); do
         dir="${m%/MANIFEST}"
         s="$(value "$m" SID)"
         this=0; [ "$s" = "$me" ] && [ "${dir##*/}" = "$me" ] && this=1
-        printf 'backup=%s\t%s\t%s\t%s\t%s\t%s\n' "$dir" "$s" "$(value "$m" MODEL)" \
-            "$(value "$m" CREATED)" "$(value "$m" USERS)" "$this"
+        printf 'backup=%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$dir" "$s" "$(value "$m" MODEL)" \
+            "$(value "$m" CREATED)" "$(value "$m" USERS)" "$this" "$(where "$dir")"
     done
     echo "end=1"
 }
 
-# Copy one area of the backup over the live one: staged next to it (same
-# filesystem), checked, then swapped; the old copy comes back if a step fails.
-restore_area()
+# A backup folder this tool made: <volume>/nuubos-backup/<name>, nothing else.
+valid_dir()
+{
+    dir="$1"
+    case "$dir" in *..*|*//*|*/) return 1 ;; esac
+    name="${dir##*/}"; base="${dir%/*}"
+    case "$name" in ''|.*) return 1 ;; esac
+    case "$base" in
+        "$SD1_BASE") ;;
+        /media/*/nuubos-backup)
+            v="${base#/media/}"; v="${v%/nuubos-backup}"
+            case "$v" in ''|*/*|.*) return 1 ;; esac
+            ;;
+        *) return 1 ;;
+    esac
+    [ "$(value "$dir/MANIFEST" NUUBOS_BACKUP_FORMAT)" = 1 ]
+}
+
+valid_id() { case "$1" in ''|*[!a-z0-9-]*) return 1 ;; esac; return 0; }
+
+list_users()
+{
+    valid_dir "${1:-}" || { echo "ERR backup"; exit 1; }
+    for p in "$1"/data/profiles/state-users/*/profile.conf; do
+        [ -f "$p" ] || continue
+        id="${p%/profile.conf}"; id="${id##*/}"
+        valid_id "$id" || continue
+        printf 'user=%s\t%s\n' "$id" "$(value "$p" USER_NAME)"
+    done
+    echo "end=1"
+}
+
+# --- restore ------------------------------------------------------------
+
+# Copy one area of the backup next to its live place (same filesystem) and
+# check it; nothing live changes. Listed in the journal for the swap.
+stage_area()
 {
     from="$1"; to="$2"; shift 2
     [ -d "$from" ] || return 0
-    stage="$to.restore-new"; old="$to.restore-old"
-    rm -rf "$stage" "$old"
+    stage="$to.restore-new"
+    echo "$to" >> "$JOURNAL"
+    rm -rf "$stage"
     mkdir -p "$stage" || return 1
-    rsync -rt "$@" "$from/" "$stage/" 2>>/run/nuubos/sd2-backup.log || { rm -rf "$stage"; return 1; }
-    [ -z "$(rsync -rtn --itemize-changes "$@" "$from/" "$stage/" 2>/dev/null)" ] || { rm -rf "$stage"; return 1; }
-    if [ -e "$to" ]; then mv "$to" "$old" || { rm -rf "$stage"; return 1; }; fi
-    if ! mv "$stage" "$to"; then
-        [ -e "$old" ] && mv "$old" "$to"
+    if ! rsync -rt "$@" "$from/" "$stage/" 2>>"$LOG"; then
+        log "copy of $from failed"
         return 1
     fi
-    rm -rf "$old"
+    if [ -n "$(rsync -rtn --itemize-changes "$@" "$from/" "$stage/" 2>/dev/null)" ]; then
+        log "check of $from failed"
+        return 1
+    fi
 }
 
-# Merge per-user folders (users/<id>/<item>) into /userdata/users.
-restore_users()
+stage_file()
 {
-    from="$1"
+    from="$1"; to="$2"
+    [ -f "$from" ] || return 0
+    echo "$to" >> "$JOURNAL"
+    mkdir -p "${to%/*}" && cp "$from" "$to.restore-new"
+}
+
+# Per-user folders (users/<id>/<item>) of /userdata/users; only <id> when given.
+stage_users()
+{
+    from="$1"; only="${2:-}"
     [ -d "$from" ] || return 0
     for u in "$from"/*/; do
         [ -d "$u" ] || continue
         id="${u%/}"; id="${id##*/}"
+        valid_id "$id" || continue
+        [ -z "$only" ] || [ "$id" = "$only" ] || continue
         for d in "$u"*/; do
             [ -d "$d" ] || continue
             sub="${d%/}"; sub="${sub##*/}"
             if [ "$sub" = appdata ]; then
-                mkdir -p "/userdata/users/$id/appdata"
-                restore_area "$d/retroarch" "/userdata/users/$id/appdata/retroarch" || return 1
+                mkdir -p "/userdata/users/$id/appdata" || return 1
+                stage_area "$d/retroarch" "/userdata/users/$id/appdata/retroarch" || return 1
             else
-                mkdir -p "/userdata/users/$id"
-                restore_area "${d%/}" "/userdata/users/$id/$sub" || return 1
+                mkdir -p "/userdata/users/$id" || return 1
+                stage_area "${d%/}" "/userdata/users/$id/$sub" || return 1
             fi
         done
     done
 }
 
+# A staged profile folder of STATE gets the secrets of the profile already
+# here (never in a backup) and root-only permissions (the card keeps none).
+fix_profile()
+{
+    p="$1"; id="$2"
+    [ -f "$p/profile.conf" ] || return 0
+    rm -rf "$p/secrets"
+    if [ -d "/state/users/$id/secrets" ]; then
+        cp -a "/state/users/$id/secrets" "$p/secrets" || return 1
+    else
+        mkdir -p "$p/secrets" || return 1
+    fi
+}
+
+fix_state_perms()
+{
+    find "$1" -type d -exec chmod 700 {} + 2>/dev/null
+    find "$1" -type f -exec chmod 600 {} + 2>/dev/null
+    return 0
+}
+
+# Remove what an interrupted copy left (journal without SWAP).
+unstage()
+{
+    while read -r to; do
+        case "$to" in SWAP|'') continue ;; esac
+        rm -rf "$to.restore-new"
+    done < "$JOURNAL"
+    rm -f "$JOURNAL"; sync
+}
+
+# Swap every staged area in; an area already swapped is skipped, so an
+# interrupted swap can run again. Old copies go last.
+swap_all()
+{
+    echo SWAP >> "$JOURNAL"; sync
+    while read -r to; do
+        case "$to" in SWAP|'') continue ;; esac
+        [ -e "$to.restore-new" ] || continue
+        if [ -e "$to" ] && [ ! -e "$to.restore-old" ]; then
+            mv "$to" "$to.restore-old" || return 1
+        elif [ -e "$to" ]; then
+            rm -rf "$to"
+        fi
+        mv "$to.restore-new" "$to" || return 1
+    done < "$JOURNAL"
+    sync
+    while read -r to; do
+        case "$to" in SWAP|'') continue ;; esac
+        rm -rf "$to.restore-old"
+    done < "$JOURNAL"
+    rm -f "$JOURNAL"; sync
+}
+
+# After a restart in the middle of a restore: finish or clean up.
+recover_now()
+{
+    if grep -qx SWAP "$JOURNAL"; then
+        log "completing an interrupted restore"
+        swap_all
+    else
+        log "cleaning up an interrupted restore"
+        unstage
+    fi
+}
+
+# Never while a restore holds the lock (it is the one writing the journal).
+recover()
+{
+    [ -f "$JOURNAL" ] || return 0
+    ( lock || exit 0; recover_now )
+}
+
 restore()
 {
-    dir="$1"
-    case "$dir" in "$MOUNT"/nuubos-backup/*) ;; *) fail backup ;; esac
-    case "$dir" in *..*) fail backup ;; esac
-    [ "$(value "$dir/MANIFEST" NUUBOS_BACKUP_FORMAT)" = 1 ] || fail backup
+    dir="$1"; user="$2"
+    valid_dir "$dir" || fail backup
+    D="$dir/data"
+    if [ -n "$user" ]; then
+        valid_id "$user" && [ -f "$D/profiles/state-users/$user/profile.conf" ] || fail user
+    fi
     # Never under a running game.
     nuubos-emuctl status 2>/dev/null | grep -q '^state=running' && fail game
-    need="$(du -sk "$dir/data" 2>/dev/null | awk '{ print $1 }')"
+    lock || fail busy
+    [ -f "$JOURNAL" ] && recover_now
+    if [ -n "$user" ]; then
+        need="$(du -sk "$D"/*/"$user" "$D"/*/*/"$user" 2>/dev/null | awk '{ n += $1 } END { print n + 0 }')"
+    else
+        need="$(du -sk "$D" 2>/dev/null | awk '{ print $1 }')"
+    fi
     free="$(df -Pk /userdata | awk 'NR == 2 { print $4 }')"
     [ -n "$need" ] && [ -n "$free" ] && [ "$free" -gt $((need + 65536)) ] || fail space
-    D="$dir/data"
-    log "restore from $dir"
-    progress 5
+    log "restore from $dir${user:+ (profile $user)}"
+    progress 2
+    mkdir -p "${JOURNAL%/*}" && : > "$JOURNAL" || fail storage
 
-    # Secrets are never in a backup: a profile that is here already keeps
-    # its own (accounts, tokens); the others start without.
-    keep=/state/.restore-secrets
-    rm -rf "$keep"; mkdir -p "$keep"
-    for u in /state/users/*/secrets; do
-        [ -d "$u" ] || continue
-        id="${u%/secrets}"; id="${id##*/}"
-        cp -a "$u" "$keep/$id" 2>/dev/null
-    done
-    restore_area "$D/profiles/state-users" /state/users || { rm -rf "$keep"; fail storage; }
-    # The card keeps no permissions: STATE is root-only again.
-    chmod 700 /state/users
-    find /state/users -type d -exec chmod 700 {} + 2>/dev/null
-    find /state/users -type f -exec chmod 600 {} + 2>/dev/null
-    for u in /state/users/*/; do
-        id="${u%/}"; id="${id##*/}"
-        [ -f "$u/profile.conf" ] || continue
-        if [ -d "$keep/$id" ]; then
-            rm -rf "$u/secrets" && mv "$keep/$id" "$u/secrets"
-        fi
-        mkdir -p "$u/secrets" && chmod 700 "$u/secrets"
-    done
-    rm -rf "$keep"
-    for f in "$D"/profiles/config/*.conf; do
-        [ -f "$f" ] || continue
-        case "${f##*/}" in scraper.conf) t=/state/scraper ;; *) t=/state/config ;; esac
-        mkdir -p "$t" && cp "$f" "$t/${f##*/}.tmp" && mv "$t/${f##*/}.tmp" "$t/${f##*/}" || fail storage
-    done
-    restore_users "$D/profiles/userdata-users" || fail storage
-    progress 20
-    n=0
-    for item in $ITEMS_ALL; do
-        n=$((n + 1))
-        case "$item" in
-            saves|states|screenshots) restore_users "$D/$item" || fail storage ;;
-            library)
-                restore_users "$D/library/users" || fail storage
-                [ -f "$D/library/catalog.tsv" ] && mkdir -p /userdata/library &&
-                    cp "$D/library/catalog.tsv" /userdata/library/catalog.tsv
-                ;;
-            bios) restore_area "$D/bios" /userdata/bios || fail storage ;;
-            covers)
-                for c in covers metadata screenshots; do
-                    restore_area "$D/covers/$c" "/userdata/library/$c" || fail storage
-                done
-                ;;
-        esac
-        progress $((20 + n * 75 / 6))
-    done
-    sync
-    # This console's own backup goes on in the same folder; another
-    # console's is left as it is and a new one starts.
-    if [ "$(value "$dir/MANIFEST" SID)" = "$(sid)" ] && [ "${dir##*/}" = "$(sid)" ]; then
-        write_state "$(value "$dir/MANIFEST" TOKEN)" "$(value "$dir/MANIFEST" CREATED)" ok
+    # 1. Copy and check every area; any failure leaves SD1 as it was.
+    if [ -n "$user" ]; then
+        stage_area "$D/profiles/state-users/$user" "/state/users/$user" --exclude=/secrets/ &&
+            fix_profile "/state/users/$user.restore-new" "$user" &&
+            fix_state_perms "/state/users/$user.restore-new" || { unstage; fail storage; }
+        progress 10
+        for src in profiles/userdata-users saves states screenshots library/users; do
+            stage_users "$D/$src" "$user" || { unstage; fail storage; }
+        done
+        progress 90
     else
-        write_state "" "" ""
+        stage_area "$D/profiles/state-users" /state/users --exclude='/*/secrets/' || { unstage; fail storage; }
+        for p in /state/users.restore-new/*; do
+            [ -d "$p" ] && { fix_profile "$p" "${p##*/}" || { unstage; fail storage; }; }
+        done
+        fix_state_perms /state/users.restore-new
+        for f in "$D"/profiles/config/*.conf; do
+            [ -f "$f" ] || continue
+            case "${f##*/}" in scraper.conf) t=/state/scraper ;; *) t=/state/config ;; esac
+            stage_file "$f" "$t/${f##*/}" || { unstage; fail storage; }
+        done
+        progress 5
+        n=0
+        for src in profiles/userdata-users saves states screenshots library/users; do
+            n=$((n + 1))
+            stage_users "$D/$src" || { unstage; fail storage; }
+            progress $((5 + n * 4))
+        done
+        stage_file "$D/library/catalog.tsv" /userdata/library/catalog.tsv || { unstage; fail storage; }
+        stage_area "$D/bios" /userdata/bios || { unstage; fail storage; }
+        progress 40
+        n=0
+        for c in covers metadata; do
+            n=$((n + 1))
+            stage_area "$D/covers/$c" "/userdata/library/$c" || { unstage; fail storage; }
+            progress $((40 + n * 25))
+        done
+    fi
+    sync
+
+    # 2. Swap them all in (seconds); a restart meanwhile finishes it.
+    swap_all || fail storage
+    chmod 700 /state/users
+    progress 95
+
+    # After a whole-console restore the backup goes on in the destination's
+    # folder when it holds this same backup (same token); otherwise that
+    # folder is left as it is and a new one starts. A profile restore
+    # leaves the backup link alone.
+    if [ -z "$user" ]; then
+        token="$(value "$dir/MANIFEST" TOKEN)"
+        mine="$(dest_base read)/$(sid)/MANIFEST"
+        if [ -n "$token" ] && [ "$(value "$mine" TOKEN)" = "$token" ]; then
+            write_state "$token" "$(value "$dir/MANIFEST" CREATED)" ok
+        else
+            write_state "" "" ""
+        fi
     fi
     refresh
     log "restore done"
@@ -375,8 +596,9 @@ restore()
 
 archive()
 {
-    root="$(root_dir)"
-    card_writable || fail card
+    base="$(dest_base)"
+    [ -n "$base" ] || fail card
+    root="$base/$(sid)"
     [ -d "$root" ] || { write_state "" "" ""; refresh; echo OK; return; }
     created="$(value "$root/MANIFEST" CREATED)"
     dest="$root-$(date -u -d "@${created:-0}" +%Y%m%d 2>/dev/null || echo old)"
@@ -388,12 +610,15 @@ archive()
     echo OK
 }
 
+conf_dest() { v="$(value "$CONF" DEST)"; case "$v" in sd2|sd1|usb) echo "$v" ;; esac; }
+
 case "${1:-}" in
     refresh) refresh ;;
     set)
         cur_e=1; enabled || cur_e=0
         case "${2:-}:${3:-}" in
-            enabled:0|enabled:1) write_conf "$3" "$(items)" ;;
+            enabled:0|enabled:1) write_conf "$3" "$(items)" "$(conf_dest)" ;;
+            dest:sd2|dest:sd1|dest:usb) write_conf "$cur_e" "$(items)" "$3" ;;
             item:*)
                 case " $ITEMS_ALL " in *" $3 "*) ;; *) echo "ERR item"; exit 2 ;; esac
                 case "${4:-}" in
@@ -403,7 +628,7 @@ case "${1:-}" in
                 esac
                 # Keep the canonical order, no duplicates.
                 new=""; for i in $ITEMS_ALL; do case ",$list," in *",$i,"*) new="$new${new:+,}$i" ;; esac; done
-                write_conf "$cur_e" "$new"
+                write_conf "$cur_e" "$new" "$(conf_dest)"
                 ;;
             *) echo "ERR usage"; exit 2 ;;
         esac
@@ -414,11 +639,12 @@ case "${1:-}" in
     trigger) trigger "${2:-}" ;;
     run) backup_run "${2:-manual}" ;;
     list) list ;;
-    restore) restore "${2:-}" ;;
+    users) list_users "${2:-}" ;;
+    restore) restore "${2:-}" "${3:-}" ;;
     archive) archive ;;
     *)
-        echo "Usage: nuubos-sd2-backup refresh | set enabled 0|1 | set item NAME 0|1 | reset |" >&2
-        echo "       trigger session-end|attach | run auto|manual | list | restore DIR | archive" >&2
+        echo "Usage: nuubos-sd2-backup refresh | set enabled 0|1 | set item NAME 0|1 | set dest sd2|sd1|usb | reset |" >&2
+        echo "       trigger session-end|attach | run auto|manual|update | list | users DIR | restore DIR [USER] | archive" >&2
         exit 2
         ;;
 esac

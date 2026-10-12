@@ -1,30 +1,62 @@
 #!/bin/sh
 # Build and sign a nuubOS OTA release (EPIC-048) on the maintainer's PC.
 #
-#   tools/ota/make-update.sh PRIVATE_KEY.pem OUTDIR [NOTES_URL]
+#   tools/ota/make-update.sh OUTDIR CHANNEL [NOTES_FILE]
 #
-# Input: output/h700/images/rootfs.tar from a full official build
-# (BR2_TARGET_ROOTFS_TAR). Output in OUTDIR, to publish as release assets:
-#   nuubos-rootfs-<version>.tar.gz, nuubos-update.manifest(.sig)
-# One-time key creation (keep the private key offline, never commit it):
-#   openssl genpkey -algorithm ed25519 -out nuubos-release.pem
-#   openssl pkey -in nuubos-release.pem -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n' \
-#       > board/nuubos/common/ota/update-key.pub
+# NOTES_FILE: the release notes shown on the console (Software Update,
+# WHAT'S NEW) and on the GitHub release, plain text, one item per line
+# ("- " bullets allowed), at most 4000 bytes; signed inside the manifest.
+#
+# CHANNEL: stable | beta | alpha. Input: output/h700/images/rootfs.ext4
+# (the system slot image) and rootfs.tar (its build serial) from a full
+# image build. Output in OUTDIR, published by tools/ota/publish.sh:
+#   <tag>/nuubos-system-<version>.img.gz       payload (release <tag>)
+#   channel-<channel>/nuubos-update.manifest(.sig)
+#   release.env, release-notes.txt              what publish.sh needs
+# <tag> = v<version>-<serial>. The manifest is signed with the release key,
+# derived from the release passphrase (tools/ota/release-key.py: asked once
+# here, checked against update-key.pub before the long compression).
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-KEY="${1:-}"; OUT="${2:-}"; NOTES="${3:-}"
-[ -f "$KEY" ] && [ -n "$OUT" ] || { echo "Usage: $0 PRIVATE_KEY.pem OUTDIR [NOTES_URL]" >&2; exit 2; }
-TAR="$ROOT/output/h700/images/rootfs.tar"
-[ -f "$TAR" ] || { echo "[FAIL] $TAR missing: run a full build with BR2_TARGET_ROOTFS_TAR" >&2; exit 1; }
+OUT="${1:-}"; CHANNEL="${2:-}"; NOTES_FILE="${3:-}"
+KEYTOOL="$ROOT/tools/ota/release-key.py"
+[ -n "$OUT" ] || { echo "Usage: $0 OUTDIR stable|beta|alpha [NOTES_FILE]" >&2; exit 2; }
+NOTES=""
+if [ -n "$NOTES_FILE" ]; then
+    [ -f "$NOTES_FILE" ] || { echo "[FAIL] $NOTES_FILE missing" >&2; exit 1; }
+    [ "$(wc -c < "$NOTES_FILE")" -le 4000 ] || { echo "[FAIL] release notes longer than 4000 bytes" >&2; exit 1; }
+    # One manifest line: backslash and new lines escaped (\\, \n).
+    NOTES="$(sed 's/\\/\\\\/g' "$NOTES_FILE" | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')"
+fi
+case "$CHANNEL" in stable|beta|alpha) ;; *) echo "[FAIL] channel must be stable, beta or alpha" >&2; exit 2 ;; esac
+IMAGES="$ROOT/output/h700/images"
+IMG="$IMAGES/rootfs.ext4"; TAR="$IMAGES/rootfs.tar"
+[ -f "$IMG" ] && [ -f "$TAR" ] || { echo "[FAIL] $IMG or $TAR missing: run a full image build" >&2; exit 1; }
+SERIAL="$(tar -xOf "$TAR" ./usr/share/nuubos/build-serial 2>/dev/null | tr -d ' \n')"
+[ -n "$SERIAL" ] || { echo "[FAIL] the image has no build serial (/usr/share/nuubos/build-serial)" >&2; exit 1; }
+# Fits a system slot (partitions.sh: 4194304 sectors).
+IMAGE_SIZE="$(stat -L -c %s "$IMG")"
+[ "$IMAGE_SIZE" -le 2147483648 ] || { echo "[FAIL] image larger than a system slot" >&2; exit 1; }
+if [ -z "${NUUBOS_RELEASE_PASSPHRASE:-}" ]; then
+    printf 'nuubOS release passphrase: ' >&2
+    stty -echo 2>/dev/null; read -r NUUBOS_RELEASE_PASSPHRASE; stty echo 2>/dev/null; echo >&2
+fi
+export NUUBOS_RELEASE_PASSPHRASE
+python3 "$KEYTOOL" check || exit 1
 VERSION="$(cat "$ROOT/VERSION")"
-BUILD="$(git -C "$ROOT" describe --always --dirty --abbrev=12)"
-mkdir -p "$OUT" || exit 1
-PAYLOAD="nuubos-rootfs-$VERSION.tar.gz"
-gzip -9 -c "$TAR" > "$OUT/$PAYLOAD" || exit 1
-SHA="$(sha256sum "$OUT/$PAYLOAD" | cut -d' ' -f1)"
-SIZE="$(wc -c < "$OUT/$PAYLOAD")"
-printf 'format=1\nversion=%s\nbuild=%s\npayload=%s\nsize=%s\nsha256=%s\nnotes=%s\n' \
-    "$VERSION" "$BUILD" "$PAYLOAD" "$SIZE" "$SHA" "$NOTES" > "$OUT/nuubos-update.manifest"
-openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$OUT/nuubos-update.manifest" \
-    -out "$OUT/nuubos-update.manifest.sig" || exit 1
-echo "[PASS] $OUT: $PAYLOAD ($SIZE bytes), manifest signed"
+BUILD="$(tar -xOf "$TAR" ./usr/share/nuubos/build-id 2>/dev/null | tr -d ' \n')"
+TAG="v$VERSION-$SERIAL"
+PAYLOAD="nuubos-system-$VERSION.img.gz"
+mkdir -p "$OUT/$TAG" "$OUT/channel-$CHANNEL" || exit 1
+echo "Compressing the system image..."
+IMAGE_SHA="$(sha256sum < "$IMG" | cut -d' ' -f1)"
+gzip -9 -n -c "$IMG" > "$OUT/$TAG/$PAYLOAD" || exit 1
+SHA="$(sha256sum < "$OUT/$TAG/$PAYLOAD" | cut -d' ' -f1)"
+SIZE="$(stat -c %s "$OUT/$TAG/$PAYLOAD")"
+M="$OUT/channel-$CHANNEL/nuubos-update.manifest"
+printf 'format=2\nchannel=%s\nversion=%s\nserial=%s\nbuild=%s\npayload=%s/%s\nsize=%s\nsha256=%s\nimage_size=%s\nimage_sha256=%s\nnotes=%s\n' \
+    "$CHANNEL" "$VERSION" "$SERIAL" "$BUILD" "$TAG" "$PAYLOAD" "$SIZE" "$SHA" "$IMAGE_SIZE" "$IMAGE_SHA" "$NOTES" > "$M"
+python3 "$KEYTOOL" sign "$M" "$M.sig" || exit 1
+printf 'TAG=%s\nCHANNEL=%s\nVERSION=%s\nPAYLOAD=%s\n' "$TAG" "$CHANNEL" "$VERSION" "$PAYLOAD" > "$OUT/release.env"
+if [ -n "$NOTES_FILE" ]; then cp "$NOTES_FILE" "$OUT/release-notes.txt"; else rm -f "$OUT/release-notes.txt"; fi
+echo "[PASS] $OUT: $TAG/$PAYLOAD ($SIZE bytes), channel $CHANNEL manifest signed"

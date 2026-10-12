@@ -1,0 +1,237 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] arm64: dts: allwinner: h700: blinking sleep LED on every board
+
+Every H700 board has its power LED on PI12, which can be muxed to PWM2.
+Move the rumble/power-LED coordinator from the RG35XX Pro and RG40XX-V
+device trees into the shared rumble includes, so the power LED blinks
+during sleep (s2idle or deep) on the whole family:
+
+- sun50i-h700-anbernic-pwm2-rumble.dtsi (motor on PWM2/PH2): the
+  "anbernic,rg35xx-pro-haptics" coordinator replaces pwm-vibrator.
+- sun50i-h700-anbernic-pwm3-rumble-pi13.dtsi (RG40XX-H/V, RG CubeXX,
+  motor on PWM3/PI13): the "anbernic,rg40xx-v-power-led" coordinator
+  owns the PWM2/PWM3 pair instead.
+
+The gpio-leds power LED is dropped where the coordinator takes PI12.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-pwm2-rumble.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-pwm2-rumble.dtsi
+@@ -3,14 +3,47 @@
+ /*
+  * Vibration motor on PWM2 (PH2), the route of the boards that keep PH2
+  * free (no RGB controller on UART5), as ROCKNIX describes the family.
++ *
++ * nuubOS: PI12, the power LED of every H700 board, can be muxed to PWM2
++ * too, so one coordinator owns PWM2, the motor and the power LED:
++ *
++ * runtime:
++ *   PH2  -> PWM2 -> vibration motor
++ *   PI12 -> GPIO -> power LED
++ *
++ * sleep (s2idle or deep):
++ *   PH2  -> GPIO input
++ *   PI12 -> PWM2 -> blinking power LED
+  */
++&pio {
++	pwm2_pi12_pin: pwm2-pi12-pin {
++		pins = "PI12";
++		function = "pwm2";
++	};
++
++	ph2_gpio_in_pin: ph2-gpio-in-pin {
++		pins = "PH2";
++		function = "gpio_in";
++	};
++};
++
++&{/leds} {
++	/* Owned by the coordinator below. */
++	/delete-node/ led-0;
++};
++
+ / {
+-	pwm-vibrator {
+-		compatible = "pwm-vibrator";
++	haptics_led {
++		compatible = "anbernic,rg35xx-pro-haptics";
++
++		pinctrl-names = "default", "sleep";
++		pinctrl-0 = <&pwm2_pin>;
++		pinctrl-1 = <&ph2_gpio_in_pin>, <&pwm2_pi12_pin>;
++
++		power-led-gpios = <&pio 8 12 GPIO_ACTIVE_HIGH>; /* PI12 */
++
+ 		pwms = <&pwm 2 1000000 0>;
+ 		pwm-names = "enable";
+-		pinctrl-names = "default";
+-		pinctrl-0 = <&pwm2_pin>;
+ 	};
+ };
+ 
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-pwm3-rumble-pi13.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-pwm3-rumble-pi13.dtsi
+@@ -1,10 +1,13 @@
+ // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+ 
+-#include "sun50i-h700-anbernic-pwm3-rumble.dtsi"
+-
+ /*
+- * Shared PI13 PWM3 routing used by the RG40XX-V and RG CubeXX.
+- * PH0 is reserved by UART0 on these boards.
++ * Shared PI13 PWM3 routing used by the RG40XX-H/V and RG CubeXX.
++ * PH0 is reserved by UART0 on these boards, PH2 by the RGB UART5.
++ *
++ * nuubOS: the motor moves to PWM3, PWM2 only blinks the PI12 power LED
++ * during sleep. Both channels share the pair clock on H616/H700, so one
++ * coordinator owns the whole PWM2/PWM3 pair instead of the PWM2 one of
++ * the base board.
+  */
+ &pio {
+ 	pwm3_pi13_pin: pwm3-pi13-pin {
+@@ -13,6 +16,20 @@
+ 	};
+ };
+ 
+-&{/pwm-vibrator} {
+-	pinctrl-0 = <&pwm3_pi13_pin>;
++/ {
++	/delete-node/ haptics_led;
++
++	suspend_power_led {
++		compatible = "anbernic,rg40xx-v-power-led";
++
++		pinctrl-names = "default", "sleep";
++		pinctrl-0 = <&pwm3_pi13_pin>;
++		pinctrl-1 = <&pwm2_pi12_pin>;
++
++		power-led-gpios = <&pio 8 12 GPIO_ACTIVE_HIGH>; /* PI12 */
++
++		pwms = <&pwm 2 3000000000 0>,
++		       <&pwm 3 1000000 0>;
++		pwm-names = "sleep-led", "rumble";
++	};
+ };
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-pro.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-pro.dts
+@@ -44,23 +44,6 @@
+ 	};
+ };
+ 
+-&pio {
+-	pwm2_pi12_pin: pwm2-pi12-pin {
+-		pins = "PI12";
+-		function = "pwm2";
+-	};
+-
+-	pwm2_ph2_pin: pwm2-ph2-pin {
+-		pins = "PH2";
+-		function = "pwm2";
+-	};
+-
+-	ph2_gpio_in_pin: ph2-gpio-in-pin {
+-		pins = "PH2";
+-		function = "gpio_in";
+-	};
+-
+-};
+ 
+ 
+ 
+@@ -68,46 +51,4 @@
+ 	wakeup-source;
+ };
+ 
+-/*
+- * PI12 is the RG35XX Pro power LED and can be muxed to PWM2.
+- * Keep the inherited status LED on GPIO, but replace the inherited
+- * GPIO power LED with a hardware-PWM driven power LED.
+- */
+-&{/leds} {
+-	/delete-node/ led-0;
+-};
+-
+-&pwm {
+-	status = "okay";
+-};
+-
+-
+-/*
+- * RG35XX Pro PWM2 ownership:
+- *
+- * runtime:
+- *   PH2  -> PWM2 -> vibration motor
+- *   PI12 -> GPIO -> power LED
+- *
+- * suspend:
+- *   PH2  -> GPIO input
+- *   PI12 -> PWM2 -> suspend LED
+- */
+-
+-/ {
+-	/* The haptics/LED coordinator below owns PWM2 and the motor. */
+-	/delete-node/ pwm-vibrator;
+-
+-	haptics_led {
+-		compatible = "anbernic,rg35xx-pro-haptics";
+-
+-		pinctrl-names = "default", "sleep";
+-		pinctrl-0 = <&pwm2_ph2_pin>;
+-		pinctrl-1 = <&ph2_gpio_in_pin>, <&pwm2_pi12_pin>;
+-
+-		power-led-gpios = <&pio 8 12 GPIO_ACTIVE_HIGH>;
+-
+-		pwms = <&pwm 2 1000000 0>;
+-		pwm-names = "enable";
+-	};
+-};
++/* PWM2 rumble + blinking sleep LED: sun50i-h700-anbernic-pwm2-rumble.dtsi. */
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg40xx-v.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg40xx-v.dts
+@@ -17,44 +17,7 @@
+ };
+ 
+ 
+-/*
+- * nuubOS suspend power LED coordinator. Runtime keeps PI12 as a normal
+- * GPIO power LED. During s2idle the coordinator releases the GPIO, routes
+- * PWM2 to PI12, and drives a 3 s waveform with 1 s high / 2 s low.
+- */
+-&pio {
+-	pwm2_pi12_power_led_pin: pwm2-pi12-power-led-pin {
+-		pins = "PI12";
+-		function = "pwm2";
+-	};
+-};
+-
+-&{/leds} {
+-	/delete-node/ led-0;
+-};
+-
+-/ {
+-	/*
+-	 * Replace the generic PWM3 vibrator so one coordinator owns the
+-	 * whole PWM2/PWM3 pair. This is required because both channels
+-	 * share the pair clock on H616/H700.
+-	 */
+-	/delete-node/ pwm-vibrator;
+-
+-	suspend_power_led {
+-		compatible = "anbernic,rg40xx-v-power-led";
+-
+-		pinctrl-names = "default", "sleep";
+-		pinctrl-0 = <&pwm3_pi13_pin>;
+-		pinctrl-1 = <&pwm2_pi12_power_led_pin>;
+-
+-		power-led-gpios = <&pio 8 12 GPIO_ACTIVE_HIGH>;
+-
+-		pwms = <&pwm 2 3000000000 0>,
+-		       <&pwm 3 1000000 0>;
+-		pwm-names = "sleep-led", "rumble";
+-	};
+-};
++/* PWM3 rumble + blinking sleep LED: sun50i-h700-anbernic-pwm3-rumble-pi13.dtsi. */
+ 
+ /*
+  * nuubOS: RG40XX-V physical X/Y wiring differs from the inherited

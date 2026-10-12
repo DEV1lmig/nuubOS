@@ -1,6 +1,7 @@
 #!/bin/sh
 
 . /usr/lib/nuubos/exfat-health.sh
+. /usr/lib/nuubos/partitions.sh
 . /usr/lib/nuubos/userdata.sh
 
 MOUNT_DIR=/userdata
@@ -13,39 +14,16 @@ log()
     echo "nuubOS userdata: $*"
 }
 
-root_device()
-{
-    sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline
-}
-
-boot_disk()
-{
-    ROOT_DEV="$(root_device)"
-
-    case "$ROOT_DEV" in
-        /dev/mmcblk*p1)
-            printf '%s\n' "${ROOT_DEV%p1}"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-partition_device()
-{
-    printf '%sp%s\n' "$1" "$2"
-}
-
 geometry()
 {
-    DISK="$(boot_disk)" || {
+    DISK="$(nuubos_boot_disk)" || {
         log "unable to derive boot disk"
         return 1
     }
 
-    P3="$(partition_device "$DISK" 3)"
-    P4="$(partition_device "$DISK" 4)"
+    P3="$(partition_device "$DISK" "$NUUBOS_PART_STATE")"
+    P5="$(partition_device "$DISK" "$NUUBOS_PART_SLOT_B")"
+    P6="$(partition_device "$DISK" "$NUUBOS_PART_USERDATA")"
 
     [ -b "$DISK" ] || {
         log "boot disk missing: $DISK"
@@ -70,7 +48,16 @@ geometry()
     P3_SIZE="$(cat "/sys/class/block/$P3_NAME/size")" || return 1
     DISK_SECTORS="$(blockdev --getsz "$DISK")" || return 1
 
-    EXPECTED_START=$((P3_START + P3_SIZE))
+    #
+    # Extended partition from the end of STATE to the end of the card:
+    # system slot B (1 MiB after the extended start, room for its EBR),
+    # then USERDATA (1 MiB after slot B, room for the next EBR).
+    #
+    EXT_START=$((P3_START + P3_SIZE))
+    EXT_SIZE=$((DISK_SECTORS - EXT_START))
+    SLOT_START=$((EXT_START + 2048))
+    SLOT_SIZE=$NUUBOS_SLOT_SECTORS
+    EXPECTED_START=$((SLOT_START + SLOT_SIZE + 2048))
     EXPECTED_SIZE=$((DISK_SECTORS - EXPECTED_START))
 
     [ "$EXPECTED_SIZE" -gt 0 ] || {
@@ -78,7 +65,7 @@ geometry()
         return 1
     }
 
-    [ $((EXPECTED_START % 2048)) -eq 0 ] || {
+    [ $((EXT_START % 2048)) -eq 0 ] || {
         log "USERDATA start is not 1 MiB aligned"
         return 1
     }
@@ -86,29 +73,55 @@ geometry()
     return 0
 }
 
-validate_p4_geometry()
+partition_device()
 {
-    [ -b "$P4" ] || return 1
+    printf '%sp%s\n' "$1" "$2"
+}
 
-    P4_NAME="${P4#/dev/}"
+part_matches()
+{
+    [ -b "$1" ] || return 1
 
-    P4_START="$(cat "/sys/class/block/$P4_NAME/start")" || return 1
-    P4_SIZE="$(cat "/sys/class/block/$P4_NAME/size")" || return 1
+    PART_NAME="${1#/dev/}"
+    PART_START="$(cat "/sys/class/block/$PART_NAME/start")" || return 1
+    PART_SIZE="$(cat "/sys/class/block/$PART_NAME/size")" || return 1
 
-    if [ "$P4_START" -ne "$EXPECTED_START" ] ||
-       [ "$P4_SIZE" -ne "$EXPECTED_SIZE" ]; then
-
-        log "unexpected USERDATA geometry"
-        log "expected start=$EXPECTED_START size=$EXPECTED_SIZE"
-        log "actual   start=$P4_START size=$P4_SIZE"
-
+    if [ "$PART_START" -ne "$2" ] || [ "$PART_SIZE" -ne "$3" ]; then
+        log "unexpected geometry of $1"
+        log "expected start=$2 size=$3"
+        log "actual   start=$PART_START size=$PART_SIZE"
         return 1
     fi
 
     return 0
 }
 
-create_p4()
+validate_layout()
+{
+    part_matches "$P5" "$SLOT_START" "$SLOT_SIZE" &&
+        part_matches "$P6" "$EXPECTED_START" "$EXPECTED_SIZE"
+}
+
+register_partitions()
+{
+    #
+    # The root filesystem and STATE are mounted, therefore a full
+    # partition-table reread is expected to fail. Add only the new ones.
+    #
+    for NR in "$NUUBOS_PART_EXTENDED" "$NUUBOS_PART_SLOT_B" "$NUUBOS_PART_USERDATA"; do
+        [ -b "$(partition_device "$DISK" "$NR")" ] && continue
+        partx --add --nr "$NR" "$DISK" || return 1
+    done
+
+    [ -b "$P6" ] || {
+        log "USERDATA partition did not appear"
+        return 1
+    }
+
+    return 0
+}
+
+create_layout()
 {
     mkdir -p /state/migrations
 
@@ -119,11 +132,12 @@ EOF2
     chmod 600 "$PENDING"
     sync
 
-    log "creating USERDATA partition"
+    log "creating system slot B and USERDATA partitions"
 
-    printf 'start=%s, size=%s, type=7\n' \
-        "$EXPECTED_START" \
-        "$EXPECTED_SIZE" |
+    printf 'start=%s, size=%s, type=5\nstart=%s, size=%s, type=83\nstart=%s, size=%s, type=7\n' \
+        "$EXT_START" "$EXT_SIZE" \
+        "$SLOT_START" "$SLOT_SIZE" \
+        "$EXPECTED_START" "$EXPECTED_SIZE" |
         sfdisk \
             --append \
             --no-reread \
@@ -133,23 +147,8 @@ EOF2
 
     sync
 
-    #
-    # The root filesystem and STATE are mounted, therefore a full
-    # partition-table reread is expected to fail. Add only partition 4.
-    #
-    if [ ! -b "$P4" ]; then
-        partx \
-            --add \
-            --nr 4 \
-            "$DISK" || return 1
-    fi
-
-    [ -b "$P4" ] || {
-        log "USERDATA partition did not appear"
-        return 1
-    }
-
-    validate_p4_geometry || return 1
+    register_partitions || return 1
+    validate_layout || return 1
 
     return 0
 }
@@ -167,12 +166,12 @@ format_if_pending()
     if [ -f "$PENDING" ]; then
         log "initializing USERDATA as exFAT"
 
-        mkfs.exfat -L "$USERDATA_LABEL" "$P4" || return 1
+        mkfs.exfat -L "$USERDATA_LABEL" "$P6" || return 1
         sync
     fi
 
-    FS_TYPE="$(blkid -s TYPE -o value "$P4" 2>/dev/null || true)"
-    FS_LABEL="$(blkid -s LABEL -o value "$P4" 2>/dev/null || true)"
+    FS_TYPE="$(blkid -s TYPE -o value "$P6" 2>/dev/null || true)"
+    FS_LABEL="$(blkid -s LABEL -o value "$P6" 2>/dev/null || true)"
 
     [ "$FS_TYPE" = "exfat" ] || {
         log "unexpected USERDATA filesystem: ${FS_TYPE:-<none>}"
@@ -198,7 +197,7 @@ mount_userdata()
     mount \
         -t exfat \
         -o rw,noatime,uid=0,gid=0,fmask=0022,dmask=0022 \
-        "$P4" \
+        "$P6" \
         "$MOUNT_DIR" || return 1
 
     return 0
@@ -266,13 +265,13 @@ start_userdata()
 {
     geometry || return 1
 
-    if [ ! -b "$P4" ]; then
+    if [ ! -b "$P6" ]; then
         #
-        # p4 may already exist in the on-disk MBR after an interrupted
-        # first boot while still being absent from the kernel table.
+        # The partitions may already exist in the on-disk MBR after an
+        # interrupted first boot while still being absent from the kernel.
         #
         if sfdisk -d "$DISK" 2>/dev/null |
-           grep -q "^${P4}[[:space:]]*:"; then
+           grep -q "^${P6}[[:space:]]*:"; then
 
             if [ ! -f "$PENDING" ]; then
                 log "pre-existing USERDATA partition not owned by initializer"
@@ -281,19 +280,16 @@ start_userdata()
 
             log "resuming USERDATA partition registration"
 
-            partx \
-                --add \
-                --nr 4 \
-                "$DISK" || return 1
+            register_partitions || return 1
         else
-            create_p4 || return 1
+            create_layout || return 1
         fi
     fi
 
-    validate_p4_geometry || return 1
+    validate_layout || return 1
     format_if_pending || return 1
 
-    if ! nuubos_exfat_prepare         "$P4"         /run/nuubos/storage/tf1.health
+    if ! nuubos_exfat_prepare         "$P6"         /run/nuubos/storage/tf1.health
     then
         log "USERDATA filesystem health check failed; refusing rw mount"
         return 1
@@ -303,10 +299,6 @@ start_userdata()
 
     # Second half of a scheduled factory reset (EPIC-049); no-op otherwise.
     /usr/sbin/nuubos-recoveryctl apply-pending userdata || true
-    # An installed update not yet confirmed by nuubUI counts this boot and
-    # is rolled back on the third (EPIC-048).
-    /usr/sbin/nuubos-update-apply boot || true
-
     validate_or_initialize_marker || return 1
     prepare_layout || return 1
 

@@ -1,4 +1,4 @@
-# Back up SD1 to the games card now (Settings > Storage)
+# Console backup now (Settings > System > Backup)
 COMMAND=/usr/sbin/nuubos-sd2-backup run manual
 SCOPE=device
 CANCEL=1

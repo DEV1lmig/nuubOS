@@ -1,5 +1,7 @@
 #!/bin/sh
 
+. /usr/lib/nuubos/partitions.sh
+
 STATE_DIR=/state
 USERS_DIR="$STATE_DIR/users"
 USER_RUNTIME_DIR=/run/nuubos/user
@@ -13,23 +15,9 @@ log()
     echo "nuubOS state: $*"
 }
 
-root_device()
-{
-    sed -n 's/.*root=\([^ ]*\).*/\1/p' /proc/cmdline
-}
-
 state_device()
 {
-    ROOT_DEV="$(root_device)"
-
-    case "$ROOT_DEV" in
-        /dev/mmcblk*p1)
-            printf '%sp3\n' "${ROOT_DEV%p1}"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    nuubos_partition "$NUUBOS_PART_STATE"
 }
 
 mount_state()
@@ -692,6 +680,10 @@ prepare_ssh()
 start_state()
 {
     mount_state || return 1
+
+    # An update whose new system slot did not start brings back the STATE
+    # copy taken before it, before anything reads STATE (EPIC-048).
+    /usr/sbin/nuubos-update-apply boot || log "update rollback failed"
 
     # A scheduled factory reset runs before anything reads STATE (EPIC-049).
     /usr/sbin/nuubos-recoveryctl apply-pending state || log "pending reset failed"

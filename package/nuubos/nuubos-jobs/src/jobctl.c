@@ -4,7 +4,11 @@
  *
  *   status | watch
  *   submit TYPE [ARG...]     prints the job id
- *   run TYPE [ARG...]        submit and wait; prints the result, exit 0 on success
+ *   run [--progress] TYPE [ARG...]
+ *                            submit and wait; prints the result, exit 0 on
+ *                            success; --progress first prints "@progress N"
+ *                            at each change (full-screen progress, e.g. the
+ *                            OOB restore)
  *   cancel ID | retry ID
  */
 
@@ -68,7 +72,7 @@ static int read_line(int fd, char *out, size_t size)
 static void usage(void)
 {
 	fprintf(stderr, "Usage: nuubos-jobctl status | watch | submit TYPE [ARG...] | "
-			"run TYPE [ARG...] | cancel ID | retry ID\n");
+			"run [--progress] TYPE [ARG...] | cancel ID | retry ID\n");
 }
 
 int main(int argc, char **argv)
@@ -93,11 +97,17 @@ int main(int argc, char **argv)
 		return 0;
 	}
 	if ((!strcmp(verb, "submit") || !strcmp(verb, "run")) && argc >= 3) {
-		char id[32];
-		int rc = 1;
+		char id[32], last[16] = "";
+		int rc = 1, first = 2;
+		int progress = !strcmp(verb, "run") && !strcmp(argv[2], "--progress");
 
-		snprintf(cmd, sizeof(cmd), "SUBMIT\t%s", argv[2]);
-		for (int i = 3; i < argc; i++) {
+		if (progress && argc < 4) {
+			usage();
+			return 2;
+		}
+		first += progress;
+		snprintf(cmd, sizeof(cmd), "SUBMIT\t%s", argv[first]);
+		for (int i = first + 1; i < argc; i++) {
 			strncat(cmd, "\t", sizeof(cmd) - strlen(cmd) - 1);
 			strncat(cmd, argv[i], sizeof(cmd) - strlen(cmd) - 1);
 		}
@@ -137,6 +147,11 @@ int main(int argc, char **argv)
 			}
 			if (n < 8 || strcmp(f[0], id))
 				continue;
+			if (progress && strcmp(f[3], last)) {
+				snprintf(last, sizeof(last), "%.15s", f[3]);
+				printf("@progress %s\n", last);
+				fflush(stdout);
+			}
 			if (!strcmp(f[2], "succeeded")) {
 				puts(f[6]);
 				rc = 0;

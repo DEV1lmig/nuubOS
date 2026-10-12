@@ -35,6 +35,16 @@ volume_name()
     printf '%s\n' "$name"
 }
 
+# The console backup may go to a USB drive: its status follows the drive,
+# a due automatic backup starts when it is connected. In the background:
+# udev must not wait.
+backup()
+{
+    [ -z "${NUUBOS_MEDIA_ROOT:-}" ] && [ -x /usr/sbin/nuubos-sd2-backup ] &&
+        /usr/sbin/nuubos-sd2-backup "$@" >/dev/null 2>&1 &
+    return 0
+}
+
 hotplug_add()
 {
     dev="$1"
@@ -51,6 +61,7 @@ hotplug_add()
     if mount -t "$type" -o "$opts" "/dev/$dev" "$MEDIA/$name"; then
         log "mounted /dev/$dev at $MEDIA/$name"
         notify media.connected "$name"
+        backup trigger attach
     else
         rmdir "$MEDIA/$name" 2>/dev/null
         log "mount /dev/$dev failed"
@@ -68,6 +79,7 @@ hotplug_remove()
     umount -l "$mp" 2>/dev/null
     rmdir "$mp" 2>/dev/null
     notify media.removed "${mp##*/}"
+    backup refresh
 }
 
 list()
@@ -94,6 +106,7 @@ eject()
     sync
     if umount "$mp" 2>/dev/null; then
         rmdir "$mp" 2>/dev/null
+        backup refresh
         echo OK
     else
         echo "ERR busy"

@@ -180,6 +180,8 @@ button { background: none; border: 0; padding: 0; cursor: pointer; text-align: i
 .sheet .row.sel .title { color: var(--primary); font-weight: 600; }
 .sheet .row .check { width: 16px; height: 16px; color: var(--primary); }
 .sheet .filter { margin: 0 2px 10px; }
+.sheet .notes { gap: 10px; margin-bottom: 12px; }
+.sheet .notes p { margin: 0 4px; line-height: 1.45; }
 .dialog { width: min(460px, 100%); background: var(--sc-high); border-radius: var(--xl); padding: 24px; box-shadow: 0 18px 50px rgba(0,0,0,.5); animation: rise .2s var(--ease); }
 .dialog h3 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
 .dialog p { margin: 0 0 16px; color: var(--text-secondary); font-size: 14px; }

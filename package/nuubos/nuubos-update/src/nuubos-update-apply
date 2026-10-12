@@ -1,28 +1,51 @@
 #!/bin/sh
-# nuubOS OTA updates, installation side (EPIC-048).
+# nuubOS OTA updates, installation side (EPIC-048): A/B system slots.
 #
-#   install    verify the downloaded payload, mark it for the next restart
-#   apply      pre-power hook (restart/poweroff): install a pending payload
-#   boot       S04, USERDATA mounted: count boots of an unconfirmed update;
-#              the third unconfirmed boot rolls it back and restarts
-#   confirm    nuubUI reached its ready state: the update is kept
-#   rollback   restore the system files the update replaced
-#   status     pending= applied= attempts= result= end=1
+#   install [restart]  job: back the console up to SD2 (when a writable
+#                      SD2 is there: restorable from Recovery or the OOB),
+#                      write the downloaded system image into the
+#                      inactive slot and read it back; the new slot is
+#                      tried on the next restart or power off ("restart":
+#                      restart as soon as the job has finished)
+#   apply ACTION       pre-power hook (restart/poweroff, never sleep):
+#                      copy STATE and give the new slot its trial boots
+#   boot               S03, STATE mounted: U-Boot came back to the old
+#                      slot, so the update failed: STATE gets its copy back
+#   confirm            nuubUI reached its ready state: the new slot is kept;
+#                      the outcome of an update (installed / rolled back)
+#                      is announced once with a notification
+#   status             slot= pending= trying= result= battery=ok|low end=1
 #
-# nuubOS has one system slot. Installing replaces the system files listed
-# in the verified payload (a tar of the root filesystem), after saving the
-# files it replaces into rollback.tar and listing the files it adds. STATE
-# and USERDATA are never part of a payload and mount points are never
-# touched. If the new system does not reach nuubUI within three boots, the
-# previous files come back. A kernel that cannot boot at all is not covered
-# (needs a boot counter in U-Boot): OTA is not production-ready until then.
-# NUUBOS_ROOT prefixes paths for the host test.
+# An installation needs the battery above MIN_BATTERY % (user request
+# 2026-10-12; a board without a battery always may).
+#
+# SD1 has two system slots (partitions.sh): A = p1, B = p5. U-Boot reads
+# nuubos-slot.cfg on NUUBOS_BOOT (good slot, slot on trial, tries left;
+# board/nuubos/platform/h700/uboot.fragment) and spends one try per boot
+# of the trial slot. A new system that does not reach nuubUI within
+# TRIES boots (kernel panics included: panic=10) is abandoned by U-Boot
+# itself and the previous slot boots again, with the copy of STATE taken
+# when the update was applied (the new system may have migrated it).
+# The running slot is never written; USERDATA is never touched.
+#
+# Test hooks: NUUBOS_ROOT prefixes paths, NUUBOS_CMDLINE replaces
+# /proc/cmdline, NUUBOS_TEST_SLOTS holds a.img/b.img instead of the slot
+# partitions, NUUBOS_TEST_BOOTPART is NUUBOS_BOOT as a folder.
 
 R="${NUUBOS_ROOT:-}"
 UPDATE_DIR="$R/userdata/.nuubos-update"
 STATE_DIR="$R/state/update"
+# On the running slot's own root: still there when U-Boot comes back to it.
+SNAPSHOT_DIR="$R/var/lib/nuubos-update"
 UPDATECTL="${NUUBOS_UPDATECTL:-/usr/bin/nuubos-updatectl}"
-MAX_ATTEMPTS=3
+SD2_BACKUP="${NUUBOS_SD2_BACKUP:-/usr/sbin/nuubos-sd2-backup}"
+NOTIFYCTL="${NUUBOS_NOTIFYCTL:-/usr/bin/nuubos-notifyctl}"
+TRIES=3
+MIN_BATTERY=30
+BATTERY_DIR="${NUUBOS_BATTERY_DIR:-/sys/class/power_supply}"
+MOUNT_DIR=/run/nuubos/update
+
+. "${NUUBOS_PARTITIONS:-/usr/lib/nuubos/partitions.sh}"
 
 log() { echo "nuubos-update: $*" >&2; }
 
@@ -35,137 +58,235 @@ state_set()
 
 state_clear() { rm -f "${STATE_DIR:?}/$1"; }
 
-# Payload members that belong to the system: no mount point or runtime tree.
-# Files and links of the payload, names exactly as in the archive (tar -T
-# matches them verbatim). Folders are created by tar for their files.
-system_members()
+running_slot()
 {
-    gzip -dc "$UPDATE_DIR/payload" | tar -tf - 2>/dev/null |
-        grep -Ev '^(\./)?(dev|proc|sys|run|tmp|state|userdata|media|mnt|var/run|var/log|var/tmp)(/|$)' |
-        grep -Ev '/$|^(\./)?$|(^|/)\.\.(/|$)'
+    case " $(cat "${NUUBOS_CMDLINE:-/proc/cmdline}" 2>/dev/null) " in
+        *" nuubos.slot=b "*) echo b ;;
+        *) echo a ;;
+    esac
+}
+
+other_slot() { [ "$1" = a ] && echo b || echo a; }
+
+slot_device()
+{
+    if [ -n "${NUUBOS_TEST_SLOTS:-}" ]; then
+        echo "$NUUBOS_TEST_SLOTS/$1.img"
+    elif [ "$1" = b ]; then
+        nuubos_partition "$NUUBOS_PART_SLOT_B"
+    else
+        nuubos_partition 1
+    fi
+}
+
+# nuubos-slot.cfg, read by U-Boot (env import -t): good slot, trial, tries.
+write_slot_cfg()
+{
+    if [ -n "${NUUBOS_TEST_BOOTPART:-}" ]; then
+        dir="$NUUBOS_TEST_BOOTPART"
+    else
+        dir="$MOUNT_DIR/boot"
+        dev="$(nuubos_partition "$NUUBOS_PART_BOOT")" || return 1
+        mkdir -p "$dir" && mount -t vfat -o rw,noatime "$dev" "$dir" || return 1
+    fi
+    printf 'nuubos_slot=%s\nnuubos_try=%s\nnuubos_tries=%s\n' "$1" "$2" "$3" > "$dir/nuubos-slot.cfg.tmp" &&
+        mv -f "$dir/nuubos-slot.cfg.tmp" "$dir/nuubos-slot.cfg" && sync
+    rc=$?
+    [ -n "${NUUBOS_TEST_BOOTPART:-}" ] || umount "$dir"
+    return "$rc"
+}
+
+# Per-device files kept on the system slot that the new one starts with.
+carry_over()
+{
+    [ -z "${NUUBOS_TEST_SLOTS:-}" ] || return 0
+    dir="$MOUNT_DIR/slot"
+    mkdir -p "$dir" && mount -t ext4 "$1" "$dir" || return 1
+    for f in etc/nuubos/splash.palette; do
+        [ -f "/$f" ] && cp -p "/$f" "$dir/$f"
+    done
+    sync
+    umount "$dir"
+}
+
+battery_ok()
+{
+    for b in "$BATTERY_DIR"/axp20x-battery "$BATTERY_DIR"/battery; do
+        [ -r "$b/capacity" ] || continue
+        [ "$(cat "$b/present" 2>/dev/null || echo 1)" = 1 ] || continue
+        [ "$(cat "$b/capacity" 2>/dev/null || echo 0)" -gt "$MIN_BATTERY" ]
+        return
+    done
+    return 0
+}
+
+# Job progress of a step mapped onto FROM..TO of the installation. ERRORS
+# = keep: its @error is the installation's; quiet: dropped (an optional
+# step). Exit status = the step's.
+step()
+{
+    from="$1"; to="$2"; errors="$3"; shift 3
+    { "$@"; echo "@rc $?"; } | awk -v a="$from" -v b="$to" -v errors="$errors" '
+        /^@rc / { rc = $2; next }
+        /^@progress [0-9]+/ { p = int(a + $2 * (b - a) / 100); if (p != last) { print "@progress " p; last = p; fflush() } next }
+        /^@error/ { if (errors == "keep") { print; fflush() } next }
+        /^@/ { next }
+        { print; fflush() }
+        END { exit rc }'
+}
+
+# Before the system changes, the console's data goes to the console backup's
+# destination when it is there (incremental, even with automatic backups
+# off). No destination, another SD1's backup there or a failed backup does
+# not stop the update: the previous system slot stays the safety net.
+pre_backup()
+{
+    [ -x "$SD2_BACKUP" ] || return 0
+    if step 0 15 quiet "$SD2_BACKUP" run update; then
+        log "SD2 backup before the update done"
+    else
+        log "no SD2 backup before the update"
+    fi
 }
 
 install()
 {
-    "$UPDATECTL" verify >/dev/null 2>&1 || { echo "ERR verify"; return 1; }
-    state_set pending 1 || { echo "ERR storage"; return 1; }
+    battery_ok || { echo "@error battery"; return 1; }
+    running="$(running_slot)"
+    target="$(other_slot "$running")"
+    dev="$(slot_device "$target")"
+    if [ -z "$dev" ] || [ ! -e "$dev" ] || grep -qs "^$dev " /proc/mounts; then
+        echo "@error slot"
+        return 1
+    fi
+    # The slot is about to be overwritten: nothing is pending on it now.
+    state_clear pending
+    state_clear target
+    [ -n "${NUUBOS_JOB_ID:-}" ] && echo "@progress 0"
+    pre_backup
+    step 15 100 keep "$UPDATECTL" write "$dev" || return 1
+    carry_over "$dev" || log "per-device files not carried over"
+    state_set target "$target" && state_set pending 1 || { echo "@error storage"; return 1; }
     sync
-    echo "OK restart-required"
+    log "slot $target installed, tried on the next restart"
+    if [ -n "${NUUBOS_JOB_ID:-}" ]; then echo "@result restart-required"; else echo "OK restart-required"; fi
+    # After the job reported success (its own session: not cancelled with it).
+    [ "${1:-}" = restart ] && setsid sh -c 'sleep 2; exec /usr/bin/nuubos-systemctl restart' >/dev/null 2>&1 &
+    return 0
 }
 
 apply()
 {
     [ "$(state_get pending)" = 1 ] || return 0
+    running="$(running_slot)"
+    target="$(state_get target)"
     state_clear pending
-    if ! "$UPDATECTL" verify >/dev/null 2>&1; then
-        state_set result verify-failed
-        log "payload no longer verifies, not installed"
-        return 1
-    fi
-    members="$UPDATE_DIR/members"
-    existing="$UPDATE_DIR/replaced"
-    added="$UPDATE_DIR/added"
-    system_members > "$members" || { state_set result failed; return 1; }
-    : > "$existing"; : > "$added"
-    while IFS= read -r raw; do
-        m="${raw#./}"
-        m="${m%/}"
-        [ -n "$m" ] || continue
-        if [ -e "$R/$m" ] || [ -L "$R/$m" ]; then
-            [ -d "$R/$m" ] && [ ! -L "$R/$m" ] || echo "$m" >> "$existing"
-        else
-            echo "$m" >> "$added"
-            # Folders the update creates go away with it.
-            d="${m%/*}"
-            while [ "$d" != "$m" ] && [ -n "$d" ] && [ ! -e "$R/$d" ]; do
-                echo "$d" >> "$added"
-                m="$d"; d="${d%/*}"
-            done
-        fi
-    done < "$members"
-    # The files about to be replaced, metadata kept inside the archive
-    # (USERDATA is exFAT and could not keep modes or links itself).
-    if ! tar -C "$R/" -cf "$UPDATE_DIR/rollback.tar" -T "$existing" 2>/dev/null; then
-        rm -f "$UPDATE_DIR/rollback.tar"
+    if [ "$target" != "$(other_slot "$running")" ]; then
         state_set result failed
-        log "rollback archive failed, not installed"
+        log "pending slot $target is not the inactive one, not tried"
+        return 1
+    fi
+    # The copy holds trying=target: a restore keeps knowing what failed.
+    state_set trying "$target"
+    mkdir -p "$SNAPSHOT_DIR"
+    if ! tar -C "$R/state" -cf "$SNAPSHOT_DIR/state.tar.tmp" . ||
+       ! mv "$SNAPSHOT_DIR/state.tar.tmp" "$SNAPSHOT_DIR/state.tar"; then
+        rm -f "$SNAPSHOT_DIR/state.tar.tmp"
+        state_clear trying
+        state_set result failed
+        log "STATE copy failed, not tried"
         return 1
     fi
     sync
-    state_set attempts 0
-    state_set applied 1
-    if ! gzip -dc "$UPDATE_DIR/payload" | tar -C "$R/" -xf - -T "$members" 2>/dev/null; then
-        log "extraction failed, rolling back"
-        rollback
+    if ! write_slot_cfg "$running" "$target" "$TRIES"; then
+        state_clear trying
+        state_set result failed
+        log "NUUBOS_BOOT not writable, not tried"
         return 1
     fi
+    state_set result trying
     sync
-    state_set result installed
-    log "update installed, waiting for confirmation"
-    return 0
+    log "slot $target tried on the next boot"
 }
 
-rollback()
+restore_state()
 {
-    [ -f "$UPDATE_DIR/rollback.tar" ] || { state_clear applied; return 1; }
-    tar -C "$R/" -xf "$UPDATE_DIR/rollback.tar" 2>/dev/null
-    # Files the update added; folders only when empty again.
-    while IFS= read -r m; do
-        [ -n "$m" ] || continue
-        p="$R/$m"
-        if [ -d "$p" ] && [ ! -L "$p" ]; then
-            rmdir "$p" 2>/dev/null
-        else
-            rm -f "$p"
-        fi
-    done <<EOT
-$(sort -r "$UPDATE_DIR/added")
-EOT
-    sync
-    state_clear applied
-    state_clear attempts
-    state_set result rolled-back
-    rm -f "$UPDATE_DIR/rollback.tar" "$UPDATE_DIR/members" "$UPDATE_DIR/replaced" "$UPDATE_DIR/added"
-    log "previous system restored"
+    for e in "$R"/state/* "$R"/state/.[!.]*; do
+        [ -e "$e" ] || [ -L "$e" ] || continue
+        [ "${e##*/}" = lost+found ] && continue
+        rm -rf "$e"
+    done
+    tar -C "$R/state" -xf "$SNAPSHOT_DIR/state.tar"
 }
 
 boot()
 {
-    [ "$(state_get applied)" = 1 ] || return 0
-    n=$(( $(state_get attempts || echo 0) + 1 ))
-    state_set attempts "$n"
-    if [ "$n" -ge "$MAX_ATTEMPTS" ]; then
-        log "update not confirmed after $n boots"
-        rollback
-        [ -z "$R" ] && reboot
+    running="$(running_slot)"
+    trying="$(state_get trying)"
+    # A restore cut short by a power loss is finished first.
+    if [ ! -f "$SNAPSHOT_DIR/restoring" ]; then
+        [ -n "$trying" ] || return 0
+        # A trial boot: U-Boot counts it.
+        [ "$trying" != "$running" ] || return 0
+        touch "$SNAPSHOT_DIR/restoring" 2>/dev/null
+        sync
     fi
+    log "slot $(other_slot "$running") did not start, back on slot $running"
+    if [ -f "$SNAPSHOT_DIR/state.tar" ]; then
+        restore_state || log "STATE copy not fully restored"
+    fi
+    state_clear trying
+    state_set result rolled-back
+    state_set announce rolled-back
+    # U-Boot already gave up the trial; make it explicit.
+    write_slot_cfg "$running" none 0 || log "NUUBOS_BOOT not writable"
+    sync
+    rm -f "$SNAPSHOT_DIR/restoring"
+}
+
+# The outcome of the last update, once, when nuubUI is up (notifyd runs).
+announce()
+{
+    outcome="$(state_get announce)"
+    case "$outcome" in
+        installed)
+            version="$(sed -n 's/^VERSION_ID=//p' "$R/etc/os-release" 2>/dev/null | tr -d '"')"
+            "$NOTIFYCTL" post update.result update.installed "version=$version" >/dev/null 2>&1 || return 0 ;;
+        rolled-back)
+            "$NOTIFYCTL" post update.result update.rolledback >/dev/null 2>&1 || return 0 ;;
+        *) return 0 ;;
+    esac
+    state_clear announce
 }
 
 confirm()
 {
-    [ "$(state_get applied)" = 1 ] || { echo OK; return 0; }
-    state_clear applied
-    state_clear attempts
-    state_set result ok
-    rm -f "$UPDATE_DIR/rollback.tar" "$UPDATE_DIR/members" "$UPDATE_DIR/replaced" "$UPDATE_DIR/added" \
-          "$UPDATE_DIR/payload"
-    sync
+    running="$(running_slot)"
+    if [ "$(state_get trying)" = "$running" ]; then
+        write_slot_cfg "$running" none 0 || { echo "ERR boot"; return 1; }
+        state_clear trying
+        state_set result ok
+        state_set announce installed
+        rm -f "$UPDATE_DIR/payload" "$UPDATE_DIR/payload.part"
+        sync
+        log "slot $running kept"
+    fi
+    announce
     echo OK
 }
 
 case "${1:-}" in
-    install) install ;;
+    install) install "${2:-}" ;;
     apply)
-        # Called with the lifecycle action; Sleep never installs.
+        # Called with the lifecycle action; Sleep never applies.
         case "${2:-restart}" in restart|poweroff) apply ;; esac
         ;;
     boot) boot ;;
     confirm) confirm ;;
-    rollback) rollback && echo OK ;;
     status)
-        printf 'pending=%s\napplied=%s\nattempts=%s\nresult=%s\nend=1\n' \
-            "$(state_get pending || echo 0)" "$(state_get applied || echo 0)" \
-            "$(state_get attempts || echo 0)" "$(state_get result)"
+        battery=ok; battery_ok || battery=low
+        printf 'slot=%s\npending=%s\ntrying=%s\nresult=%s\nbattery=%s\nend=1\n' \
+            "$(running_slot)" "$(state_get pending || echo 0)" "$(state_get trying)" "$(state_get result)" "$battery"
         ;;
-    *) echo "Usage: nuubos-update-apply install|apply [ACTION]|boot|confirm|rollback|status" >&2; exit 2 ;;
+    *) echo "Usage: nuubos-update-apply install [restart]|apply [ACTION]|boot|confirm|status" >&2; exit 2 ;;
 esac

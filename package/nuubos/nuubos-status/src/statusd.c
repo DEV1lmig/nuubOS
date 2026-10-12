@@ -592,16 +592,16 @@ static int make_uevent_socket(void)
  * fork: no child to reap here.
  */
 #define TIME_SYNC "/usr/libexec/nuubos-status-time-sync"
+#define UPDATE_AUTO "/usr/libexec/nuubos-update-auto"
 #define TIME_SYNC_EVERY_MINUTES 60
 
-static void maybe_time_sync(const struct topbar_state *state)
+/* Run a helper detached (double fork): statusd never waits for the network. */
+static void spawn_detached(const char *path)
 {
-    static int minutes;
     pid_t pid;
 
-    if (++minutes < TIME_SYNC_EVERY_MINUTES || strcmp(state->wifi_state, "connected") != 0)
+    if (access(path, X_OK) != 0)
         return;
-    minutes = 0;
     pid = fork();
     if (pid == 0) {
         sigset_t none;
@@ -609,13 +609,26 @@ static void maybe_time_sync(const struct topbar_state *state)
         sigemptyset(&none);
         sigprocmask(SIG_SETMASK, &none, NULL);
         if (fork() == 0) {
-            execl(TIME_SYNC, TIME_SYNC, (char *)NULL);
+            execl(path, path, (char *)NULL);
             _exit(127);
         }
         _exit(0);
     }
     if (pid > 0)
         (void)waitpid(pid, NULL, 0);
+}
+
+/* Once an hour while Wi-Fi is connected: the network time sync and the
+ * daily update check (each helper decides whether it is due). */
+static void maybe_time_sync(const struct topbar_state *state)
+{
+    static int minutes;
+
+    if (++minutes < TIME_SYNC_EVERY_MINUTES || strcmp(state->wifi_state, "connected") != 0)
+        return;
+    minutes = 0;
+    spawn_detached(TIME_SYNC);
+    spawn_detached(UPDATE_AUTO);
 }
 
 static int arm_minute_timer(int fd)

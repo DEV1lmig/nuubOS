@@ -55,6 +55,7 @@ int main(int argc, char **argv)
                 "Usage: nuubos-systemctl status | set-profile <auto|battery-saver> | "
                 "set-auto-battery <0-50> | set-charge-limit <80-100> | set-sleep <min> | "
                 "storage-changed | set-storage-backup <0|1> | set-storage-backup-item <item> <0|1> | "
+                "set-storage-backup-dest <sd2|sd1|usb> | "
                 "sd2 <eject|ignore|use> | storage-backup-archive | "
                 "sleep | restart | poweroff | activity | reset-system-settings\n");
         close(fd);
@@ -77,6 +78,8 @@ int main(int argc, char **argv)
         snprintf(command, sizeof(command), "STORAGE CHANGED\n");
     else if (!strcmp(argv[1], "set-storage-backup") && argc == 3)
         snprintf(command, sizeof(command), "SET STORAGE BACKUP %s\n", argv[2]);
+    else if (!strcmp(argv[1], "set-storage-backup-dest") && argc == 3)
+        snprintf(command, sizeof(command), "SET STORAGE BACKUP_DEST %s\n", argv[2]);
     else if (!strcmp(argv[1], "set-storage-backup-item") && argc == 4)
         snprintf(command, sizeof(command), "SET STORAGE BACKUP_ITEM %s %s\n", argv[2], argv[3]);
     else if (!strcmp(argv[1], "sd2") && argc == 3 &&

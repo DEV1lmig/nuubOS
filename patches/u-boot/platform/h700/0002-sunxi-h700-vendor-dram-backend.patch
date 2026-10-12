@@ -20,6 +20,15 @@ the qualified timing and training paths.
 Hardware baseline: RG35XX Pro, RG CubeXX and RG40XX-V reach userspace
 with this final DRAM state.
 
+Provenance: the register sequences, DRAM.ext parameter blocks, PHY
+pin maps and training/validation algorithms were obtained by analysing
+the boot0 of the stock Anbernic H700 firmware, for interoperability of
+this independently written bootloader with the H700 DRAM controller (EU
+Directive 2009/24/EC art. 6, Italian L. 633/1941 art. 64-quater). The
+code is an independent implementation in U-Boot style; no vendor code
+or binary is included. boot0 addresses in comments document which
+behaviour each function reproduces.
+
 Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
 
 ---
@@ -202,7 +211,7 @@ index 80004f1..557c015 100644
 -	clock_set_pll1(408000000);
 +	/*
 +	 * H700 boot0 configures PLL_CPUX to 1008 MHz before DRAM training.
-+	 * Match the vendor pre-DRAM CPU clock for the clean-room H700 DRAM
++	 * Match the vendor pre-DRAM CPU clock for the H700 DRAM
 +	 * backend while keeping the upstream H616 safe clock unchanged.
 +	 */
 +	if (IS_ENABLED(CONFIG_NUUBOS_H700_VENDOR_DRAM))
@@ -508,7 +517,7 @@ index 42a0550..7598401 100644
 -		mctl_await_completion((u32 *)(SUNXI_DRAM_PHY0_BASE + 0x188), val, val);
 +#ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
 +/*
-+ * Literal clean-room translation of boot0 0x259b0.
++ * Reimplements the register sequence of boot0 0x259b0.
 + *
 + * para2 is consumed directly, like boot0:
 + *   bit 0  -> half-width completion mask
@@ -615,7 +624,7 @@ index 42a0550..7598401 100644
  
 +#ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
 +/*
-+ * Literal clean-room translation of boot0 0x25ac8.
++ * Reimplements the register sequence of boot0 0x25ac8.
 + *
 + * Unlike the H616 helper, boot0 consumes para2 directly:
 + *   para2 bit 0  -> half-width calibration completion mask (0x3)
@@ -1395,7 +1404,7 @@ index 42a0550..7598401 100644
 + *     -> 0x26458 controller post
 + *
 + * Low-level helpers already proven register-equivalent are reused, but
-+ * the H700 sequence is owned here so later clean-room replacements do not
++ * the H700 sequence is owned here so later independent replacements do not
 + * perturb the upstream H616 path.
 + */
 +static bool h700_vendor_ctrl_init(const struct dram_para *para,
@@ -1930,7 +1939,7 @@ index 42a0550..7598401 100644
 +}
 +
 +/*
-+ * Clean-room translation of boot0 0x26e60 for the qualified H700 LPDDR4
++ * Reimplementation of boot0 0x26e60 for the qualified H700 LPDDR4
 + * profile and its autoscan temporary geometries.  The verified CubeXX /
 + * RG40XX-V TPR13 upper selector is zero, so the vendor's alternate row-map
 + * submodes are intentionally not guessed here.
@@ -2340,7 +2349,7 @@ index 42a0550..7598401 100644
 +	return !((mismatch >> (lane * 8)) & 0xff);
 +}
 +
-+/* Clean-room translation of boot0 helper 0x236d8. */
++/* Reimplements boot0 helper 0x236d8. */
 +static bool h700_vendor_validate(u32 half_size, unsigned int bytes,
 +				 unsigned int lane, bool full)
 +{
@@ -2512,7 +2521,7 @@ index 42a0550..7598401 100644
 +}
 +
 +/*
-+ * Clean-room translation of the LPDDR4 R_2d branch in boot0 0x238b4.
++ * Reimplementation of the LPDDR4 R_2d branch in boot0 0x238b4.
 + * For the 32-bit H700 target boot0 tunes TPR6 byte 3 and TPR12 byte 2.
 + * The scratch-buffer aliasing and both vendor eye-selection scans are
 + * deliberately retained instead of normalising them into a clean matrix.
@@ -2821,7 +2830,7 @@ index 42a0550..7598401 100644
 +}
 +
 +/*
-+ * Clean-room translation of boot0 R_2st.  Keep its 4/2/1 state machine
++ * Reimplementation of boot0 R_2st.  Keep its 4/2/1 state machine
 + * literally, including the existing R_1st bounds as fallbacks and the
 + * modulo-64 initial delay calculation.
 + */
@@ -3046,7 +3055,7 @@ index 42a0550..7598401 100644
 +	return true;
 +}
 +
-+/* Clean-room translation of boot0 wrapper 0x24770: four in-place tries. */
++/* Reimplements boot0 wrapper 0x24770: four in-place tries. */
 +static bool h700_vendor_dst(struct dram_para *runtime,
 +			    struct dram_config *config, u8 min_window)
 +{
@@ -3735,7 +3744,7 @@ index 0000000..569800f
 @@ -0,0 +1,118 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
-+ * Allwinner H700 DDR4 timings, clean-room translated from vendor boot0.
++ * Allwinner H700 DDR4 timings, reimplemented from vendor boot0 behaviour.
 + */
 +
 +#include <asm/arch/cpu.h>

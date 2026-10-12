@@ -4,10 +4,14 @@
  * (docs/dev/platform.md "SD2 = games card"):
  *
  *   64 Storage          SD1, the games card (SD2) and its actions
- *   62 Backup           its first section, BACKUP TO SD2, and
- *   28 Recovery         its "Restore from SD2" row (both pages are
- *                       filesui's: backup_rows/restore_rows/backup_confirm)
- *   59 Backup Content   what the backup to SD2 includes
+ *   62 Backup           the console backup (one for everything, user
+ *                       request 2026-10-12): automatic, destination
+ *                       SD2/SD1/USB, content, Back Up Now
+ *   28 Recovery         its RESTORE section: a backup from any place,
+ *                       then the whole console or one profile (both
+ *                       pages are filesui's: backup_rows/restore_rows/
+ *                       backup_confirm)
+ *   59 Backup Content   what the backup includes
  *
  * The state comes from the nuubos-systemd snapshot (storage.*), pushed on
  * every change; commands go to nuubos-systemd (eject, ignore, use, backup
@@ -24,7 +28,7 @@ use crate::gameui::{
 use crate::{navigate_settings_view, open_settings_choice, tr, tr_arg, GenRow, HomeWindow};
 use slint::ComponentHandle;
 use std::cell::RefCell;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 pub const STORAGE_VIEW: i32 = 64;
@@ -57,6 +61,9 @@ pub struct Storage {
     pub backup_last: i64,
     pub backup_result: String,
     pub backup_card: String,
+    pub backup_dest: String,
+    pub backup_available: bool,
+    pub backup_found: bool,
 }
 
 impl Storage {
@@ -79,12 +86,11 @@ impl Storage {
             "storage.backup.last" => self.backup_last = value.parse().unwrap_or(0),
             "storage.backup.result" => self.backup_result = value.to_owned(),
             "storage.backup.card" => self.backup_card = value.to_owned(),
+            "storage.backup.dest" => self.backup_dest = value.to_owned(),
+            "storage.backup.available" => self.backup_available = value == "1",
+            "storage.backup.found" => self.backup_found = value == "1",
             _ => {}
         }
-    }
-
-    fn mounted(&self) -> bool {
-        self.state == "ready" || self.state == "readonly"
     }
 
     fn has_item(&self, item: &str) -> bool {
@@ -99,10 +105,51 @@ struct State {
     busy: String,
     /* The card whose first-seen question was already asked. */
     asked: String,
-    /* Backups on the card: (dir, label), this console's first. */
+    /* Backups found: (dir, label), this console's first. */
     backups: Vec<(String, String)>,
+    /* The profiles of the chosen backup: (id, name). */
+    backup_users: Vec<(String, String)>,
     /* The card the format confirmation is for. */
     format_cid: String,
+    /* The backup being restored and its profile ("" = the whole console;
+     * also for Try Again on the restore screen). */
+    restore_dir: String,
+    restore_user: String,
+    /* The UI context before the operation screen (back on Close). */
+    op_return_context: String,
+}
+
+/* The full-screen operation screen (SD2 restore, system update) owns the
+ * input while it is open. */
+static OP_SCREEN: AtomicBool = AtomicBool::new(false);
+pub const OP_RESTORE: i32 = 0;
+pub const OP_UPDATE: i32 = 1;
+
+pub fn op_screen_active() -> bool {
+    OP_SCREEN.load(Ordering::SeqCst)
+}
+
+/* Open the operation screen at 0 %. */
+pub fn show_op_screen(ui: &HomeWindow, kind: i32) {
+    /* The Quick Menu stays closed and shows no card meanwhile. */
+    if !OP_SCREEN.load(Ordering::SeqCst) {
+        let current = std::fs::read_to_string(crate::UI_CONTEXT).unwrap_or_default().trim().to_owned();
+        STATE.with(|st| st.borrow_mut().op_return_context = current);
+        crate::write_ui_context("operation");
+    }
+    OP_SCREEN.store(true, Ordering::SeqCst);
+    ui.set_op_kind(kind);
+    ui.set_op_oob(crate::oob_active());
+    ui.set_op_failed(false);
+    ui.set_op_progress(0);
+    ui.set_op_index(0);
+    ui.set_op_screen_open(true);
+}
+
+/* The operation failed: Try Again | Start from Scratch / Close. */
+pub fn op_failed(ui: &HomeWindow) {
+    ui.set_op_failed(true);
+    ui.set_op_index(0);
 }
 
 thread_local! {
@@ -220,22 +267,45 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
     rows
 }
 
-/* BACKUP TO SD2 (System → Backup & Restore): none without a card slot. */
-fn sd2_backup_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
+fn dest_label(ui: &HomeWindow, dest: &str) -> String {
+    match dest {
+        "sd2" => tr(ui, 64, "SD2"),
+        "usb" => tr(ui, 1016, "USB Drive"),
+        _ => tr(ui, 912, "SD1"),
+    }
+}
+
+/* Where a backup is (nuubos-sd2-backup list): sd2, sd1 or usb:<volume>. */
+fn where_label(ui: &HomeWindow, place: &str) -> String {
+    match place.strip_prefix("usb:") {
+        Some(volume) => crate::filesui::volume_label(ui, volume),
+        None => dest_label(ui, place),
+    }
+}
+
+/* The console backup (System → Backup). */
+fn console_backup_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     let s = &st.storage;
     let mut rows: Vec<(String, GenRow, bool)> = Vec::new();
-    if !s.slot {
-        return rows;
-    }
     let armed = armed();
     let busy = !st.busy.is_empty();
-    let writable = s.state == "ready";
+    let writable = s.backup_available;
+    let missing = match s.backup_dest.as_str() {
+        "sd2" => tr(ui, 935, "Insert an SD2 card to back up"),
+        "usb" => tr(ui, 1021, "Connect a USB drive to back up"),
+        _ => String::new(),
+    };
     let mut auto = toggle(tr(ui, 69, "Automatic Backup"), s.backup_enabled,
-        if s.mounted() { last_backup(ui, s) } else { tr(ui, 935, "Insert an SD2 card to back up") });
+        if writable { last_backup(ui, s) } else { missing });
     if s.backup_result == "failed" {
         auto.detail = tr(ui, 968, "The backup could not be completed").into();
     }
     rows.push(("sd2-auto".into(), auto, true));
+    let mut dest = nav(tr(ui, 1015, "Destination"), dest_label(ui, &s.backup_dest));
+    if s.backup_dest == "sd1" {
+        dest.detail = tr(ui, 1022, "Lost if SD1 is formatted or replaced").into();
+    }
+    rows.push(("sd2-dest".into(), dest, !busy));
     let on = ITEMS.iter().filter(|i| s.has_item(i)).count();
     rows.push(("sd2-content".into(), nav(tr(ui, 936, "Backup Content"),
         if on == ITEMS.len() { tr(ui, 937, "All") }
@@ -255,21 +325,22 @@ fn sd2_backup_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
 }
 
 pub fn backup_rows(ui: &HomeWindow) -> Vec<(String, GenRow, bool)> {
-    STATE.with(|st| sd2_backup_rows(ui, &st.borrow()))
+    STATE.with(|st| console_backup_rows(ui, &st.borrow()))
 }
 
-/* Recovery: "Restore from SD2" while the card holds a usable backup. */
+/* Recovery: Restore from Backup while a backup can be seen anywhere. */
 pub fn restore_rows(ui: &HomeWindow) -> Vec<(String, GenRow, bool)> {
     STATE.with(|st| {
         let st = st.borrow();
-        let s = &st.storage;
-        if !s.slot || !matches!(s.backup_card.as_str(), "linked" | "conflict" | "restorable") {
-            return Vec::new();
+        if !st.storage.backup_found {
+            let mut none = row(tr(ui, 634, "No backups found"), String::new(), String::new());
+            none.enabled = false;
+            return vec![("sd2-restore-none".into(), none, false)];
         }
-        let mut restore = nav(tr(ui, 940, "Restore from SD2"),
+        let mut restore = nav(tr(ui, 1017, "Restore from Backup"),
             if st.busy == "restore" { tr(ui, 965, "Restoring…") } else { String::new() });
-        restore.detail = tr(ui, 941, "Replaces the data on SD1 with a backup").into();
-        vec![("sd2-restore".into(), restore, s.mounted() && st.busy.is_empty())]
+        restore.detail = tr(ui, 1020, "The whole console or a single profile").into();
+        vec![("sd2-restore".into(), restore, st.busy.is_empty())]
     })
 }
 
@@ -398,36 +469,83 @@ fn start_backup(ui: &HomeWindow) {
     });
 }
 
-/* Restore, from Settings or the OOB: every service reloads the restored
- * settings through the central restart path. */
-pub fn start_restore(ui: &HomeWindow, dir: String) {
-    job(ui, "restore", vec!["sd2-restore".into(), dir], |ui, ok, out| {
-        if ok && out == "restart-required" {
-            notice(ui, tr(ui, 638, "Restore complete"));
+/* Restore, from Settings or the OOB, on the full-screen restore screen
+ * (user request 2026-10-12): it follows the job's progress (jobctl
+ * --progress: jobd's own events, no polling) and owns the input; every
+ * service reloads the restored settings through the central restart path,
+ * which takes over from the screen. */
+pub fn start_restore(ui: &HomeWindow, dir: String, user: String) {
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.busy = "restore".to_owned();
+        st.restore_dir = dir.clone();
+        st.restore_user = user.clone();
+    });
+    show_op_screen(ui, OP_RESTORE);
+    render(ui);
+    let mut args = vec!["sd2-restore".to_owned(), dir];
+    if !user.is_empty() {
+        args.push(user);
+    }
+    crate::gameui::job_with_progress(ui, args, |ui, p| ui.set_op_progress(p), |ui, result| {
+        STATE.with(|st| st.borrow_mut().busy.clear());
+        if result == "restart-required" {
+            ui.set_op_progress(100);
             thread::spawn(|| { let _ = run_tool(SYSTEMCTL, &["restart"], None); });
         } else {
-            notice(ui, tr(ui, 640, "The backup could not be restored"));
+            op_failed(ui);
         }
+        render(ui);
     });
 }
 
-/* Backups on the card, this console's first, then the newest. */
+/* Input on the operation screen: nothing while it runs; after a failure
+ * Try Again | Start from Scratch (OOB restore) / Close. */
+pub fn handle_op_action(ui: &HomeWindow, action: &str) {
+    if !ui.get_op_failed() {
+        return;
+    }
+    match action {
+        "menu_left" | "menu_up" => ui.set_op_index(0),
+        "menu_right" | "menu_down" => ui.set_op_index(1),
+        "menu_confirm" if ui.get_op_index() == 0 && ui.get_op_kind() == OP_UPDATE => crate::gameui::start_install(ui),
+        "menu_confirm" if ui.get_op_index() == 0 => {
+            let (dir, user) = STATE.with(|st| {
+                let st = st.borrow();
+                (st.restore_dir.clone(), st.restore_user.clone())
+            });
+            start_restore(ui, dir, user);
+        }
+        "menu_confirm" => {
+            /* The OOB goes on as a new setup; Settings is back where it was. */
+            OP_SCREEN.store(false, Ordering::SeqCst);
+            let context = STATE.with(|st| std::mem::take(&mut st.borrow_mut().op_return_context));
+            crate::write_ui_context(if context.is_empty() { "settings" } else { &context });
+            ui.set_op_screen_open(false);
+        }
+        _ => {}
+    }
+}
+
+/* Backups on SD2, SD1 and USB drives, this console's first, then the
+ * newest. */
 fn load_backups(ui: &HomeWindow, then: fn(&HomeWindow)) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let out = run_tool(BACKUPCTL, &["list"], None);
-        let mut list: Vec<(bool, i64, String, String, String)> = out.lines()
+        let mut list: Vec<(bool, i64, String, String, String, String)> = out.lines()
             .filter_map(|l| l.strip_prefix("backup="))
             .map(|l| l.split('\t').collect::<Vec<_>>())
-            .filter(|f| f.len() >= 6)
-            .map(|f| (f[5] == "1", f[3].parse().unwrap_or(0), f[0].to_owned(), f[2].to_owned(), f[4].replace(',', ", ")))
+            .filter(|f| f.len() >= 7)
+            .map(|f| (f[5] == "1", f[3].parse().unwrap_or(0), f[0].to_owned(), f[2].to_owned(), f[4].replace(',', ", "),
+                f[6].to_owned()))
             .collect();
         list.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let backups = list.into_iter().map(|(this, created, dir, model, users)| {
+            let backups = list.into_iter().map(|(this, created, dir, model, users, place)| {
                 let who = if this { tr(&ui, 962, "This console") } else { model };
-                let mut label = format!("{who} • {}", days_ago(&ui, created));
+                let mut label = format!("{who} • {} • {}", days_ago(&ui, created), where_label(&ui, &place));
                 if !users.is_empty() {
                     label.push_str(&format!(" • {users}"));
                 }
@@ -445,14 +563,34 @@ fn choose_backup(ui: &HomeWindow) {
         return;
     }
     let first = options[0].0.clone();
-    open_settings_choice(ui, "sd2-restore", &tr(ui, 940, "Restore from SD2"), options, &first);
+    open_settings_choice(ui, "sd2-restore", &tr(ui, 1017, "Restore from Backup"), options, &first);
 }
 
-/* OOB, after the language: a backup on the card can bring everything back
- * instead of a new setup. */
+/* The chosen backup: the whole console or one of its profiles. */
+fn choose_scope(ui: &HomeWindow, dir: String) {
+    STATE.with(|st| st.borrow_mut().restore_dir = dir.clone());
+    let weak = ui.as_weak();
+    thread::spawn(move || {
+        let out = run_tool(BACKUPCTL, &["users", &dir], None);
+        let users: Vec<(String, String)> = out.lines()
+            .filter_map(|l| l.strip_prefix("user="))
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(id, name)| (id.to_owned(), name.to_owned()))
+            .collect();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut options = vec![("all".to_owned(), tr(&ui, 1018, "Entire Console"))];
+            options.extend(users.iter().cloned());
+            STATE.with(|st| st.borrow_mut().backup_users = users);
+            open_settings_choice(&ui, "sd2-restore-scope", &tr(&ui, 1019, "What do you want to restore?"), options, "all");
+        });
+    });
+}
+
+/* OOB, after the language: a backup (SD2, USB drive) can bring everything
+ * back instead of a new setup. */
 pub fn offer_restore(ui: &HomeWindow) -> bool {
-    let card = STATE.with(|st| st.borrow().storage.backup_card.clone());
-    if !matches!(card.as_str(), "linked" | "conflict" | "restorable") {
+    if !STATE.with(|st| st.borrow().storage.backup_found) {
         return false;
     }
     load_backups(ui, |ui| {
@@ -462,7 +600,7 @@ pub fn offer_restore(ui: &HomeWindow) -> bool {
         }
         let first = options[0].0.clone();
         options.push(("scratch".to_owned(), tr(ui, 964, "Start from Scratch")));
-        open_settings_choice(ui, "sd2-oob-restore", &tr(ui, 963, "Backup found on SD2"), options, &first);
+        open_settings_choice(ui, "sd2-oob-restore", &tr(ui, 1023, "Backup found"), options, &first);
     });
     true
 }
@@ -511,8 +649,8 @@ fn confirm(ui: &HomeWindow, view: i32, key: &str) {
     }
 }
 
-/* Confirm on a BACKUP TO SD2 row of Backup or on Restore from SD2 of
- * Recovery; false when the key is not one of them. */
+/* Confirm on a row of Backup or on Restore from Backup of Recovery; false
+ * when the key is not one of them. */
 pub fn backup_confirm(ui: &HomeWindow, key: &str) -> bool {
     let s = STATE.with(|st| st.borrow().storage.clone());
     match key {
@@ -520,6 +658,15 @@ pub fn backup_confirm(ui: &HomeWindow, key: &str) -> bool {
             STATE.with(|st| st.borrow_mut().storage.backup_enabled = !s.backup_enabled);
             render(ui);
             system(ui, vec!["set-storage-backup".into(), if s.backup_enabled { "0" } else { "1" }.into()], |_, _| {});
+        }
+        "sd2-dest" => {
+            let mut options = Vec::new();
+            if s.slot {
+                options.push(("sd2".to_owned(), dest_label(ui, "sd2")));
+            }
+            options.push(("sd1".to_owned(), dest_label(ui, "sd1")));
+            options.push(("usb".to_owned(), dest_label(ui, "usb")));
+            open_settings_choice(ui, "sd2-dest", &tr(ui, 1015, "Destination"), options, &s.backup_dest);
         }
         "sd2-content" => show(ui, CONTENT_VIEW),
         "sd2-backup" => start_backup(ui),
@@ -585,24 +732,38 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
                 start_format(ui, cid);
             }
         }
-        "sd2-restore" => {
-            let label = STATE.with(|st| st.borrow().backups.iter().find(|b| b.0 == value).map(|b| b.1.clone()))
-                .unwrap_or_default();
-            STATE.with(|st| st.borrow_mut().format_cid = value);
+        "sd2-dest" => {
+            /* Shown at once; the snapshot confirms. */
+            STATE.with(|st| st.borrow_mut().storage.backup_dest = value.clone());
+            render(ui);
+            system(ui, vec!["set-storage-backup-dest".into(), value], |_, _| {});
+        }
+        "sd2-restore" => choose_scope(ui, value),
+        "sd2-restore-scope" => {
+            let label = STATE.with(|st| {
+                let st = st.borrow();
+                if value == "all" {
+                    let backup = st.backups.iter().find(|b| b.0 == st.restore_dir).map(|b| b.1.clone()).unwrap_or_default();
+                    format!("{} • {backup}", tr(ui, 1018, "Entire Console"))
+                } else {
+                    st.backup_users.iter().find(|u| u.0 == value).map(|u| u.1.clone()).unwrap_or_default()
+                }
+            });
+            STATE.with(|st| st.borrow_mut().restore_user = if value == "all" { String::new() } else { value });
             open_settings_choice(ui, "sd2-restore-confirm", &tr_arg(ui, 960, "Restore \"{0}\"?", &label),
                 vec![("restore".to_owned(), tr(ui, 635, "Restore")), ("cancel".to_owned(), tr(ui, 619, "Cancel"))],
                 "cancel");
         }
         "sd2-restore-confirm" if value == "restore" => {
-            let dir = STATE.with(|st| std::mem::take(&mut st.borrow_mut().format_cid));
+            let (dir, user) = STATE.with(|st| {
+                let st = st.borrow();
+                (st.restore_dir.clone(), st.restore_user.clone())
+            });
             if !dir.is_empty() {
-                start_restore(ui, dir);
+                start_restore(ui, dir, user);
             }
         }
-        "sd2-oob-restore" if value != "scratch" => {
-            crate::oob_notice(ui, tr(ui, 965, "Restoring…"));
-            start_restore(ui, value);
-        }
+        "sd2-oob-restore" if value != "scratch" => start_restore(ui, value, String::new()),
         _ => {}
     }
 }

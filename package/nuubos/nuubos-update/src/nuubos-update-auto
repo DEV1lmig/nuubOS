@@ -1,0 +1,44 @@
+#!/bin/sh
+# Daily automatic update check (EPIC-048, user request 2026-10-12).
+#
+# Started by nuubos-statusd once an hour while Wi-Fi is connected (the
+# same hook as the network time sync). Checks at most once a day, only
+# when the check is on (nuubos-updatectl auto) and the clock is valid;
+# a new version is announced once with a notification (update.available).
+# Nothing is downloaded or installed automatically.
+# NUUBOS_ROOT prefixes paths, NUUBOS_UPDATECTL / NUUBOS_NOTIFYCTL replace
+# the tools (host test).
+
+R="${NUUBOS_ROOT:-}"
+STATE_DIR="$R/state/update"
+UPDATECTL="${NUUBOS_UPDATECTL:-/usr/bin/nuubos-updatectl}"
+NOTIFYCTL="${NUUBOS_NOTIFYCTL:-/usr/bin/nuubos-notifyctl}"
+DAY=86400
+# 2026-01-01: an earlier clock has not been set yet.
+CLOCK_FLOOR=1767225600
+
+[ "$("$UPDATECTL" auto)" = on ] || exit 0
+now="$(date +%s)"
+[ "$now" -ge "$CLOCK_FLOOR" ] || exit 0
+last="$(cat "$STATE_DIR/last-check" 2>/dev/null || echo 0)"
+# A clock set backwards does not stop the checks for good.
+[ "$last" -le "$now" ] || last=0
+[ $((now - last)) -ge "$DAY" ] || exit 0
+mkdir -p "$STATE_DIR" || exit 1
+exec 9>"$R/run/nuubos-update-auto.lock" && flock -n 9 || exit 0
+
+out="$("$UPDATECTL" check)"
+case "$out" in
+    "OK available "*) ;;
+    OK*) printf '%s\n' "$now" > "$STATE_DIR/last-check"; exit 0 ;;
+    # Unavailable build, no network, bad signature: try again next hour.
+    *) exit 0 ;;
+esac
+printf '%s\n' "$now" > "$STATE_DIR/last-check"
+version="${out#OK available }"
+serial="$(sed -n 's/^serial=//p' "$R/userdata/.nuubos-update/manifest" 2>/dev/null)"
+[ -n "$serial" ] || exit 0
+# Each release is announced once.
+[ "$(cat "$STATE_DIR/notified" 2>/dev/null)" = "$serial" ] && exit 0
+"$NOTIFYCTL" post update.available update.available "version=$version" >/dev/null 2>&1 || exit 0
+printf '%s\n' "$serial" > "$STATE_DIR/notified"

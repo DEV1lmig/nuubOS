@@ -1,6 +1,7 @@
 #!/bin/sh
 
 . /usr/lib/nuubos/exfat-health.sh
+. /usr/lib/nuubos/partitions.sh
 . /usr/lib/nuubos/userdata.sh
 
 STATUS_DIR=/run/nuubos/storage
@@ -19,19 +20,7 @@ log()
 
 tf1_device()
 {
-    ROOT_DEV="$(
-        sed -n 's/.*root=\([^ ]*\).*/\1/p' \
-            /proc/cmdline 2>/dev/null
-    )"
-
-    case "$ROOT_DEV" in
-        /dev/mmcblk*p1)
-            printf '%sp4\n' "${ROOT_DEV%p1}"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    nuubos_partition "$NUUBOS_PART_USERDATA"
 }
 
 mounted_source()

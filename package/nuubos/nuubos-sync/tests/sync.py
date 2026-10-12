@@ -1,34 +1,55 @@
 #!/usr/bin/env python3
 # Host test: nuubos-syncd runs Syncthing only for the active, enabled user
-# (switches with the user, no restart storm) and nuubos-syncctl configures
-# folders/devices through the REST API on the unix socket. Fake Syncthing.
+# (switches with the user, no restart storm), applies the nuubOS policy
+# (device name, local-only network, no reports, the user's folders shared
+# with every accepted device), publishes snapshots to subscribers when
+# Syncthing's events say something changed, and raises/dismisses the
+# "sync.request" notification. nuubos-syncctl is its command line. Fake
+# Syncthing (REST on the unix socket) and fake notifyd.
 # Run: python3 package/nuubos/nuubos-sync/tests/sync.py
-import json, os, signal, socket, subprocess, sys, tarfile, tempfile, time
+import json, os, socket, subprocess, sys, tarfile, tempfile, threading, time
 
 here = os.path.dirname(os.path.abspath(__file__))
 root = os.path.abspath(os.path.join(here, '..', '..', '..', '..'))
 src = os.path.join(here, '..', 'src')
 t = tempfile.mkdtemp()
-run, users = t + '/run', t + '/users'
+run, users, state_users = t + '/run', t + '/users', t + '/state'
 U1, U2 = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
-for d in (run + '/user', users + '/' + U1, users + '/' + U2, t + '/cj/cjson'):
+for d in (run + '/user', users + '/' + U1, users + '/' + U2, state_users + '/' + U1, t + '/inc/cjson', t + '/inc/nuubos'):
     os.makedirs(d, exist_ok=True)
+open(state_users + '/' + U1 + '/profile.conf', 'w').write('USER_ID=%s\nUSER_NAME=Mario\n' % U1)
+open(t + '/model', 'w').write('Anbernic RG40XX-V\n')
 with tarfile.open(root + '/dl/cjson/cjson-1.7.19.tar.gz') as tf:
     for m in tf.getmembers():
         if m.name.endswith(('/cJSON.c', '/cJSON.h')):
-            m.name = os.path.basename(m.name); tf.extract(m, t + '/cj/')
-open(t + '/cj/cjson/cJSON.h', 'w').write(open(t + '/cj/cJSON.h').read())
+            m.name = os.path.basename(m.name); tf.extract(m, t + '/inc/')
+open(t + '/inc/cjson/cJSON.h', 'w').write(open(t + '/inc/cJSON.h').read())
+open(t + '/inc/nuubos/notify.h', 'w').write(open(root + '/package/nuubos/nuubos-notify/src/notify.h').read())
+
+MY = 'SELF111-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG'
+PEER = 'PEER222-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG'
+NEAR = 'NEAR333-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG'
+OLD = 'OLD4444-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG'
 
 fake = t + '/syncthing'
 open(fake, 'w').write(r'''#!/usr/bin/env python3
-import http.server, json, os, socketserver, sys
+import http.server, json, os, socketserver, sys, threading, time, urllib.parse
 args = dict(a.split("=", 1) for a in sys.argv[2:] if "=" in a)
 home = args["--home"]; key = args["--gui-apikey"]; sock = args["--gui-address"][len("unix://"):]
 open(home + "/ran", "a").write("x")
+open(home + "/env", "w").write(os.environ.get("STMONITORED", ""))
 if os.path.exists(home + "/crash"): sys.exit(3)
-state = {"folders": {}, "devices": {"SELF-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH-IIII-JJJJ-KKKK": {"deviceID": "SELF-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH-IIII-JJJJ-KKKK", "name": "me"}}}
-MY = "SELF-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH-IIII-JJJJ-KKKK"
-PEND = "PEER-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH-IIII-JJJJ-KKKK"
+MY, PEER, NEAR, OLD = %r, %r, %r, %r
+st = {"options": {}, "folders": {}, "devices": {MY: {"deviceID": MY, "name": "nuubos"}},
+      "pending": {PEER: {"name": "Laptop", "address": "192.168.1.20:22000", "time": time.strftime("%%Y-%%m-%%dT%%H:%%M:%%SZ", time.gmtime())},
+                  OLD: {"name": "nuubos", "address": "127.0.0.1:22000", "time": "2026-01-01T10:00:00.123+02:00"}},
+      "ignored": []}
+events, cond = [], threading.Condition()
+def emit(kind, data):
+    with cond:
+        events.append({"id": len(events) + 1, "type": kind, "data": data}); cond.notify_all()
+def save(): json.dump(st, open(home + "/state.json", "w"))
+save()
 class H(http.server.BaseHTTPRequestHandler):
     def address_string(self): return "unix"
     def log_message(self, *a): pass
@@ -38,49 +59,101 @@ class H(http.server.BaseHTTPRequestHandler):
     def auth(self):
         if self.headers.get("X-API-Key") != key: self.out(403); return False
         return True
+    def body(self): return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"null")
     def do_GET(self):
         if not self.auth(): return
-        p = self.path
+        u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query); p = u.path
         if p == "/rest/system/status": self.out(200, {"myID": MY})
-        elif p == "/rest/config/folders": self.out(200, list(state["folders"].values()))
-        elif p == "/rest/config/devices": self.out(200, list(state["devices"].values()))
-        elif p == "/rest/system/connections": self.out(200, {"connections": {d: {"connected": d != MY} for d in state["devices"]}})
-        elif p == "/rest/cluster/pending/devices": self.out(200, {} if PEND in state["devices"] else {PEND: {"name": "Laptop"}})
+        elif p == "/rest/config/devices": self.out(200, list(st["devices"].values()))
+        elif p == "/rest/config": self.out(200, {"remoteIgnoredDevices": st["ignored"], "devices": list(st["devices"].values())})
+        elif p == "/rest/system/connections":
+            self.out(200, {"connections": {d: {"connected": d == PEER, "address": "192.168.1.20:22000"} for d in st["devices"]}})
+        elif p == "/rest/cluster/pending/devices": self.out(200, st["pending"])
+        elif p == "/rest/system/discovery":
+            self.out(200, {NEAR: {"addresses": ["tcp://[fe80::1]:22000", "tcp://192.168.1.30:22000"]}, MY: {"addresses": []}})
+        elif p == "/rest/db/status": self.out(200, {"state": "idle"})
+        elif p == "/rest/events":
+            since = int(q.get("since", ["0"])[0])
+            with cond:
+                cond.wait_for(lambda: len(events) > since, timeout=1.0)
+                self.out(200, events[since:])
         else: self.out(404)
-    def body(self):
-        return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"null")
     def do_PUT(self):
         if not self.auth(): return
-        kind, _, ident = self.path.rpartition("/")
-        b = self.body()
-        if kind == "/rest/config/folders": state["folders"][ident] = b
-        elif kind == "/rest/config/devices": state["devices"][ident] = b
-        json.dump(state, open(home + "/state.json", "w"))
-        self.out(200)
+        p = urllib.parse.urlparse(self.path).path; kind, _, ident = p.rpartition("/"); b = self.body()
+        if kind == "/rest/config/folders":
+            st["folders"][ident] = b
+            if ident == "nuubos-covers":
+                emit("StateChanged", {"folder": "nuubos-covers", "from": "syncing", "to": "idle"})
+        elif kind == "/rest/config/devices":
+            st["devices"][ident] = b; st["pending"].pop(ident, None); emit("PendingDevicesChanged", {})
+        elif p == "/rest/config": st["ignored"] = b.get("remoteIgnoredDevices", [])
+        else: return self.out(404)
+        save(); emit("ConfigSaved", {}); self.out(200)
+    def do_PATCH(self):
+        if not self.auth(): return
+        p = urllib.parse.urlparse(self.path).path; b = self.body()
+        if p == "/rest/config/options": st["options"].update(b)
+        elif p.startswith("/rest/config/devices/") and p.rpartition("/")[2] in st["devices"]:
+            st["devices"][p.rpartition("/")[2]].update(b)
+        else: return self.out(404)
+        save(); emit("ConfigSaved", {}); self.out(200)
     def do_DELETE(self):
         if not self.auth(): return
-        kind, _, ident = self.path.rpartition("/")
-        tbl = state["folders" if kind.endswith("folders") else "devices"]
+        u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query); p = u.path
+        if p == "/rest/cluster/pending/devices":
+            st["pending"].pop(q.get("device", [""])[0], None); save(); emit("PendingDevicesChanged", {}); return self.out(200)
+        kind, _, ident = p.rpartition("/")
+        tbl = st["folders" if kind.endswith("folders") else "devices"]
         code = 200 if tbl.pop(ident, None) is not None else 404
-        json.dump(state, open(home + "/state.json", "w"))
-        self.out(code)
-class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer): pass
+        save(); emit("ConfigSaved", {}); self.out(code)
+class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer): daemon_threads = True
 try: os.unlink(sock)
 except OSError: pass
-S(sock, H).serve_forever()
-''')
+srv = S(sock, H)
+def later():
+    time.sleep(0.5)
+    emit("StateChanged", {"folder": "nuubos-saves", "from": "idle", "to": "syncing"})
+    emit("FolderCompletion", {"folder": "nuubos-saves", "device": PEER, "completion": 42.5})
+threading.Thread(target=later, daemon=True).start()
+srv.serve_forever()
+''' % (MY, PEER, NEAR, OLD))
 os.chmod(fake, 0o755)
-cc = ['gcc', '-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-Wno-format-truncation', '-I' + t + '/cj',
-      '-DRUN_ROOT="%s"' % run, '-DUSERDATA_USERS="%s"' % users]
-subprocess.check_call(cc + ['-DSYNCTHING_BIN="%s"' % fake, src + '/syncd.c', '-o', t + '/syncd'])
-subprocess.check_call(cc + [src + '/syncctl.c', t + '/cj/cJSON.c', '-o', t + '/syncctl', '-lcurl'])
+
+# Fake notifyd: collects the lines.
+notes = []
+nsock = run + '/notifyd.sock'
+ns = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); ns.bind(nsock); ns.listen(8)
+def notifyd():
+    while True:
+        try: c, _ = ns.accept()
+        except OSError: return
+        notes.append(c.recv(4096).decode()); c.close()
+threading.Thread(target=notifyd, daemon=True).start()
+
+# Fake libraryd: counts SCAN requests.
+scans = []
+ls = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); ls.bind(run + '/libraryd.sock'); ls.listen(8)
+def libraryd():
+    while True:
+        try: c, _ = ls.accept()
+        except OSError: return
+        scans.append(c.recv(64).decode()); c.close()
+threading.Thread(target=libraryd, daemon=True).start()
+
+cc = ['gcc', '-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-Wno-format-truncation', '-I' + t + '/inc',
+      '-DRUN_ROOT="%s"' % run, '-DUSERDATA_USERS="%s"' % users, '-DSTATE_USERS="%s"' % state_users,
+      '-DMODEL_FILE="%s"' % (t + '/model'), '-DNUUBOS_NOTIFY_SOCKET="%s"' % nsock,
+      '-DUSERDATA_ROOT="%s"' % (t + '/ud'), '-DLIBRARY_SOCKET="%s"' % (run + '/libraryd.sock')]
+subprocess.check_call(cc + ['-DSYNCTHING_BIN="%s"' % fake, src + '/syncd.c', t + '/inc/cJSON.c', '-o', t + '/syncd',
+                            '-lcurl', '-lpthread'])
+subprocess.check_call(cc + [src + '/syncctl.c', '-o', t + '/syncctl'])
 fails = 0
 def check(n, c):
     global fails
     if not c: print('[FAIL]', n); fails += 1
 def ctl(*a): return subprocess.run([t + '/syncctl'] + list(a), capture_output=True, text=True).stdout
-def st(): return open(run + '/syncd.state').read() if os.path.exists(run + '/syncd.state') else ''
-def wait(c, s=6):
+def wait(c, s=8):
     e = time.time() + s
     while time.time() < e:
         if c(): return True
@@ -88,42 +161,102 @@ def wait(c, s=6):
     return False
 def set_user(u):
     open(run + '/user/active.tmp', 'w').write(u + '\n'); os.rename(run + '/user/active.tmp', run + '/user/active')
+def fstate(): return json.load(open(users + '/' + U1 + '/appdata/syncthing/state.json'))
+def conf(): return open(users + '/' + U1 + '/appdata/syncthing/nuubos.conf').read()
+
+# Subscriber: every snapshot it receives.
+snaps = []
+def subscribe():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(run + '/syncd.sock'); s.sendall(b'SUBSCRIBE\n')
+    buf = ''
+    while True:
+        b = s.recv(65536)
+        if not b: return
+        buf += b.decode()
+        while 'end=1\n' in buf:
+            one, buf = buf.split('end=1\n', 1); snaps.append(one)
+def last(): return snaps[-1] if snaps else ''
 
 set_user(U1)
 d = subprocess.Popen([t + '/syncd'], stderr=open(t + '/syncd.log', 'w'))
 try:
-    check('disabled by default: not running', wait(lambda: 'running=0' in st()))
+    check('socket up', wait(lambda: os.path.exists(run + '/syncd.sock')))
+    threading.Thread(target=subscribe, daemon=True).start()
+    check('disabled by default', wait(lambda: 'enabled=0' in last() and 'running=0' in last()))
+    check('folder before enabling (saves by default)', ctl('folder', 'states', 'on').startswith('OK')
+          and 'FOLDERS=saves,states' in conf())
     check('enable', ctl('enable').startswith('OK'))
-    check('runs for U1', wait(lambda: 'running=1' in st() and U1 in st()))
-    check('per-user api key', 'APIKEY=' in open(users + '/' + U1 + '/appdata/syncthing/nuubos.conf').read())
-    wait(lambda: os.path.exists(run + '/syncthing.sock'))
-    time.sleep(0.3)
-    s = ctl('status')
-    check('status device id + pending', 'device_id=SELF' in s and 'pending=PEER' in s and 'folder=saves\t0' in s)
-    check('folder saves on', ctl('folder', 'saves', 'on').startswith('OK'))
-    check('accept device', ctl('accept', 'PEER-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH-IIII-JJJJ-KKKK', 'Laptop').startswith('OK'))
-    state = json.load(open(users + '/' + U1 + '/appdata/syncthing/state.json'))
-    f = state['folders'].get('nuubos-saves', {})
-    check('saves folder path per user', f.get('path') == users + '/' + U1 + '/saves')
-    check('saves shared with new device', any(x['deviceID'].startswith('PEER') for x in f.get('devices', [])))
-    s = ctl('status')
-    check('device listed connected', 'device=PEER' in s and '\tLaptop\t1' in s and 'folder=saves\t1' in s)
-    check('bad device id', ctl('accept', '../etc').startswith('Usage') or ctl('accept', '../etc') == '')
+    check('runs, becomes ready', wait(lambda: 'ready=1' in last()))
+    check('per-user api key', 'APIKEY=' in conf())
+    check('no monitor process', open(users + '/' + U1 + '/appdata/syncthing/env').read() == 'yes')
+    s = fstate()
+    check('device name = profile · model', s['devices'][MY]['name'] == 'Mario · RG40XX-V')
+    o = s['options']
+    check('local only, no reports', o.get('globalAnnounceEnabled') is False and o.get('relaysEnabled') is False
+          and o.get('natEnabled') is False and o.get('crashReportingEnabled') is False and o.get('urAccepted') == -1)
+    f = s['folders'].get('nuubos-saves', {})
+    check('saves folder per user, exFAT, trash can', f.get('path') == users + '/' + U1 + '/saves'
+          and f.get('ignorePerms') is True and f.get('versioning', {}).get('type') == 'trashcan')
+    check('states folder too', 'nuubos-states' in s['folders'] and 'nuubos-screenshots' not in s['folders'])
+    snap = last()
+    check('snapshot identity', 'device_id=' + MY in snap and 'device_name=Mario · RG40XX-V' in snap)
+    check('snapshot pending + nearby (IPv4, not self)', 'pending=%s\tLaptop\t192.168.1.20' % PEER in snap
+          and 'nearby=%s\t192.168.1.30' % NEAR in snap and 'nearby=' + MY not in snap)
+    check('stale request dropped, no notification', 'pending=' + OLD not in snap
+          and not any('sync.OLD4444' in n for n in notes) and 'OLD4444' not in json.dumps(fstate().get('pending', {})))
+    check('request notification', wait(lambda: any('event=sync.request' in n and 'name=Laptop' in n for n in notes)))
+    check('add (accept) device', ctl('add', PEER, 'Laptop').startswith('OK'))
+    s = fstate()
+    check('folders shared with it', all(any(x['deviceID'] == PEER for x in s['folders'][k]['devices'])
+                                        for k in ('nuubos-saves', 'nuubos-states')))
+    check('device listed connected, request gone', wait(lambda: 'device=%s\tLaptop\t1' % PEER in last()
+                                                         and 'pending=' not in last()))
+    check('request notification dismissed', wait(lambda: any(n.startswith('DISMISS id=sync.PEER222') for n in notes)))
+    check('event-driven folder state + completion', wait(lambda: 'folder=saves\t1\tsyncing' in last()
+                                                          and '\t1\t42\t192.168.1.20' in last()))
+    r = ctl('folder', 'library', 'on')
+    check('library on: covers + metadata (console store)', r.startswith('OK')
+          and fstate()['folders'].get('nuubos-covers', {}).get('path') == t + '/ud/library/covers'
+          and fstate()['folders'].get('nuubos-metadata', {}).get('path') == t + '/ud/library/metadata'
+          and 'FOLDERS=saves,states,library' in conf())
+    check('covers pulled -> library rescan', wait(lambda: any(x.startswith('SCAN') for x in scans)))
+    check('history on: the user\'s library/consoles', ctl('folder', 'history', 'on').startswith('OK')
+          and fstate()['folders'].get('nuubos-history', {}).get('path') == users + '/' + U1 + '/library/consoles'
+          and wait(lambda: 'folder=history\t1' in last() and 'folder=library\t1\t' in last()))
+    check('library off removes both folders', ctl('folder', 'library', 'off').startswith('OK')
+          and 'nuubos-covers' not in fstate()['folders'] and 'nuubos-metadata' not in fstate()['folders'])
+    check('internet on: discovery, no relays', ctl('internet', 'on').startswith('OK')
+          and fstate()['options']['globalAnnounceEnabled'] is True and fstate()['options']['relaysEnabled'] is False
+          and wait(lambda: 'internet=1' in last() and 'relays=0' in last()))
+    check('relays on', ctl('relays', 'on').startswith('OK') and fstate()['options']['relaysEnabled'] is True
+          and 'RELAYS=1' in conf() and wait(lambda: 'relays=1' in last()))
+    check('internet off also stops relays', ctl('internet', 'off').startswith('OK')
+          and fstate()['options']['relaysEnabled'] is False and fstate()['options']['globalAnnounceEnabled'] is False)
+    check('folder off removes it', ctl('folder', 'states', 'off').startswith('OK') and 'nuubos-states' not in fstate()['folders'])
+    check('ignore', ctl('ignore', NEAR).startswith('OK') and any(x['deviceID'] == NEAR for x in fstate()['ignored']))
+    check('remove', ctl('remove', PEER).startswith('OK') and PEER not in fstate()['devices'])
+    check('bad device id', ctl('add', '../etc').startswith('ERR device'))
+    check('own id refused', ctl('add', MY).startswith('ERR device'))
+    check('status text', 'end=1' in ctl('status'))
     set_user(U2)
-    check('user switch stops U1 (U2 not enabled)', wait(lambda: 'running=0' in st()))
+    check('user switch stops U1 (U2 not enabled)', wait(lambda: 'running=0' in last() and 'enabled=0' in last()))
+    check('U2 has no device', ctl('add', PEER).startswith('ERR not-running'))
     set_user(U1)
-    check('back to U1 restarts it', wait(lambda: 'running=1' in st()))
+    check('back to U1 restarts it', wait(lambda: 'ready=1' in last()))
     # Crash: no restart storm.
     open(users + '/' + U1 + '/appdata/syncthing/crash', 'w').write('1')
-    pid = int(open(run + '/syncd.pid').read())
     subprocess.call(['pkill', '-f', fake])
-    check('crash -> failed, not restarted', wait(lambda: 'failed=1' in st() and 'running=0' in st()))
+    check('crash -> failed, not restarted', wait(lambda: 'failed=1' in last() and 'running=0' in last()))
     runs = open(users + '/' + U1 + '/appdata/syncthing/ran').read().count('x')
     time.sleep(1)
     check('no restart loop', open(users + '/' + U1 + '/appdata/syncthing/ran').read().count('x') == runs)
     os.unlink(users + '/' + U1 + '/appdata/syncthing/crash')
-    check('disable', ctl('disable').startswith('OK') and wait(lambda: 'running=0' in st()))
+    check('enable again clears failed', ctl('enable').startswith('OK') and wait(lambda: 'ready=1' in last()))
+    check('disable', ctl('disable').startswith('OK') and wait(lambda: 'running=0' in last()))
 finally:
-    d.terminate(); d.wait(); subprocess.call(['pkill', '-f', fake])
+    d.terminate(); d.wait(); subprocess.call(['pkill', '-f', fake]); ns.close(); ls.close()
+if fails:
+    print(open(t + '/syncd.log').read())
 print('[PASS] sync' if not fails else '[FAIL] %d checks' % fails)
 sys.exit(1 if fails else 0)

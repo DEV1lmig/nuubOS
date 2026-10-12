@@ -1,5 +1,8 @@
 slint::include_modules!();
 
+#[path = "/workspace/package/nuubos/nuubui-home/src/src/qr.rs"]
+mod qr;
+
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, PremultipliedRgbaColor};
 use slint::platform::{Platform, WindowAdapter};
 use slint::{Model, ModelRc, SharedString, VecModel};
@@ -30,6 +33,8 @@ fn gen(rows: &[(&str, &str, &str, bool, i32)]) -> ModelRc<GenRow> {
             toggle_on: *tg == 1,
             enabled: true,
             armed: false,
+            progress_shown: false,
+            progress: 0.0,
         })
         .collect();
     ModelRc::from(Rc::new(VecModel::from(v)))
@@ -425,11 +430,15 @@ fn main() {
                 (&s(ui, 792), "ScreenScraper", &s(ui, 793), true, -1),
                 (&s(ui, 565), "nuubfan", &s(ui, 567), false, -1),
                 (&s(ui, 568), "", &s(ui, 569), false, -1), (&s(ui, 798), "", &s(ui, 799), false, -1),
-                (&s(ui, 576), "", &s(ui, 581), true, -1)]));
+                (&s(ui, 576), "", &s(ui, 581), true, -1),
+                (&s(ui, 669), &s(ui, 222), &s(ui, 489), true, -1),
+                (&s(ui, 1028), "", &s(ui, 1029), true, -1)]));
             ui.set_gaming_split(8);
+            ui.set_gaming_split2(14);
         })),
         ("gaming", Box::new(|ui| { ui.set_settings_selected_index(3); ui.set_settings_view(68); ui.set_gaming_index(3); })),
         ("gaming_library", Box::new(|ui| { ui.set_gaming_index(12); })),
+        ("gaming_syncthing", Box::new(|ui| { ui.set_gaming_index(15); })),
         ("gaming_signout", Box::new(|ui| {
             ui.set_gaming_index(10);
             /* Sign Out waits for its confirming press. */
@@ -538,11 +547,41 @@ fn main() {
         ("safe_screen", Box::new(|ui| { ui.set_recovery_notice("".into()); ui.set_recovery_armed(-1); ui.set_recovery_stage(0); ui.set_active_user_id("u".into()); ui.set_safe_index(0); ui.set_safe_screen_open(true); })),
         ("safe_screen_armed", Box::new(|ui| { ui.set_safe_index(5); ui.set_recovery_armed(5); ui.set_recovery_stage(0); })),
         ("safe_screen_notice", Box::new(|ui| { ui.set_safe_index(2); ui.set_recovery_armed(-1); ui.set_recovery_stage(0); ui.set_recovery_notice("Support bundle saved: nuubos-support-20261008-070500.tar.gz".into()); })),
-        /* Settings → System → Storage (storageui.rs page 64) and Backup &
-         * Restore (filesui.rs page 62, BACKUP TO SD2 from storageui.rs,
-         * Backup Content 59). */
+        /* SD2 restore screen and release notes viewer (2026-10-12). */
+        ("restore_running", Box::new(|ui| {
+            ui.set_safe_screen_open(false); ui.set_op_oob(true); ui.set_op_failed(false); ui.set_op_progress(42);
+            ui.set_op_index(0); ui.set_op_screen_open(true); })),
+        ("restore_failed", Box::new(|ui| { ui.set_op_failed(true); ui.set_op_index(1); })),
+        ("update_screen", Box::new(|ui| { ui.set_op_kind(1); ui.set_op_oob(false); ui.set_op_failed(false); ui.set_op_progress(63); ui.set_op_index(0); })),
+        ("update_screen_failed", Box::new(|ui| { ui.set_op_failed(true); ui.set_op_index(0); })),
+        ("notes_view", Box::new(|ui| {
+            ui.set_op_screen_open(false); ui.set_op_kind(0);
+            ui.set_notes_title(format!("{} • nuubOS 0.6", s(ui, 1005)).into());
+            ui.set_notes_text(["OTA updates with two system slots and an automatic return to the previous version when the new one does not start",
+                "Update channels (Stable, Beta, Alpha) and a daily check with a notification", "Full-screen SD2 restore with progress",
+                "Fix: Wi-Fi gets its address by itself after every boot", "Fix: CPU stability under load (1416 MHz maximum)",
+                "Release notes on their own screen, scrolled with the D-pad", "Faster library scan on large SD2 cards",
+                "New themes: Lagoon and Ember", "Smaller fixes and translations"].iter().map(|l| format!("•  {l}")).collect::<Vec<_>>().join("\n\n").into());
+            ui.set_notes_scroll(0.0); ui.set_notes_open(true); })),
+        ("notes_view_scrolled", Box::new(|ui| { ui.set_notes_scroll(2000.0); })),
+        /* Software Update while the installation runs: the row is its bar. */
+        ("update_installing", Box::new(|ui| {
+            ui.set_notes_open(false);
+            ui.set_settings_open(true); ui.set_details_active(false);
+            ui.set_settings_selected_index(6); ui.set_settings_view(63); ui.set_gen_index(1); ui.set_gen_scroll(0);
+            ui.set_gen_section(s(ui, 732).into()); ui.set_gen_select(true); ui.set_gen_split(0); ui.set_gen_split2(0);
+            let mut rows: Vec<GenRow> = gen(&[("Version", "0.5 • 3ddd1b61d1b1", "", false, -1), (&s(ui, 985), &s(ui, 988), &s(ui, 989), true, -1),
+                (&s(ui, 992), "", &s(ui, 993), false, 1), (&s(ui, 487), "nuubOS 0.6", "", false, -1),
+                (&s(ui, 984), "42%", "", false, -1), (&s(ui, 1005), "", "", true, -1)]).iter().collect();
+            rows[4].progress_shown = true; rows[4].progress = 0.42;
+            ui.set_gen_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+        })),
+        /* Settings → System → Storage (storageui.rs page 64), Backup and
+         * Recovery (filesui.rs pages 62 and 28, rows from storageui.rs),
+         * Backup Content 59. */
         ("storage", Box::new(|ui| {
             ui.set_safe_screen_open(false); ui.set_recovery_notice("".into());
+            ui.set_notes_open(false); ui.set_op_screen_open(false);
             ui.set_settings_open(true); ui.set_details_active(false);
             ui.set_settings_selected_index(6); ui.set_settings_view(64); ui.set_gen_index(2); ui.set_gen_scroll(0);
             ui.set_gen_section(s(ui, 19).to_uppercase().into()); ui.set_gen_select(true);
@@ -567,56 +606,69 @@ fn main() {
                 (&s(ui, 64), &s(ui, 916), "", false, -1),
                 (&s(ui, 625), "", "", true, -1)]));
         })),
+        /* Backup (filesui.rs page 62): the console backup only (storageui.rs). */
         ("backup", Box::new(|ui| {
-            ui.set_settings_view(62); ui.set_gen_index(0); ui.set_gen_scroll(0);
-            ui.set_gen_scopes(scopes(&[s(ui, 313), s(ui, 312)]));
-            ui.set_gen_section(s(ui, 931).into());
-            ui.set_gen_split(3); ui.set_gen_split_label(s(ui, 981).into()); ui.set_gen_split2(0);
+            ui.set_settings_view(62); ui.set_gen_index(1); ui.set_gen_scroll(0);
+            ui.set_gen_scopes(scopes(&[s(ui, 313)]));
+            ui.set_gen_section(s(ui, 1024).into());
+            ui.set_gen_split(0); ui.set_gen_split2(0);
             ui.set_gen_rows(gen(&[
                 (&s(ui, 69), "", &s(ui, 933).replace("{0}", &s(ui, 402)), false, 1),
+                (&s(ui, 1015), &s(ui, 64), "", true, -1),
                 (&s(ui, 936), &s(ui, 937), "", true, -1),
-                (&s(ui, 88), "", "", false, -1),
-                (&s(ui, 632), "", "", false, 0),
-                (&s(ui, 633), "", "", false, 0),
-                (&s(ui, 631), "", "", false, -1)]));
+                (&s(ui, 88), "", "", false, -1)]));
         })),
-        ("backup_profile", Box::new(|ui| { ui.set_gen_index(4); ui.set_gen_scroll(2); })),
-        /* Recovery (filesui.rs page 28): SD2 | saved profile backups |
-         * REPAIR & RESET (main.rs recovery_rows). */
-        ("recovery", Box::new(|ui| {
-            ui.set_settings_view(28); ui.set_gen_index(1); ui.set_gen_scroll(0);
-            ui.set_gen_scopes(scopes(&[s(ui, 313), s(ui, 312), s(ui, 313)]));
-            ui.set_gen_section(s(ui, 931).into());
-            ui.set_gen_split(1); ui.set_gen_split_label(s(ui, 981).into());
-            ui.set_gen_split2(3); ui.set_gen_split2_label(s(ui, 983).into());
-            ui.set_gen_select_label(s(ui, 635).into()); ui.set_settings_north_hint(s(ui, 618).into());
+        ("backup_sd1", Box::new(|ui| {
             ui.set_gen_rows(gen(&[
-                (&s(ui, 940), "", &s(ui, 941), true, -1),
-                ("Baf • 2026-10-09 21:14:02", "312 MB", &s(ui, 636), false, -1),
-                ("Baf • 2026-10-02 18:40:11", "298 MB", &s(ui, 636), false, -1),
+                (&s(ui, 69), "", &s(ui, 933).replace("{0}", &s(ui, 402)), false, 1),
+                (&s(ui, 1015), &s(ui, 912), &s(ui, 1022), true, -1),
+                (&s(ui, 936), &s(ui, 937), "", true, -1),
+                (&s(ui, 88), "", "", false, -1)]));
+        })),
+        ("backup_dest", Box::new(|ui| {
+            ui.set_settings_choice_open(true); ui.set_settings_choice_title(s(ui, 1015).into());
+            let o: Vec<SettingsChoiceEntry> = [(64, "sd2"), (912, "sd1"), (1016, "usb")].iter()
+                .map(|(i, v)| SettingsChoiceEntry { value: (*v).into(), label: s(ui, *i).into() }).collect();
+            ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o)))); ui.set_settings_choice_index(1);
+        })),
+        /* Recovery (filesui.rs page 28): RESTORE (storageui.rs) | REPAIR &
+         * RESET (main.rs recovery_rows). */
+        ("recovery", Box::new(|ui| {
+            ui.set_settings_choice_open(false);
+            ui.set_settings_view(28); ui.set_gen_index(0); ui.set_gen_scroll(0);
+            ui.set_gen_scopes(scopes(&[s(ui, 313), s(ui, 313)]));
+            ui.set_gen_section(s(ui, 1014).into());
+            ui.set_gen_split(1); ui.set_gen_split_label(s(ui, 983).into()); ui.set_gen_split2(0);
+            ui.set_gen_rows(gen(&[
+                (&s(ui, 1017), "", &s(ui, 1020), true, -1),
                 (&s(ui, 505), "", &s(ui, 512), false, -1),
                 (&s(ui, 508), "", &s(ui, 513), false, -1),
                 (&s(ui, 510), "", &s(ui, 514), false, -1),
                 (&s(ui, 511), "", &s(ui, 515), false, -1)]));
         })),
-        ("recovery_reset_armed", Box::new(|ui| {
-            ui.set_gen_select_label("".into()); ui.set_settings_north_hint("".into());
-            ui.set_gen_index(6); ui.set_gen_scroll(3);
-            let rows = ui.get_gen_rows();
-            if let Some(mut r) = rows.row_data(6) { r.armed = true; r.detail = s(ui, 517).into(); rows.set_row_data(6, r); }
+        ("recovery_scope", Box::new(|ui| {
+            ui.set_settings_choice_open(true); ui.set_settings_choice_title(s(ui, 1019).into());
+            let o = vec![SettingsChoiceEntry { value: "all".into(), label: s(ui, 1018).into() },
+                SettingsChoiceEntry { value: "a".into(), label: "Baf".into() },
+                SettingsChoiceEntry { value: "b".into(), label: "Eli".into() }];
+            ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o)))); ui.set_settings_choice_index(0);
         })),
-        ("recovery_no_sd2", Box::new(|ui| {
-            ui.set_gen_index(0); ui.set_gen_scroll(0);
-            ui.set_gen_scopes(scopes(&[s(ui, 312), s(ui, 313)]));
-            ui.set_gen_section(s(ui, 981).into());
-            ui.set_gen_split(1); ui.set_gen_split_label(s(ui, 983).into()); ui.set_gen_split2(0);
-            ui.set_gen_rows(gen(&[
+        ("recovery_reset_armed", Box::new(|ui| {
+            ui.set_settings_choice_open(false);
+            ui.set_gen_index(4); ui.set_gen_scroll(1);
+            let rows = ui.get_gen_rows();
+            if let Some(mut r) = rows.row_data(4) { r.armed = true; r.detail = s(ui, 517).into(); rows.set_row_data(4, r); }
+        })),
+        ("recovery_none", Box::new(|ui| {
+            ui.set_gen_index(1); ui.set_gen_scroll(0);
+            let mut rows: Vec<GenRow> = gen(&[
                 (&s(ui, 634), "", "", false, -1),
                 (&s(ui, 505), "", &s(ui, 512), false, -1),
                 (&s(ui, 508), "", &s(ui, 513), false, -1),
                 (&s(ui, 510), "", &s(ui, 514), false, -1),
-                (&s(ui, 511), "", &s(ui, 515), false, -1),
-                (&s(ui, 520), "", &s(ui, 712), false, -1)]));
+                (&s(ui, 511), "", &s(ui, 515), false, -1)]).iter().collect();
+            rows[0].enabled = false;
+            ui.set_gen_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
         })),
         ("storage_content", Box::new(|ui| {
             ui.set_gen_select_label("".into()); ui.set_settings_north_hint("".into()); ui.set_gen_scopes(scopes(&[]));
@@ -1104,6 +1156,96 @@ fn main() {
         ui.set_launch_open(true);
     })));
     scenes.push(("launch_closed", Box::new(|ui| { ui.set_launch_open(false); ui.set_launch_busy(false); })));
+    /* Syncthing (2026-10-12): page 66 and the setup guide. */
+    const SID: &str = "3ULBXAD-LZEBDFS-BDH7UDD-ST45XXC-FCF2M4O-Q62OCH5-LFBD5PZ-5EXXOAP";
+    scenes.push(("sync_page", Box::new(|ui| {
+        ui.set_launch_open(false);
+        ui.set_settings_open(true); ui.set_details_active(false);
+        ui.set_settings_selected_index(3); ui.set_settings_view(66); ui.set_gen_index(3); ui.set_gen_scroll(0);
+        ui.set_gen_section("SYNCTHING".into()); ui.set_gen_select(true);
+        ui.set_gen_split(3); ui.set_gen_split_label(s(ui, 1030).into());
+        ui.set_gen_split2(6); ui.set_gen_split2_label(s(ui, 1031).into());
+        ui.set_gen_rows(gen(&[
+            (&s(ui, 669), "", &s(ui, 323), false, 1),
+            (&s(ui, 1028), "", &s(ui, 1029), true, -1),
+            (&s(ui, 1037), "Baf · RG CubeXX", &s(ui, 1038).replace("{0}", "3ULBXAD"), false, -1),
+            ("Eli · RG40XX-V", "", &s(ui, 1032), false, -1),
+            ("DESKTOP-NAS", &s(ui, 1039).replace("{0}", "42"), "192.168.1.20", false, -1),
+            ("Pixel 8", &s(ui, 159), "", false, -1),
+            (&s(ui, 673), "", &s(ui, 323), false, 1),
+            (&s(ui, 674), "", "", false, 0),
+            (&s(ui, 675), "", "", false, 0),
+            (&s(ui, 1089), "", &s(ui, 1090), false, 1),
+            (&s(ui, 1091), "", &s(ui, 1092), false, 1),
+            (&s(ui, 1035), "", &s(ui, 1036), false, 1),
+            (&s(ui, 1087), "", &s(ui, 1088), false, 0)]));
+    })));
+    scenes.push(("sync_page_bottom", Box::new(|ui| { ui.set_gen_index(12); ui.set_gen_scroll(8);
+    })));
+    scenes.push(("sync_guide_intro", Box::new(|ui| {
+        ui.set_sync_guide_title(s(ui, 1040).into());
+        ui.set_sync_guide_body(format!("{}\n\n{}", s(ui, 1041), s(ui, 1042)).into());
+        ui.set_sync_guide_code("".into()); ui.set_sync_guide_id("".into()); ui.set_sync_guide_show_qr(false);
+        ui.set_sync_guide_waiting("".into()); ui.set_sync_guide_error("".into());
+        ui.set_sync_guide_items(gen(&[(&s(ui, 1043), "", &s(ui, 1044), true, -1), (&s(ui, 1045), "", &s(ui, 1046), true, -1),
+            (&s(ui, 1047), "", &s(ui, 1048), true, -1)]));
+        ui.set_sync_guide_index(1); ui.set_sync_guide_step(0); ui.set_sync_guide_open(true);
+    })));
+    scenes.push(("sync_guide_folders", Box::new(|ui| {
+        ui.set_sync_guide_title(s(ui, 1049).into()); ui.set_sync_guide_body(format!("{} {}", s(ui, 1050), s(ui, 1093)).into());
+        ui.set_sync_guide_items(gen(&[(&s(ui, 673), "", "", false, 1), (&s(ui, 674), "", "", false, 0),
+            (&s(ui, 675), "", "", false, 0), (&s(ui, 1089), "", &s(ui, 1090), false, 0),
+            (&s(ui, 1091), "", &s(ui, 1092), false, 1), (&s(ui, 391), "", "", false, -1)]));
+        ui.set_sync_guide_index(5); ui.set_sync_guide_step(1);
+    })));
+    scenes.push(("sync_guide_console", Box::new(|ui| {
+        let path = [s(ui, 3), s(ui, 5), s(ui, 669), s(ui, 1028), s(ui, 1043)].join(" → ");
+        ui.set_sync_guide_title(s(ui, 1051).into());
+        ui.set_sync_guide_body(format!("1. {}\n2. {}\n3. {}\n\n{}", s(ui, 1052), s(ui, 1053), s(ui, 1054).replace("{0}", &path),
+            s(ui, 1055).replace("{0}", "Baf · RG CubeXX")).into());
+        ui.set_sync_guide_code("3ULBXAD".into());
+        ui.set_sync_guide_items(gen(&[(&s(ui, 391), "", "", false, -1)]));
+        ui.set_sync_guide_index(0); ui.set_sync_guide_step(2);
+    })));
+    scenes.push(("sync_guide_pick", Box::new(|ui| {
+        ui.set_sync_guide_title(s(ui, 1056).into()); ui.set_sync_guide_body(s(ui, 1057).into()); ui.set_sync_guide_code("".into());
+        ui.set_sync_guide_waiting(s(ui, 1058).into());
+        ui.set_sync_guide_items(gen(&[("Eli · RG40XX-V", "192.168.1.31", &s(ui, 1032), false, -1),
+            (&s(ui, 1059).replace("{0}", "GBA3TN7"), "192.168.1.30", "", false, -1),
+            (&s(ui, 1059).replace("{0}", "MZ2KQ4P"), "192.168.1.44", "", false, -1)]));
+        ui.set_sync_guide_index(1); ui.set_sync_guide_step(3);
+    })));
+    scenes.push(("sync_guide_computer", Box::new(|ui| {
+        ui.set_sync_guide_title(s(ui, 1067).into()); ui.set_sync_guide_body(s(ui, 1068).replace("{0}", "3ULBXAD").into());
+        ui.set_sync_guide_id("3ULBXAD-LZEBDFS-BDH7UDD-ST45XXC-\nFCF2M4O-Q62OCH5-LFBD5PZ-5EXXOAP".into());
+        ui.set_sync_guide_waiting(s(ui, 1069).into());
+        ui.set_sync_guide_items(gen(&[("DESKTOP-NAS", "192.168.1.20", &s(ui, 1032), false, -1)]));
+        ui.set_sync_guide_index(0); ui.set_sync_guide_step(3);
+    })));
+    scenes.push(("sync_guide_phone", Box::new(|ui| {
+        let (size, dark) = qr::encode(SID).unwrap();
+        let side = size + 8;
+        let mut px = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(side as u32, side as u32);
+        for (i, p) in px.make_mut_slice().iter_mut().enumerate() {
+            let (x, y) = (i % side, i / side);
+            let on = x >= 4 && y >= 4 && x < size + 4 && y < size + 4 && dark[(y - 4) * size + (x - 4)];
+            let v = if on { 0 } else { 255 };
+            *p = slint::Rgba8Pixel { r: v, g: v, b: v, a: 255 };
+        }
+        ui.set_sync_guide_qr(slint::Image::from_rgba8(px));
+        ui.set_sync_guide_title(s(ui, 1076).into()); ui.set_sync_guide_body(s(ui, 1077).into());
+        ui.set_sync_guide_id("".into()); ui.set_sync_guide_code("3ULBXAD".into()); ui.set_sync_guide_show_qr(true);
+        ui.set_sync_guide_waiting(s(ui, 1078).into());
+        ui.set_sync_guide_items(gen(&[]));
+        ui.set_sync_guide_index(-1); ui.set_sync_guide_step(3);
+    })));
+    scenes.push(("sync_guide_done", Box::new(|ui| {
+        ui.set_sync_guide_show_qr(false); ui.set_sync_guide_code("".into()); ui.set_sync_guide_waiting("".into());
+        ui.set_sync_guide_title(s(ui, 1080).into()); ui.set_sync_guide_body(s(ui, 1081).replace("{0}", "Eli · RG40XX-V").into());
+        ui.set_sync_guide_items(gen(&[(&s(ui, 697), "", "", false, -1)]));
+        ui.set_sync_guide_index(0); ui.set_sync_guide_step(5);
+    })));
+    scenes.push(("sync_closed", Box::new(|ui| { ui.set_sync_guide_open(false); ui.set_settings_open(false); })));
     let only = std::env::var("ONLY").unwrap_or_default();
     for (name, f) in &scenes {
         if !only.is_empty() && !only.split(',').any(|o| name.starts_with(o)) {

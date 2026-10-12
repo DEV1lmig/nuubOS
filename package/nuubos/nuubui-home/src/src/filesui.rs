@@ -6,11 +6,9 @@
  *   60 Network Shares (EPIC-036)   nuubos-sharesctl
  *   61 Removable Media (EPIC-032)  nuubos-mediactl (Settings > Storage)
  *   62 Backup (EPIC-035)           Settings > System > Troubleshooting:
- *                                  BACKUP TO SD2 (storageui), then this
- *                                  profile's nuubos-backupctl backup
- *   28 Recovery (EPIC-035/049/050) next to it: Restore from SD2
- *                                  (storageui), this profile's saved
- *                                  backups, REPAIR & RESET (main.rs,
+ *                                  the console backup (storageui)
+ *   28 Recovery (EPIC-035/049/050) next to it: RESTORE (storageui),
+ *                                  REPAIR & RESET (main.rs,
  *                                  nuubos-recoveryctl)
  *
  * 58 and 60 are the Files shell (the Details shell with "Files" as title,
@@ -40,9 +38,7 @@ pub const KEYBOARD_SHARE_PASSWORD: i32 = 21;
 const FILESCTL: &str = "/usr/bin/nuubos-filesctl";
 const MEDIACTL: &str = "/usr/sbin/nuubos-mediactl";
 const SHARESCTL: &str = "/usr/sbin/nuubos-sharesctl";
-const BACKUPCTL: &str = "/usr/bin/nuubos-backupctl";
 const JOBCTL: &str = "/usr/bin/nuubos-jobctl";
-const INTERNAL_BACKUPS: &str = "/userdata/backups";
 
 pub const BACKUP_VIEW: i32 = 62;
 pub const RECOVERY_VIEW: i32 = 28;
@@ -76,9 +72,6 @@ struct State {
     shares: Vec<(String, String, String, bool)>,
     share_draft: (String, String, String),
     volumes: Vec<(String, String, i64, i64)>,
-    backups: Vec<(String, String, String, i64)>,
-    with_screenshots: bool,
-    with_appdata: bool,
 }
 
 thread_local! {
@@ -173,28 +166,9 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                         format!("{} • {}", tr(ui, 626, "Eject"), human(*total)))), true));
             }
         }
-        BACKUP_VIEW => {
-            rows.extend(crate::storageui::backup_rows(ui));
-            rows.push(("shots".into(), toggle(tr(ui, 632, "Include Screenshots"), st.with_screenshots, String::new()), true));
-            rows.push(("appdata".into(), toggle(tr(ui, 633, "Include App Data"), st.with_appdata, String::new()), true));
-            let mut b = row(tr(ui, 631, "Back Up Now"), if st.busy { tr(ui, 91, "Running") } else { String::new() }, String::new());
-            b.enabled = !st.busy;
-            rows.push(("backup".into(), b, !st.busy));
-        }
+        BACKUP_VIEW => rows.extend(crate::storageui::backup_rows(ui)),
         RECOVERY_VIEW => {
             rows.extend(crate::storageui::restore_rows(ui));
-            if st.backups.is_empty() {
-                let mut r = row(tr(ui, 634, "No backups found"), String::new(), String::new());
-                r.enabled = false;
-                rows.push(("info".into(), r, false));
-            }
-            for (path, user, created, size) in &st.backups {
-                let key = format!("restore:{path}");
-                rows.push((key.clone(), row(backup_title(user, created), human(*size),
-                    armed_detail(&armed, &key, tr(ui, 191, "Press again to confirm"),
-                        tr(ui, 636, "Replaces this profile's saves, save states and settings. ROMs and BIOS are not affected."))),
-                    !st.busy));
-            }
             rows.extend(crate::recovery_rows(ui));
         }
         _ => {}
@@ -202,35 +176,17 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
     rows
 }
 
-fn backup_title(user: &str, created: &str) -> String {
-    format!("{} • {}", user, created.replace('T', " ").trim_end_matches('Z'))
-}
-
-/* Backup: BACKUP TO SD2 (storageui, only with a card slot), then PROFILE
- * BACKUP. Recovery: BACKUP TO SD2 (Restore from SD2, only with a backup on
- * the card), PROFILE BACKUP (the saved backups), REPAIR & RESET. */
+/* Backup: one section, the console backup (user request 2026-10-12: no
+ * separate profile backup). Recovery: RESTORE, then REPAIR & RESET. */
 fn sections(ui: &HomeWindow, view: i32, rows: Vec<(String, GenRow, bool)>) {
-    let (user, device) = (tr(ui, 312, "USER"), tr(ui, 313, "DEVICE"));
-    let sd2 = tr(ui, 931, "BACKUP TO SD2");
-    let profile = tr(ui, 981, "PROFILE BACKUP");
-    let first = |key: fn(&str) -> bool| rows.iter().position(|r| key(&r.0)).unwrap_or(rows.len()) as i32;
+    let device = tr(ui, 313, "DEVICE");
     if view == BACKUP_VIEW {
-        let n = first(|k| k == "shots");
-        if n > 0 {
-            apply_rows_sections(ui, rows, sd2, (n, profile), (0, String::new()), &[device, user]);
-        } else {
-            apply_rows_sections(ui, rows, profile, (0, String::new()), (0, String::new()), &[user]);
-        }
+        apply_rows_sections(ui, rows, tr(ui, 1024, "BACKUP"), (0, String::new()), (0, String::new()), &[device]);
         return;
     }
-    let reset = tr(ui, 983, "REPAIR & RESET");
-    let n1 = first(|k| k != "sd2-restore");
-    let n2 = first(crate::is_recovery_key);
-    if n1 > 0 {
-        apply_rows_sections(ui, rows, sd2, (n1, profile), (n2, reset), &[device.clone(), user, device]);
-    } else {
-        apply_rows_sections(ui, rows, profile, (n2, reset), (0, String::new()), &[user, device]);
-    }
+    let reset = rows.iter().position(|r| crate::is_recovery_key(&r.0)).unwrap_or(rows.len()) as i32;
+    apply_rows_sections(ui, rows, tr(ui, 1014, "RESTORE"), (reset, tr(ui, 983, "REPAIR & RESET")), (0, String::new()),
+        &[device.clone(), device]);
 }
 
 pub(crate) fn render(ui: &HomeWindow) {
@@ -253,16 +209,8 @@ pub(crate) fn render(ui: &HomeWindow) {
             ui.set_gen_index(i as i32);
         }
     }
-    if view == BACKUP_VIEW {
+    if view == BACKUP_VIEW || view == RECOVERY_VIEW {
         sections(ui, view, rows);
-    } else if view == RECOVERY_VIEW {
-        sections(ui, view, rows);
-        /* On a saved backup: Confirm restores, North deletes. */
-        let on_backup = focused_key(ui).starts_with("restore:") && !STATE.with(|st| st.borrow().busy);
-        if on_backup {
-            ui.set_gen_select_label(tr(ui, 635, "Restore").into());
-        }
-        ui.set_settings_north_hint(if on_backup { tr(ui, 618, "Delete").into() } else { "".into() });
     } else {
         apply_rows(ui, rows, section);
     }
@@ -588,88 +536,7 @@ fn open_page(ui: &HomeWindow, view: i32, key: &str) {
     });
     ui.set_recovery_stage(0);
     show(ui, view);
-    refresh_backups(ui);
-}
-
-fn refresh_backups(ui: &HomeWindow) {
-    let weak = ui.as_weak();
-    thread::spawn(move || {
-        let mut dirs = vec![INTERNAL_BACKUPS.to_owned()];
-        for f in parse_kv_lines(&run_tool(MEDIACTL, &["list"], None), "volume") {
-            if f.len() >= 3 {
-                dirs.push(format!("{}/nuubos-backups", f[2]));
-            }
-        }
-        let refs: Vec<&str> = std::iter::once("list").chain(dirs.iter().map(String::as_str)).collect();
-        let mut backups: Vec<(String, String, String, i64)> = parse_kv_lines(&run_tool(BACKUPCTL, &refs, None), "backup")
-            .into_iter()
-            .filter(|f| f.len() >= 4)
-            .map(|f| (f[0].into(), f[1].into(), f[2].into(), f[3].parse().unwrap_or(0)))
-            .collect();
-        backups.sort_by(|a, b| b.2.cmp(&a.2));
-        let _ = slint::invoke_from_event_loop(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            STATE.with(|st| st.borrow_mut().backups = backups);
-            render(&ui);
-        });
-    });
-}
-
-fn backup_destinations(ui: &HomeWindow) {
-    let volumes = STATE.with(|st| st.borrow().volumes.clone());
-    let mut options = vec![(INTERNAL_BACKUPS.to_owned(), tr(ui, 610, "Internal Storage"))];
-    for (name, path, _, _) in volumes {
-        options.push((format!("{path}/nuubos-backups"), volume_label(ui, &name)));
-    }
-    open_settings_choice(ui, "backup-destination", &tr(ui, 631, "Back Up Now"), options, INTERNAL_BACKUPS);
-}
-
-fn start_backup(ui: &HomeWindow, dest: String) {
-    let user = ui.get_active_user_id().to_string();
-    let (shots, appdata) = STATE.with(|st| (st.borrow().with_screenshots, st.borrow().with_appdata));
-    STATE.with(|st| st.borrow_mut().busy = true);
     render(ui);
-    let weak = ui.as_weak();
-    thread::spawn(move || {
-        let _ = std::fs::create_dir_all(&dest);
-        let mut args = vec!["run".to_owned(), "backup-user".into(), user, dest];
-        if shots {
-            args.push("screenshots".into());
-        }
-        if appdata {
-            args.push("appdata".into());
-        }
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let ok = !run_tool(JOBCTL, &refs, None).starts_with("ERR");
-        let _ = slint::invoke_from_event_loop(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            STATE.with(|st| st.borrow_mut().busy = false);
-            notice(&ui, if ok { tr(&ui, 637, "Backup created") } else { tr(&ui, 639, "The backup could not be created") });
-            refresh_backups(&ui);
-        });
-    });
-}
-
-fn start_restore(ui: &HomeWindow, file: String) {
-    let user = ui.get_active_user_id().to_string();
-    STATE.with(|st| st.borrow_mut().busy = true);
-    render(ui);
-    let weak = ui.as_weak();
-    thread::spawn(move || {
-        let out = run_tool(JOBCTL, &["run", "restore-user", &file, &user], None);
-        let restart = out.trim() == "restart-required";
-        let ok = !out.starts_with("ERR");
-        if restart {
-            /* Every service reloads the restored settings: central path. */
-            let _ = run_tool("/usr/bin/nuubos-systemctl", &["restart"], None);
-        }
-        let _ = slint::invoke_from_event_loop(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            STATE.with(|st| st.borrow_mut().busy = false);
-            notice(&ui, if ok { tr(&ui, 638, "Restore complete") } else { tr(&ui, 640, "The backup could not be restored") });
-            render(&ui);
-        });
-    });
 }
 
 /* Input on Settings pages 61, 62 and 28 (gameui::handle_page). */
@@ -677,14 +544,6 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
     match action {
         "menu_up" | "menu_down" => move_selection(ui, action),
         "menu_back" => if view == 61 { crate::storageui::open(ui) } else { navigate_settings_view(ui, 19) },
-        "face_north" if view == RECOVERY_VIEW && !STATE.with(|st| st.borrow().busy) => {
-            let key = focused_key(ui);
-            let Some(path) = key.strip_prefix("restore:") else { return };
-            let title = STATE.with(|st| st.borrow().backups.iter().find(|b| b.0 == path)
-                .map(|b| backup_title(&b.1, &b.2)).unwrap_or_default());
-            let options = vec![("delete".to_owned(), tr(ui, 618, "Delete")), ("cancel".to_owned(), tr(ui, 619, "Cancel"))];
-            open_settings_choice(ui, "backup-delete", &tr_arg(ui, 620, "Delete \"{0}\"?", &title), options, "cancel");
-        }
         "menu_confirm" => {
             let key = focused_key(ui);
             if (view == BACKUP_VIEW || view == RECOVERY_VIEW)
@@ -699,31 +558,6 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
                                 else { tr(ui, 628, "In use; close what uses it first") });
                             refresh_media(ui);
                         });
-                    }
-                }
-                (BACKUP_VIEW, "shots") => {
-                    STATE.with(|st| { let mut st = st.borrow_mut(); st.with_screenshots = !st.with_screenshots; });
-                    render(ui);
-                }
-                (BACKUP_VIEW, "appdata") => {
-                    STATE.with(|st| { let mut st = st.borrow_mut(); st.with_appdata = !st.with_appdata; });
-                    render(ui);
-                }
-                (BACKUP_VIEW, "backup") => {
-                    /* Fresh volume list for the destination choice. */
-                    tool_then(ui, MEDIACTL, vec!["list".into()], None, |ui, out| {
-                        let volumes = parse_kv_lines(&out, "volume")
-                            .into_iter()
-                            .filter(|f| f.len() >= 6)
-                            .map(|f| (f[0].to_owned(), f[2].to_owned(), f[3].parse().unwrap_or(0), f[4].parse().unwrap_or(0)))
-                            .collect();
-                        STATE.with(|st| st.borrow_mut().volumes = volumes);
-                        backup_destinations(ui);
-                    });
-                }
-                (RECOVERY_VIEW, k) if k.starts_with("restore:") => {
-                    if arm_or(ui, k) {
-                        start_restore(ui, k[8..].to_owned());
                     }
                 }
                 _ => {}
@@ -774,16 +608,6 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
                     notice(ui, tr(ui, 645, "The share could not be reached"));
                 }
                 refresh_shares(ui);
-            });
-        }
-        "backup-destination" => start_backup(ui, value),
-        "backup-delete" if value == "delete" => {
-            let key = focused_key(ui);
-            let Some(path) = key.strip_prefix("restore:").map(str::to_owned) else { return };
-            tool_then(ui, BACKUPCTL, vec!["delete".into(), path], None, |ui, out| {
-                notice(ui, if out.starts_with("OK") { tr(ui, 737, "Backup deleted") }
-                    else { tr(ui, 738, "The backup could not be deleted") });
-                refresh_backups(ui);
             });
         }
         _ => {}

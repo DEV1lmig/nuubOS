@@ -28,6 +28,7 @@
 #define PIDFILE "/run/nuubos-inputd.pid"
 #define LOG_PATH "/run/nuubos/inputd.log"
 #define SUPPRESS_START_PATH "/run/nuubos/input/suppress-start"
+#define SUPPRESS_POWER_PATH "/run/nuubos/input/suppress-power"
 #define DEFAULT_CONFIG "/etc/nuubos/input-bindings.conf"
 #define STATE_CONFIG "/state/config/nuubos-input.conf"
 #define STATE_CONFIG_TMP "/state/config/.nuubos-input.conf.tmp"
@@ -450,6 +451,22 @@ static void clear_suppress_start_marker(const char *reason)
 	}
 
 	log_message("wake-guard clear-failed reason=%s errno=%d",
+		    reason, errno);
+}
+
+static bool suppress_power_marker_present(void)
+{
+	return access(SUPPRESS_POWER_PATH, F_OK) == 0;
+}
+
+static void clear_suppress_power_marker(const char *reason)
+{
+	if (unlink(SUPPRESS_POWER_PATH) == 0 || errno == ENOENT) {
+		log_message("wake-guard power clear reason=%s", reason);
+		return;
+	}
+
+	log_message("wake-guard power clear-failed reason=%s errno=%d",
 		    reason, errno);
 }
 
@@ -2883,6 +2900,27 @@ static void process_input(struct input_dev *input)
 
 			if (events[i].value == 0)
 				clear_suppress_start_marker("physical-start-release");
+
+			continue;
+		}
+
+		/*
+		 * Same guard for the power key: when it woke the device
+		 * (nuubos-suspend keeps the marker only then), its press and
+		 * release would otherwise open the Power OSD on resume.
+		 */
+		if (events[i].code == KEY_POWER &&
+		    suppress_power_marker_present()) {
+			log_message(
+				"wake-guard suppress-power value=%d device=%s",
+				events[i].value,
+				input->name);
+
+			snprintf(last_action, sizeof(last_action),
+				 "suppressed_power");
+
+			if (events[i].value == 0)
+				clear_suppress_power_marker("physical-power-release");
 
 			continue;
 		}

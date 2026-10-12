@@ -7,7 +7,7 @@
  *   bulk all|missing[:SECONDS]|lang|system:<id>
  *                            all: games without metadata; missing: also
  *                            matched games that lack any data the source
- *                            can give (cover, screenshot, description,
+ *                            can give (cover, description,
  *                            release, genre, developer, publisher,
  *                            players), skipping games tried in the last
  *                            SECONDS (<rom name>.tried); lang: matched
@@ -27,9 +27,10 @@
  * mapped into the provider-neutral store shared by every user:
  *   /userdata/library/metadata/<system>/<rom name>.txt   key=value lines
  *   /userdata/library/covers/<system>/<rom name>.png|jpg  (Library covers)
- *   /userdata/library/screenshots/<system>/<rom name>.png|jpg
  *   /userdata/library/cache/                               source caches
  * Everything is derived data: removable and rebuildable, never the ROMs.
+ * No screenshots (user request 2026-10-12: the UI only ever shows the
+ * cover; they cost requests, space and backup time).
  *
  * Sources (one active, device-wide, /state/scraper/scraper.conf):
  * - screenscraper, thegamesdb: through Skyscraper (package skyscraper,
@@ -40,7 +41,7 @@
  *   through a config file on tmpfs (/run/nuubos/scraper). Skyscraper's
  *   resource cache lives in /userdata/library/cache/skyscraper; nuubOS
  *   reads its results from a Pegasus list generated into a scratch folder.
- * - libretro: covers and screenshots of thumbnails.libretro.com, matched by
+ * - libretro: covers of thumbnails.libretro.com, matched by
  *   the No-Intro/Redump name, read directly; no account. The per-system
  *   name index is cached for a week.
  *
@@ -106,7 +107,6 @@
 #define ROMS_ROOT USERDATA_ROOT "/roms"
 #define META_ROOT USERDATA_ROOT "/library/metadata"
 #define COVERS_ROOT USERDATA_ROOT "/library/covers"
-#define SHOTS_ROOT USERDATA_ROOT "/library/screenshots"
 #define CACHE_ROOT USERDATA_ROOT "/library/cache"
 #define SCRAPER_STATE STATE_ROOT "/scraper"
 #define SETTINGS_FILE SCRAPER_STATE "/scraper.conf"
@@ -162,15 +162,12 @@ struct metadata {
 	char players[32];
 	char rating[16];
 	char cover_url[1024];
-	char shot_url[1024];
-	char screenshot[PATH_MAX];
 	/* Language of description/genre (ScreenScraper/TheGamesDB runs). */
 	char lang[8];
 	/* "key@xx=value" lines of other languages, kept as they are. */
 	char other_langs[16384];
-	/* Not stored: a cover/screenshot file a source produced locally. */
+	/* Not stored: a cover file a source produced locally. */
 	char cover_file[PATH_MAX];
-	char shot_file[PATH_MAX];
 };
 
 /* ------------------------------------------------------------------ */
@@ -888,7 +885,7 @@ static bool cover_exists(const struct game_info *g)
 #define META_FIELDS(X) \
 	X(provider) X(provider_id) X(match) X(search) X(title) X(description) \
 	X(release) X(developer) X(publisher) X(genre) X(players) X(rating) \
-	X(screenshot) X(cover_url) X(shot_url) X(lang)
+	X(cover_url) X(lang)
 
 /* Localized fields kept per language. */
 static bool localized_key(const char *key, size_t len)
@@ -963,7 +960,7 @@ static int write_metadata(const struct game_info *g, const struct metadata *m)
 	if (!fp)
 		return -1;
 	fprintf(fp, "# nuubOS game metadata (provider-neutral)\n");
-	/* Credential-free media references (cover_url, shot_url) for Accept. */
+	/* Credential-free media reference (cover_url) for Accept. */
 #define WRITE(f) if (m->f[0]) fprintf(fp, #f "=%s\n", m->f);
 	META_FIELDS(WRITE)
 #undef WRITE
@@ -1006,15 +1003,14 @@ static void merge_fields(struct metadata *dst, const struct metadata *src)
 #define MERGE(f) if (!dst->f[0]) copy_text(dst->f, sizeof(dst->f), src->f);
 	MERGE(title) MERGE(description) MERGE(release) MERGE(developer)
 	MERGE(publisher) MERGE(genre) MERGE(players) MERGE(rating)
-	MERGE(screenshot) MERGE(cover_url) MERGE(shot_url)
-	MERGE(cover_file) MERGE(shot_file)
+	MERGE(cover_url) MERGE(cover_file)
 #undef MERGE
 }
 
 /* Data the active source can still add to this game. */
 static bool missing_data(const struct game_info *g, const struct metadata *m, int provider)
 {
-	if (!cover_exists(g) || !m->screenshot[0] || access(m->screenshot, F_OK) != 0)
+	if (!cover_exists(g))
 		return true;
 	if (provider == PROV_LIBRETRO)
 		return false;
@@ -1026,30 +1022,17 @@ static bool missing_data(const struct game_info *g, const struct metadata *m, in
 
 /* Install media: files a source produced (Skyscraper) or references
  * (libretro, older ScreenScraper data) downloaded now. */
-static void install_media(const struct game_info *g, struct metadata *m, bool replace_cover, bool replace_shot)
+static void install_media(const struct game_info *g, const struct metadata *m, bool replace_cover)
 {
 	char base[PATH_MAX - 8], path[PATH_MAX];
-	bool want_cover = replace_cover || !cover_exists(g);
-	bool want_shot = replace_shot || !m->screenshot[0] || access(m->screenshot, F_OK) != 0;
 
-	if (want_cover) {
-		snprintf(base, sizeof(base), COVERS_ROOT "/%s/%s", g->system, g->stem);
-		if (m->cover_file[0])
-			(void)import_media(m->cover_file, base, path, sizeof(path));
-		else if (m->cover_url[0] && !strncmp(m->cover_url, LIBRETRO_BASE, strlen(LIBRETRO_BASE)))
-			(void)download_media(m->cover_url, base, path, sizeof(path));
-	}
-	if (want_shot) {
-		bool ok = false;
-
-		snprintf(base, sizeof(base), SHOTS_ROOT "/%s/%s", g->system, g->stem);
-		if (m->shot_file[0])
-			ok = import_media(m->shot_file, base, path, sizeof(path));
-		else if (m->shot_url[0] && !strncmp(m->shot_url, LIBRETRO_BASE, strlen(LIBRETRO_BASE)))
-			ok = download_media(m->shot_url, base, path, sizeof(path));
-		if (ok)
-			copy_text(m->screenshot, sizeof(m->screenshot), path);
-	}
+	if (!replace_cover && cover_exists(g))
+		return;
+	snprintf(base, sizeof(base), COVERS_ROOT "/%s/%s", g->system, g->stem);
+	if (m->cover_file[0])
+		(void)import_media(m->cover_file, base, path, sizeof(path));
+	else if (m->cover_url[0] && !strncmp(m->cover_url, LIBRETRO_BASE, strlen(LIBRETRO_BASE)))
+		(void)download_media(m->cover_url, base, path, sizeof(path));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1078,8 +1061,8 @@ static void ini_quote(const char *in, char *out, size_t size)
 }
 
 /* Skyscraper's home on tmpfs: its config.ini carries the user's account
- * and key and never reaches USERDATA. Raw cover and screenshot exports
- * (artwork.xml without layers), sizes for Home and the Details hero. */
+ * and key and never reaches USERDATA. Raw cover export (artwork.xml
+ * without layers), sized for Home and the Details hero. */
 static int sky_prepare(void)
 {
 	struct account a;
@@ -1126,7 +1109,6 @@ static int sky_prepare(void)
 			  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
 			  "<artwork>\n"
 			  "  <output type=\"cover\" height=\"720\"/>\n"
-			  "  <output type=\"screenshot\" width=\"640\"/>\n"
 			  "</artwork>\n", false);
 }
 
@@ -1265,8 +1247,6 @@ static void pegasus_pair(const char *key, char *value, struct sky_item *items, s
 		snprintf(m->rating, sizeof(m->rating), "%ld", strtol(value, NULL, 10));
 	else if (!strcmp(key, "assets.boxFront"))
 		copy_text(m->cover_file, sizeof(m->cover_file), value);
-	else if (!strcmp(key, "assets.screenshot"))
-		copy_text(m->shot_file, sizeof(m->shot_file), value);
 }
 
 /* Results of a generated Pegasus list into the batch. A value continues
@@ -1370,7 +1350,7 @@ static enum outcome sky_lookup(int provider, const struct system_map *s, struct 
 	argv[argc++] = "-i";
 	argv[argc++] = (char *)items[0].g->root;
 	argv[argc++] = "--flags";
-	argv[argc++] = "unattend,nowheels,nomarquees,notextures";
+	argv[argc++] = "unattend,noscreenshots,nowheels,nomarquees,notextures";
 	/* Another language: Skyscraper's cache holds the text of the last
 	 * one, so the source is asked again. */
 	if (refresh_cache) {
@@ -1404,7 +1384,7 @@ static enum outcome sky_lookup(int provider, const struct system_map *s, struct 
 		return STOP;
 	}
 
-	/* Game list generation from the cache: raw cover and screenshot. */
+	/* Game list generation from the cache: raw cover. */
 	argc = 0;
 	argv[argc++] = "Skyscraper";
 	argv[argc++] = "-p";
@@ -1646,7 +1626,6 @@ static enum outcome libretro_lookup(const struct game_info *g, const char *name,
 		char *en = curl_easy_escape(esc, best, 0);
 
 		snprintf(m->cover_url, sizeof(m->cover_url), LIBRETRO_BASE "/%s/Named_Boxarts/%s.png", ef, en);
-		snprintf(m->shot_url, sizeof(m->shot_url), LIBRETRO_BASE "/%s/Named_Snaps/%s.png", ef, en);
 		curl_free(ef);
 		curl_free(en);
 	}
@@ -1726,15 +1705,11 @@ static enum outcome apply(const struct game_info *g, enum mode mode, struct meta
 		m = *old;
 		merge_fields(&m, fresh);
 		copy_text(m.cover_file, sizeof(m.cover_file), fresh->cover_file);
-		copy_text(m.shot_file, sizeof(m.shot_file), fresh->shot_file);
 		copy_text(m.cover_url, sizeof(m.cover_url), fresh->cover_url);
-		copy_text(m.shot_url, sizeof(m.shot_url), fresh->shot_url);
-		install_media(g, &m, false, false);
+		install_media(g, &m, false);
 		/* References of the source that answered: Accept stays right. */
-		if (!old->cover_url[0] && !old->shot_url[0]) {
+		if (!old->cover_url[0])
 			m.cover_url[0] = '\0';
-			m.shot_url[0] = '\0';
-		}
 	} else {
 		/* New data first; what the source lacks keeps the old value (an
 		 * Update never loses data). */
@@ -1742,7 +1717,7 @@ static enum outcome apply(const struct game_info *g, enum mode mode, struct meta
 		if (mode == MODE_FORCE)
 			merge_fields(&m, old);
 		if (!strcmp(m.match, "auto"))
-			install_media(g, &m, mode == MODE_FORCE, mode == MODE_FORCE);
+			install_media(g, &m, mode == MODE_FORCE);
 	}
 	/* Languages already fetched stay (a cache: switching back costs no
 	 * request); the previous plain text becomes its own language. */
@@ -1854,7 +1829,7 @@ static void scrape_batch(int provider, const struct game_info *games, size_t cou
 	/*
 	 * Second chance for what the file names did not find (user report
 	 * 2026-10-09: many titles missed): the same source searched by a
-	 * cleaned name, then libretro thumbnails (cover and screenshot) by the
+	 * cleaned name, then libretro thumbnails (cover) by the
 	 * title key. Not for games with the user's own search name, nor after
 	 * a stop (quota, network...).
 	 */
@@ -2081,7 +2056,7 @@ static int cmd_accept(const char *id)
 		return 1;
 	}
 	copy_text(m.match, sizeof(m.match), "user");
-	install_media(&g, &m, false, false);
+	install_media(&g, &m, false);
 	if (write_metadata(&g, &m) != 0) {
 		puts("ERR storage");
 		return 1;
@@ -2106,8 +2081,6 @@ static int cmd_reject_or_clear(const char *id, bool reject)
 	had = read_metadata(&g, &m);
 	/* Scraped media goes with the metadata; user-supplied covers next
 	 * to the ROMs (media/covers) are never touched. */
-	if (had && !strncmp(m.screenshot, SHOTS_ROOT "/", strlen(SHOTS_ROOT) + 1))
-		unlink(m.screenshot);
 	if (!reject && had && m.provider[0])
 		for (size_t i = 0; i < 3; i++) {
 			snprintf(path, sizeof(path), COVERS_ROOT "/%s/%s.%s", g.system, g.stem, exts[i]);

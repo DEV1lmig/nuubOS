@@ -5,7 +5,9 @@ config BR2_PACKAGE_NUUBOS_SYNC
 	select BR2_PACKAGE_SYNCTHING
 	select BR2_PACKAGE_CJSON
 	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_NUUBOS_NOTIFY
 	help
 	  EPIC-034: optional per-user Syncthing (saves, save states,
-	  screenshots) run for the active user only (nuubos-syncd) and
-	  configured through nuubos-syncctl.
+	  screenshots) run for the active user only by nuubos-syncd, the
+	  owner of the sync state (socket /run/nuubos/syncd.sock);
+	  nuubos-syncctl is its command line.

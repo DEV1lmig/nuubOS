@@ -1,6 +1,6 @@
 #!/bin/sh
-# Host test: nuubos-filesctl allowlist and operations, nuubos-backupctl
-# round trip and archive validation, nuubos-sharesctl input checks.
+# Host test: nuubos-filesctl allowlist and operations, nuubos-sharesctl
+# input checks.
 # Run: sh package/nuubos/nuubos-files/tests/files.sh
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../src"
@@ -41,44 +41,8 @@ ck "delete folder" '$F delete "$U/Games" | grep -q OK && [ ! -e "$U/Games" ]'
 ck "info size" '[ "$($F info "$U/roms" | sed -n "s/^size=//p")" -ge 8 ]'
 ck "unmounted media folder not a root" '! $F roots | grep -q "^root=media"'
 
-# Backup & restore
-R="$T/r"; ID=11111111-1111-1111-1111-111111111111; ID2=22222222-2222-2222-2222-222222222222
-for i in $ID $ID2; do
-    mkdir -p "$R/state/users/$i/secrets" "$R/userdata/users/$i/saves/snes" "$R/userdata/users/$i/library"
-    printf 'NUUBOS_USER_PROFILE_VERSION=1\nUSER_ID=%s\nUSER_NAME=Name %s\n' "$i" "${i%%-*}" > "$R/state/users/$i/profile.conf"
-done
-echo "LANGUAGE=it" > "$R/state/users/$ID/localization.conf"
-echo "TOKEN" > "$R/state/users/$ID/secrets/key"
-echo "save-v1" > "$R/userdata/users/$ID/saves/snes/mario.srm"
-echo "h 1" > "$R/userdata/users/$ID/library/history.tsv"
-echo "other" > "$R/userdata/users/$ID2/saves/snes/zelda.srm"
-mkdir -p "$R/backups"
-B() { NUUBOS_ROOT="$R" sh "$SRC/nuubos-backupctl" "$@"; }
-OUT="$(B backup $ID "$R/backups")"
-FILE="${OUT#OK }"
-ck "backup created" '[ -f "$FILE" ]'
-ck "no secrets in backup" '! tar -tf "$FILE" | grep -q secrets'
-ck "manifest" 'tar -xOf "$FILE" MANIFEST | grep -q "user_id=$ID"'
-ck "list finds it" 'B list "$R/backups" | grep -q "Name 11111111"'
-echo "save-v2" > "$R/userdata/users/$ID/saves/snes/mario.srm"; echo "LANGUAGE=de" > "$R/state/users/$ID/localization.conf"
-ck "restore" 'B restore "$FILE" $ID | grep -q "^OK"'
-ck "save restored" '[ "$(cat "$R/userdata/users/$ID/saves/snes/mario.srm")" = save-v1 ]'
-ck "settings restored" 'grep -q "LANGUAGE=it" "$R/state/users/$ID/localization.conf"'
-ck "identity kept" 'grep -q "USER_ID=$ID" "$R/state/users/$ID/profile.conf"'
-ck "other profile untouched" '[ "$(cat "$R/userdata/users/$ID2/saves/snes/zelda.srm")" = other ]'
-ck "restore into another profile" 'B restore "$FILE" $ID2 | grep -q "^OK" && [ -f "$R/userdata/users/$ID2/saves/snes/mario.srm" ] && grep -q "USER_ID=$ID2" "$R/state/users/$ID2/profile.conf"'
-# Corrupted archive: a file changed after SHA256SUMS.
-mkdir "$T/bad" && tar -C "$T/bad" -xf "$FILE" && echo tampered > "$T/bad/userdata/saves/snes/mario.srm" && tar -C "$T/bad" -cf "$T/bad.tar" MANIFEST SHA256SUMS state userdata
-echo "save-v3" > "$R/userdata/users/$ID/saves/snes/mario.srm"
-ck "checksum mismatch refused" 'B restore "$T/bad.tar" $ID | grep -q "ERR checksum"'
-ck "live data untouched after refusal" '[ "$(cat "$R/userdata/users/$ID/saves/snes/mario.srm")" = save-v3 ]'
-mkdir "$T/evil" && echo x > "$T/evil/MANIFEST" && (cd "$T/evil" && tar -cf "$T/evil.tar" MANIFEST ../evil/MANIFEST 2>/dev/null)
-ck "dotdot archive refused" 'B restore "$T/evil.tar" $ID | grep -q "ERR"'
-ck "no staging left" '! ls -a "$R/userdata/users/$ID" | grep -q nuubos-restore'
-echo x > "$R/backups/notes.tar"
-ck "delete refuses a non-backup" 'B delete "$R/backups/notes.tar" | grep -q "ERR" && [ -f "$R/backups/notes.tar" ]'
-ck "delete refuses an invalid archive" 'cp "$T/evil.tar" "$R/backups/nuubos-backup-x-1.tar" && B delete "$R/backups/nuubos-backup-x-1.tar" | grep -q "ERR"'
-ck "delete" 'B delete "$FILE" | grep -q "^OK" && [ ! -f "$FILE" ] && ! B list "$R/backups" | grep -q "^backup=$FILE"'
+R="$T/r"
+mkdir -p "$R"
 
 # Shares input validation (no mount on the host)
 SH() { NUUBOS_ROOT="$R" sh "$SRC/nuubos-sharesctl" "$@"; }

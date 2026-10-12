@@ -95,9 +95,9 @@ const JOB_NAMES = {
   'scrape-game': () => C(571, 'Getting metadata'),
   'file-copy': () => C(623, 'Copying files'),
   'file-move': () => C(624, 'Moving files'),
-  'backup-user': () => C(631, 'Back Up Now'),
-  'restore-user': () => C(635, 'Restore'),
+  'sd2-backup': () => C(982, 'Backup'),
   'update-download': () => C(660, 'Downloading update'),
+  'update-install': () => C(984, 'Installing update'),
 };
 
 function jobRow(j) {
@@ -541,7 +541,6 @@ page('general', 'settings', () => C(4, 'General'), async (path) => {
   const me = all.find((u) => u[0] === users.active);
   if (path[0] === 'profile') return profilePage(path[1] || users.active, all, users);
   if (path[0] === 'avatar') return avatarPage(path[1] || users.active);
-  if (path[0] === 'backup') return backupPage(users.active, all);
   const theme = rows(themes.list).find((t) => t[0] === themes.selected);
   const nodes = [
     section(C(333, 'PROFILE'), 'user'),
@@ -609,7 +608,6 @@ async function profilePage(id, all, users) {
       if (v && v.name.trim()) { await act('user.rename', { id, name: v.name.trim() }); toast(C(320, 'Profile updated')); }
     } }),
     row({ key: 'pic', title: C(286, 'Profile Picture'), image: img(u[3]), chevron: true, on: () => go('general/avatar/' + id) }),
-    active ? row({ key: 'backup', title: C(630, 'Backup & Restore'), icon: 'box-archive', chevron: true, on: () => go('general/backup') }) : null,
   ), section(C(334, 'USERS'), 'device'), group(
     active ? null : row({ key: 'switch', title: C(292, 'Switch User'), detail: T('switch_hint'), on: () => act('user.activate', { id }) }),
     u[5] === '1' ? null : row({ key: 'def', title: C(279, 'Default User'), detail: C(306, 'Select a default user'), on: () => act('user.default', { id }) }),
@@ -635,36 +633,6 @@ async function avatarPage(id) {
       uploadFiles(okFiles.map((x) => x.file), () => `/userdata/users/${id}/profile/avatars`, { mkdirs: true }).then(() => { forget('avatars'); refresh(); });
     }, { accept: '.png,.jpg,.jpeg', folders: false }), grid],
   };
-}
-
-const backupOpts = { screenshots: false, appdata: false };
-
-async function backupPage(user, all) {
-  const b = await get('backups', {}, true);
-  const saved = rows(b.backup);
-  const nodes = [group(
-    row({ key: 'shots', title: C(632, 'Include Screenshots'), toggle: backupOpts.screenshots, set: (v) => { backupOpts.screenshots = v; } }),
-    row({ key: 'app', title: C(633, 'Include App Data'), toggle: backupOpts.appdata, set: (v) => { backupOpts.appdata = v; } }),
-    row({ key: 'now', title: C(631, 'Back Up Now'), icon: 'box-archive', on: async () => {
-      await act('backup.create', { user, dir: '/userdata/backups', ...backupOpts });
-      toast(C(631, 'Back Up Now'), T('started'));
-    } })),
-  section(C(736, 'Saved Backups'), 'user'),
-  group(saved.length ? saved.map((x) => {
-    const [file, name, when, size] = x;
-    return row({ key: 'b:' + file, title: name + ' • ' + (when || '').replace('T', ' ').replace('Z', ''), detail: file, value: size ? sizeText(Number(size) * 1024) : '',
-      on: async () => {
-        const v = await choose(file.split('/').pop(), [{ value: 'restore', label: C(635, 'Restore'), detail: C(636, 'Replaces this profile\'s saves, save states and settings. ROMs and BIOS are not affected.') },
-          { value: 'download', label: T('download') }, { value: 'delete', label: C(618, 'Delete') }]);
-        if (v === 'download') location.href = '/api/download?' + new URLSearchParams({ p: file });
-        else if (v === 'restore') {
-          const ok = await form(C(635, 'Restore'), [], { text: C(636, 'Replaces this profile\'s saves, save states and settings. ROMs and BIOS are not affected.'), ok: C(635, 'Restore') });
-          if (ok) await act('backup.restore', { file, user });
-        } else if (v === 'delete') { await act('backup.delete', { file }); toast(C(737, 'Backup deleted')); }
-      } });
-  }) : row({ key: 'nob', title: C(634, 'No backups found'), disabled: true }))];
-  nodes.push(dropZone(T('upload_backup'), 'nuubos-backup-*.tar', (items) => uploadFiles(items.map((x) => x.file), () => '/userdata/backups').then(() => { forget('backups'); refresh(); }), { accept: '.tar', folders: false }));
-  return { title: C(630, 'Backup & Restore'), back: 'general/profile', nodes, topics: ['backups', 'jobs'] };
 }
 
 /* ===================================================== CONNECTIVITY */
@@ -701,7 +669,6 @@ page('connectivity', 'settings', () => C(5, 'Connectivity'), async (path) => {
   if (path[0] === 'wifi') return wifiPage();
   if (path[0] === 'network') return networkPage(path[1]);
   if (path[0] === 'bt') return btPage();
-  if (path[0] === 'sync') return syncPage();
   const [w, b, r] = await Promise.all([get('wifi').catch(() => null), get('bluetooth').catch(() => null), get('remote')]);
   const addr = r.address || '';
   const nodes = [section(C(156, 'WI-FI'), 'device')];
@@ -735,8 +702,7 @@ page('connectivity', 'settings', () => C(5, 'Connectivity'), async (path) => {
       setTimeout(() => { revealed = ''; refresh(); }, 30000);
     } }),
     row({ key: 'regen', title: C(606, 'Regenerate Password'), detail: C(607, 'The old password stops working') + ' • ' + T('signs_out'),
-      arm: { prompt: C(191, 'Press again to confirm') }, on: async () => { await act('remote.regenerate'); showLogin(T('password_changed')); } }),
-    row({ key: 'sync', title: C(669, 'Syncthing'), detail: C(670, 'Keeps your saves in sync with your other devices. It is not a backup.'), chevron: true, on: () => go('connectivity/sync') })));
+      arm: { prompt: C(191, 'Press again to confirm') }, on: async () => { await act('remote.regenerate'); showLogin(T('password_changed')); } })));
   nodes.push(h('div', { class: 'notice', text: C(604, 'Only on networks you trust. Never exposed to the Internet.') }));
   return { title: C(5, 'Connectivity'), nodes, topics: ['wifi', 'bluetooth', 'remote'] };
 });
@@ -828,24 +794,57 @@ async function btPage() {
 
 async function syncPage() {
   const s = await get('sync', {}, true);
-  const enabled = on01(s.enabled);
-  const folders = Object.fromEntries(rows(s.folder).map((f) => [f[0], f[1] === '1']));
-  const nodes = [group(row({ key: 'on', title: C(669, 'Syncthing'), detail: C(670, 'Keeps your saves in sync with your other devices. It is not a backup.'), toggle: enabled,
-    set: (v) => act('sync.enable', { v }) }))];
+  const enabled = on01(s.enabled), ready = on01(s.ready);
+  const folders = Object.fromEntries(rows(s.folder).map((f) => [f[0], f]));
+  const pending = rows(s.pending), devices = rows(s.device), nearby = rows(s.nearby);
+  const code = (id) => (id || '').slice(0, 7);
+  const label = (d) => d[1] || C(1059, 'Device {0}', code(d[0]));
+  const syncing = (f) => ['syncing', 'sync-preparing', 'sync-waiting'].includes(f[2]);
+  /* The same status line as the console (syncui.rs). */
+  const status = on01(s.failed) ? C(677, 'Syncthing stopped unexpectedly')
+    : !enabled ? C(670, 'Keeps your saves in sync with your other devices. It is not a backup.')
+    : !ready ? C(1025, 'Starting…')
+    : !devices.length ? C(1027, 'No devices yet')
+    : Object.values(folders).some((f) => f[1] === '1' && f[2] === 'error') ? C(1084, 'Cannot sync')
+    : !devices.some((d) => d[2] === '1') ? C(1026, 'Waiting for your devices')
+    : Object.values(folders).some((f) => f[1] === '1' && syncing(f)) || devices.some((d) => d[2] === '1' && +d[3] >= 0 && +d[3] < 100) ? C(323, 'Syncing…')
+    : C(489, 'Up to date');
+  const nodes = [group(row({ key: 'on', title: C(669, 'Syncthing'), detail: status, toggle: enabled, set: (v) => act('sync.enable', { v }) }))];
   if (enabled) {
-    nodes.push(group(row({ key: 'id', title: C(671, "This Console's ID"), detail: C(672, 'Add it on your other device; it then appears here to accept') }), h('div', { class: 'notice mono', text: s.device_id || '…' })));
-    nodes.push(section(C(673, 'Saves'), 'user'), group(['saves', 'states', 'screenshots'].map((k) => row({ key: 'f:' + k,
-      title: k === 'saves' ? C(673, 'Saves') : k === 'states' ? C(674, 'Save States') : C(675, 'Screenshots'), toggle: !!folders[k], set: (v) => act('sync.folder', { kind: k, v }) }))));
-    const pending = rows(s.pending), devices = rows(s.device);
-    if (pending.length || devices.length) {
-      nodes.push(section(C(12, 'My Devices'), 'user'), group(
-        pending.map((p) => row({ key: 'p:' + p[0], title: p[1] || p[0], detail: C(676, 'Wants to connect • press to accept'), icon: 'desktop', on: () => act('sync.accept', { device: p[0] }) })),
-        devices.map((d) => row({ key: 'd:' + d[0], title: d[1] || d[0], icon: 'desktop', pill: { text: d[2] === '1' ? C(444, 'Online') : C(445, 'Offline'), cls: d[2] === '1' ? 'on' : '' },
-          detail: d[0], arm: { prompt: C(290, 'Press again to delete') }, on: () => act('sync.remove', { device: d[0] }) }))));
-    }
+    nodes.push(group(
+      row({ key: 'me', title: C(1037, 'This Console'), value: s.device_name || '', detail: ready ? C(671, "This Console's ID") : C(1025, 'Starting…') }),
+      ready ? h('div', { class: 'notice mono', text: s.device_id }) : null,
+      row({ key: 'add', title: C(1028, 'Add a Device'), detail: C(1086, 'Device ID'), icon: 'plus', disabled: !ready, on: async () => {
+        const v = await form(C(1028, 'Add a Device'), [{ name: 'id', label: C(1086, 'Device ID') }]);
+        if (v && v.id.trim()) await act('sync.add', { device: v.id.trim().toUpperCase() });
+      } })));
+    nodes.push(section(C(1030, 'DEVICES'), 'user'));
+    const list = [
+      pending.map((p) => row({ key: 'p:' + p[0], title: label(p), detail: C(1032, 'Wants to sync with you'), icon: 'desktop',
+        on: async () => {
+          const v = await choose(label(p), [{ value: 'accept', label: C(1033, 'Accept') }, { value: 'ignore', label: C(1034, 'Ignore') }], 'accept');
+          if (v) await act(v === 'accept' ? 'sync.add' : 'sync.ignore', { device: p[0] });
+        } })),
+      devices.map((d) => row({ key: 'd:' + d[0], title: label(d), icon: 'desktop', detail: d[4] || code(d[0]),
+        pill: { text: d[2] !== '1' ? C(159, 'Not connected') : +d[3] >= 0 && +d[3] < 100 ? C(1039, '{0}% synced', d[3]) : C(198, 'Connected'), cls: d[2] === '1' ? 'on' : '' },
+        arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('sync.remove', { device: d[0] }) })),
+      nearby.map((n) => row({ key: 'n:' + n[0], title: C(1059, 'Device {0}', code(n[0])), detail: n[1], icon: 'plus',
+        on: () => act('sync.add', { device: n[0] }) })),
+    ].flat();
+    nodes.push(group(list.length ? list : row({ key: 'none', title: C(1027, 'No devices yet'), disabled: true })));
+    nodes.push(section(C(1031, 'WHAT TO SYNC'), 'user'), group(
+      [['saves', C(673, 'Saves'), ''], ['states', C(674, 'Save States'), ''], ['screenshots', C(675, 'Screenshots'), ''],
+        ['library', C(1089, 'Covers & Metadata'), C(1090, 'Shared by every profile on this console')],
+        ['history', C(1091, 'Play Activity'), C(1092, 'Time played and Recently Played, added up across your devices')]].map(([k, title, note]) => row({ key: 'f:' + k,
+        title,
+        detail: folders[k] && folders[k][1] === '1' ? (syncing(folders[k]) ? C(323, 'Syncing…') : folders[k][2] === 'error' ? C(1084, 'Cannot sync') : note) : note,
+        toggle: !!folders[k] && folders[k][1] === '1', set: (v) => act('sync.folder', { kind: k, v }) })),
+      row({ key: 'internet', title: C(1035, 'Sync Away from Home'), detail: C(1036, 'Finds your devices over the Internet; your data still goes straight between them'),
+        toggle: on01(s.internet), set: (v) => act('sync.internet', { v }) }),
+      row({ key: 'relays', title: C(1087, 'Allow Relays'), detail: C(1088, 'If a direct connection is impossible, the encrypted data may pass through public Syncthing servers'),
+        toggle: on01(s.internet) && on01(s.relays), disabled: !on01(s.internet), set: (v) => act('sync.relays', { v }) })));
   }
-  if (on01(s.failed)) nodes.push(h('div', { class: 'notice', text: C(677, 'Syncthing stopped unexpectedly') }));
-  return { title: C(669, 'Syncthing'), back: 'connectivity', nodes, topics: ['sync', 'users'] };
+  return { title: C(669, 'Syncthing'), back: 'gaming', nodes, topics: ['sync', 'users'] };
 }
 
 /* ================================================ CONTROLLERS & INPUT */
@@ -926,14 +925,16 @@ const CONTROLS = [['menu_confirm', 337, 'Face South'], ['menu_back', 338, 'Face 
   ['l1', 345, 'L1'], ['r1', 346, 'R1'], ['l2', 347, 'L2'], ['r2', 348, 'R2'], ['l3', 349, 'L3'], ['r3', 350, 'R3'], ['settings', 351, 'Start'], ['select', 352, 'Select']];
 const OVERLAY = [['fps', 783, 'Frame Rate'], ['cpu', 0, 'CPU'], ['gpu', 0, 'GPU'], ['ram', 0, 'RAM'], ['temp', 784, 'Temperature'], ['power', 785, 'Power Draw'], ['battery', 786, 'Battery'], ['clock', 787, 'Clock']];
 const SOURCES = { screenscraper: ['ScreenScraper', 793], thegamesdb: ['TheGamesDB', 794], libretro: ['libretro', 795] };
-const SOURCE_DETAILS = { 793: 'Covers, screenshots, descriptions and ratings in your language. A free ScreenScraper account gives more requests.', 794: 'Covers, screenshots and descriptions in English. A free private API key gives more requests.', 795: 'Covers and screenshots only. No account needed.' };
+const SOURCE_DETAILS = { 793: 'Covers, descriptions and ratings in your language. A free ScreenScraper account gives more requests.', 794: 'Covers and descriptions in English. A free private API key gives more requests.', 795: 'Covers only. No account needed.' };
 const controlName = (c) => { const x = CONTROLS.find((k) => k[0] === c); return x ? C(x[1], x[2]) : c; };
 
 page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
   if (path[0] === 'ra') return raPage();
   if (path[0] === 'hotkeys') return hotkeysPage();
   if (path[0] === 'overlay') return overlayPage();
-  const [emu, ra, ss, lib, jobs] = await Promise.all([get('emu_settings'), get('ra'), get('scraper'), get('library'), get('jobs')]);
+  if (path[0] === 'sync') return syncPage();
+  const [emu, ra, ss, lib, jobs, sync] = await Promise.all([get('emu_settings'), get('ra'), get('scraper'), get('library'), get('jobs'),
+    get('sync').catch(() => ({}))]);
   const set = (key, value) => act('emu.set', { key, value }, { topics: ['emu_settings'] });
   const busy = rows(jobs.job).some((j) => j[1] === 'scrape-bulk' && (j[2] === 'running' || j[2] === 'queued'));
   const avail = on01(ss.available);
@@ -975,8 +976,12 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
       } }),
     ss.provider !== 'libretro' ? row({ key: 'lang', title: C(868, 'Metadata in Your Language'), detail: C(869, 'Gets descriptions and genres in your language; the languages already downloaded stay saved'),
       disabled: !avail || busy, on: () => act('scraper.bulk', { scope: 'lang' }, { topics: ['jobs'] }) }) : null,
-    row({ key: 'bios', title: C(576, 'BIOS Files'), detail: C(581, 'Copy BIOS files to the bios folder on the SD card. nuubOS never includes them.'), chevron: true, on: () => go('bios') }))];
-  return { title: C(702, 'Gaming'), nodes, topics: ['emu_settings', 'ra', 'scraper', 'library', 'jobs'] };
+    row({ key: 'bios', title: C(576, 'BIOS Files'), detail: C(581, 'Copy BIOS files to the bios folder on the SD card. nuubOS never includes them.'), chevron: true, on: () => go('bios') })),
+    /* SYNCTHING (user request 2026-10-12: here, not in Connectivity). */
+    section(C(1094, 'SYNCTHING'), 'user'), group(
+      row({ key: 'sync', title: C(669, 'Syncthing'), value: on01(sync.enabled) ? C(222, 'On') : C(54, 'Off'),
+        detail: C(670, 'Keeps your saves in sync with your other devices. It is not a backup.'), chevron: true, on: () => go('gaming/sync') }))];
+  return { title: C(702, 'Gaming'), nodes, topics: ['emu_settings', 'ra', 'scraper', 'library', 'jobs', 'sync'] };
 });
 
 async function raPage() {
@@ -1135,6 +1140,11 @@ async function storagePage() {
     .map(([k, id, en]) => row({ key: 'it-' + k, title: C(id, en), toggle: items.includes(k),
       set: (v) => act('storage.backup.item', { item: k, v: v ? '1' : '0' }) }));
   const last = n('storage.backup.last');
+  /* The console backup: one, on the destination the user chose. */
+  const dest = s['storage.backup.dest'] || 'sd1';
+  const available = s['storage.backup.available'] === '1';
+  const destName = (d) => (d === 'sd2' ? C(64, 'SD2') : d === 'usb' ? C(1016, 'USB Drive') : C(912, 'SD1'));
+  const missing = dest === 'sd2' ? C(935, 'Insert an SD2 card to back up') : dest === 'usb' ? C(1021, 'Connect a USB drive to back up') : '';
   return {
     title: C(19, 'Storage'), back: 'system', topics: ['system', 'jobs'],
     nodes: [group(
@@ -1147,33 +1157,58 @@ async function storagePage() {
         on: () => act('storage.prepare', {}, { topics: ['jobs'] }) }) : null,
       slot && (mounted || st === 'unreadable' || st === 'ignored') && s['storage.sd2.cid'] ? row({ key: 'fmt', title: C(928, 'Format SD2'), detail: C(929, 'Erases everything on the card'), danger: true,
         arm: { prompt: C(930, 'Press again • everything on SD2 will be erased') }, on: () => act('storage.format', { cid: s['storage.sd2.cid'] }, { topics: ['jobs'] }) }) : null),
-    slot ? section(C(931, 'BACKUP TO SD2'), 'device') : null,
-    slot ? group(
+    section(C(1024, 'BACKUP'), 'device'),
+    group(
       row({ key: 'auto', title: C(69, 'Automatic Backup'), toggle: s['storage.backup.enabled'] === '1',
-        detail: mounted ? (last ? C(933, 'Last backup: {0}', new Date(last * 1000).toLocaleString()) : C(934, 'Never backed up')) : C(935, 'Insert an SD2 card to back up'),
+        detail: available ? (last ? C(933, 'Last backup: {0}', new Date(last * 1000).toLocaleString()) : C(934, 'Never backed up')) : missing,
         set: (v) => act('storage.backup.enabled', { v: v ? '1' : '0' }) }),
-      s['storage.backup.card'] !== 'conflict' ? row({ key: 'bk', title: C(88, 'Back Up Now'), disabled: st !== 'ready', on: () => act('storage.backup', {}, { topics: ['jobs'] }) })
-        : row({ key: 'conflict', title: C(942, 'Backup of a previous SD1'), detail: C(943, 'Restore it, or keep it aside and start a new backup') })) : null,
-    slot ? section(C(936, 'Backup Content'), 'device') : null,
-    slot ? group(row({ key: 'prof', title: C(945, 'Profiles & Settings'), detail: C(946, 'Always included. Passwords and accounts are never copied.'), disabled: true }), ...itemRows) : null,
+      row({ key: 'dest', title: C(1015, 'Destination'), value: destName(dest), detail: dest === 'sd1' ? C(1022, 'Lost if SD1 is formatted or replaced') : '', chevron: true,
+        on: async () => {
+          const v = await choose(C(1015, 'Destination'), [...(slot ? ['sd2'] : []), 'sd1', 'usb'].map((d) => ({ value: d, label: destName(d) })), dest);
+          if (v !== null && v !== dest) await act('storage.backup.dest', { v });
+        } }),
+      s['storage.backup.card'] !== 'conflict' ? row({ key: 'bk', title: C(88, 'Back Up Now'), disabled: !available, on: () => act('storage.backup', {}, { topics: ['jobs'] }) })
+        : row({ key: 'conflict', title: C(942, 'Backup of a previous SD1'), detail: C(943, 'Restore it, or keep it aside and start a new backup') })),
+    section(C(936, 'Backup Content'), 'device'),
+    group(row({ key: 'prof', title: C(945, 'Profiles & Settings'), detail: C(946, 'Always included. Passwords and accounts are never copied.'), disabled: true }), ...itemRows),
     section(C(625, 'Removable Media'), 'device'),
     group(row({ key: 'media', title: C(611, 'Network Shares') + ' / ' + C(625, 'Removable Media'), chevron: true, on: () => go('files/:shares') }))],
   };
 }
 
+/* Release notes in a scrollable sheet, only when asked for. */
+function showNotes(title, lines) {
+  openModal(h('div', { class: 'sheet', role: 'dialog', 'aria-label': title }, h('h3', { text: title }),
+    h('div', { class: 'opts notes' }, ...lines.map((l) => h('p', { text: '• ' + l }))),
+    button(C(239, 'Close'), () => modalClose(null))), () => {});
+}
+
 async function updatePage() {
   const u = await get('update', {}, true);
   const available = on01(u.available), downloaded = on01(u.downloaded);
+  const channels = [{ value: 'stable', label: C(986, 'Stable') }, { value: 'beta', label: C(987, 'Beta') }, { value: 'alpha', label: C(988, 'Alpha') }];
+  const channel = channels.find((c) => c.value === u.channel) || channels[0];
+  /* Release notes: one manifest line, "\\n" = new line, "\\\\" = backslash. */
+  const notes = available ? (u.notes || '').replace(/\\(n|\\)/g, (m, c) => (c === 'n' ? '\n' : '\\'))
+    .split('\n').map((l) => l.trim().replace(/^[-*•]\s*/, '')).filter((l) => l) : [];
   return {
     title: C(651, 'Software Update'), back: 'system', topics: ['update', 'jobs'],
     nodes: [group(
       row({ key: 'ver', title: C(485, 'Version'), value: u.build ? u.current + ' • ' + u.build : u.current }),
       u.provider !== 'available' ? row({ key: 'na', title: C(655, 'Updates are not available in this build'), disabled: true }) : [
+        row({ key: 'chan', title: C(985, 'Update Channel'), value: channel.label, chevron: true,
+          detail: channel.value !== 'stable' ? C(989, 'Beta and Alpha get new versions first and may have bugs') : '',
+          on: () => pickAndAct(C(985, 'Update Channel'), channels, channel.value, 'update.channel', 'v', ['update']) }),
+        row({ key: 'auto', title: C(992, 'Check Automatically'), detail: C(993, 'Once a day, when connected to Wi-Fi'), toggle: on01(u.auto),
+          set: (v) => act('update.auto', { v: v ? '1' : '0' }, { topics: ['update'] }) }),
         row({ key: 'check', title: C(487, 'Check for Updates'), value: available ? C(652, 'nuubOS {0} available', u.version) : '',
           on: async () => { toast(C(488, 'Checking…')); await act('update.check', {}, { topics: ['update'] }); const n = await get('update', {}, true); if (!on01(n.available)) toast(C(489, 'Up to date')); } }),
-        available && !downloaded ? row({ key: 'dl', title: C(653, 'Download'), detail: u.notes, on: () => act('update.download', {}, { topics: ['jobs'] }) }) : null,
-        available && downloaded ? row({ key: 'inst', title: C(654, 'Install and Restart'), detail: C(657, 'Your games, saves and settings are kept'), arm: { prompt: C(191, 'Press again to confirm') },
-          on: async () => { await act('update.install'); toast(C(654, 'Install and Restart'), T('console_restarts'), false, 0); } }) : null])],
+        available && !downloaded ? row({ key: 'dl', title: C(653, 'Download'), on: () => act('update.download', {}, { topics: ['jobs'] }) }) : null,
+        available && downloaded && u.apply_battery === 'low' ? row({ key: 'inst', title: C(654, 'Install and Restart'), detail: C(1012, 'Charge the battery above 30% to install'),
+          on: () => toast(C(1012, 'Charge the battery above 30% to install')) }) : null,
+        available && downloaded && u.apply_battery !== 'low' ? row({ key: 'inst', title: C(654, 'Install and Restart'), detail: C(657, 'Your games, saves and settings are kept'), arm: { prompt: C(191, 'Press again to confirm') },
+          on: async () => { await act('update.install', {}, { topics: ['jobs'] }); toast(C(984, 'Installing update'), T('console_restarts'), false, 0); } }) : null,
+        notes.length ? row({ key: 'notes', title: C(1005, "What's New"), chevron: true, on: () => showNotes(C(1005, "What's New") + ' • nuubOS ' + u.version, notes) }) : null])],
   };
 }
 

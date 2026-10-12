@@ -62,3 +62,5 @@ OS_RELEASE_EOF
 ln -s ../../etc/os-release "$TARGET_DIR/usr/lib/os-release"
 mkdir -p "$TARGET_DIR/usr/share/nuubos"
 printf '%s\n' "$NUUBOS_BUILD" > "$TARGET_DIR/usr/share/nuubos/build-id"
+# OTA order (EPIC-048): a release is offered only above the running serial.
+date +%s > "$TARGET_DIR/usr/share/nuubos/build-serial"

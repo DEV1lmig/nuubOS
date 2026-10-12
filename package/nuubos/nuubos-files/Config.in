@@ -5,6 +5,6 @@ config BR2_PACKAGE_NUUBOS_FILES
 	help
 	  EPIC-031/032/035/036 and USB storage (EPIC-024): File Manager
 	  operations (nuubos-filesctl), removable media mount/eject
-	  (nuubos-mediactl), SMB network shares (nuubos-sharesctl) and
-	  per-user Backup & Restore (nuubos-backupctl), long operations
-	  as nuubos-jobd jobs.
+	  (nuubos-mediactl) and SMB network shares (nuubos-sharesctl),
+	  long operations as nuubos-jobd jobs. The console backup
+	  (EPIC-035) is nuubos-sd2-backup in the rootfs overlay.

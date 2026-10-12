@@ -1,0 +1,80 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] wifi: rtw88: sdio: power the card off in system suspend
+
+rtw_sdio_suspend() required MMC_PM_KEEP_POWER, so the SDIO card stayed
+powered through every system sleep (and suspend failed outright on hosts
+without keep-power-in-suspend), although without WoWLAN mac80211 has
+already stopped the device and powered the chip down.
+
+Let the MMC core cut the card supply instead: release the SDIO IRQ and
+disable the function on suspend, and on resume, after the core has
+re-initialised the card, enable the function, restore the block size and
+claim the IRQ again. mac80211 then starts the device as usual and
+rtw_power_on() reloads the firmware.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/drivers/net/wireless/realtek/rtw88/sdio.c
++++ b/drivers/net/wireless/realtek/rtw88/sdio.c
+@@ -1100,23 +1100,54 @@
+ 	rtwsdio->irq_thread = NULL;
+ }
+ 
++/*
++ * Without WoWLAN mac80211 stops the device before system suspend, so the
++ * chip is already powered down: let the MMC core cut its supply too
++ * instead of keeping it powered. The SDIO function setup and IRQ are lost
++ * with the power; release them here and redo them on resume, before
++ * mac80211 starts the device again (rtw_power_on reloads the firmware).
++ */
+ static int __maybe_unused rtw_sdio_suspend(struct device *dev)
+ {
+ 	struct sdio_func *func = dev_to_sdio_func(dev);
++
++	sdio_claim_host(func);
++	sdio_release_irq(func);
++	sdio_disable_func(func);
++	sdio_release_host(func);
++
++	return 0;
++}
++
++static int __maybe_unused rtw_sdio_resume(struct device *dev)
++{
++	struct sdio_func *func = dev_to_sdio_func(dev);
+ 	struct ieee80211_hw *hw = dev_get_drvdata(dev);
+ 	struct rtw_dev *rtwdev = hw->priv;
+ 	int ret;
+ 
+-	ret = sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
++	sdio_claim_host(func);
++
++	ret = sdio_enable_func(func);
++	if (ret) {
++		rtw_err(rtwdev, "Failed to enable SDIO func on resume");
++		goto out;
++	}
++
++	ret = sdio_set_block_size(func, RTW_SDIO_BLOCK_SIZE);
++	if (ret) {
++		rtw_err(rtwdev, "Failed to set SDIO block size on resume");
++		goto out;
++	}
++
++	ret = sdio_claim_irq(func, &rtw_sdio_handle_interrupt);
+ 	if (ret)
+-		rtw_err(rtwdev, "Failed to host PM flag MMC_PM_KEEP_POWER");
++		rtw_err(rtwdev, "Failed to claim SDIO IRQ on resume");
+ 
+-	return ret;
+-}
++out:
++	sdio_release_host(func);
+ 
+-static int __maybe_unused rtw_sdio_resume(struct device *dev)
+-{
+-	return 0;
++	return ret;
+ }
+ 
+ SIMPLE_DEV_PM_OPS(rtw_sdio_pm_ops, rtw_sdio_suspend, rtw_sdio_resume);

@@ -1,0 +1,33 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] arm64: dts: allwinner: h700: drop the 1512 MHz CPU OPP
+
+The H616 OPP table tops out at 1512 MHz (1.16 V for the speed bin the
+H700 reports, the vdd-cpu limit). Under a sustained load at that point the
+RG CubeXX corrupts page tables and user memory: rsync copies die with
+SIGILL or hang, the kernel reports "Bad page map" with PTEs carrying stray
+high bits and oopses with level 3 address size faults. Measured from a
+clean boot (10 rsync runs of 440 MB each): 1512 MHz 2 failed + 4 kernel
+errors; 1416 MHz, 1200 MHz and 1008 MHz 0 failed, 0 errors. Remove the
+1512 MHz point from the H700 family base so every board stops at 1416 MHz.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h700-anbernic-rg35xx-2024.dts
+@@ -12,6 +12,16 @@
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/leds/common.h>
+ 
++/*
++ * The H616 1512 MHz operating point is not stable on the H700: under a
++ * sustained load (rsync, an SD2 restore) it corrupts page tables and user
++ * memory (bad page map, SIGILL, kernel oops) on the RG CubeXX, while 1416
++ * MHz and below run clean. The H700 tops out at 1416 MHz.
++ */
++&cpu_opp_table {
++	/delete-node/ opp-1512000000;
++};
++
+ / {
+ 	model = "Anbernic RG35XX 2024";
+ 	chassis-type = "handset";

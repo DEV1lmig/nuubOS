@@ -1,6 +1,6 @@
-# Restore SD1 from a backup on the games card (backup folder)
+# Restore SD1 from a console backup (backup folder [profile id])
 COMMAND=/usr/sbin/nuubos-sd2-backup restore
 SCOPE=device
 CANCEL=0
 RETRY=1
-ARGS=1
+ARGS=2

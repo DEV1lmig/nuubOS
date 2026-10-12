@@ -71,6 +71,8 @@
 #define CATALOG_DIR USERDATA_ROOT "/library"
 #define CATALOG_PATH CATALOG_DIR "/catalog.tsv"
 #define USERDATA_USERS USERDATA_ROOT "/users"
+/* This console's identity among the user's consoles (created once). */
+#define CONSOLE_ID_FILE STATE_ROOT "/config/console-id"
 #define ACTIVE_DIR RUN_ROOT "/user"
 #define ACTIVE_FILE ACTIVE_DIR "/active"
 #define SYSTEM_ICONS_DIR SHARE_ROOT "/systems"
@@ -128,11 +130,26 @@ struct game {
 	char *genre;
 };
 
+/*
+ * Play history of one game for the active user. last/time/sessions and
+ * the reset fields are this console's own record (history.tsv); r_* add
+ * up what the user's other consoles recorded (their files in
+ * library/consoles/, synchronized by Syncthing when Play Activity is on).
+ * A statistics reset cannot erase another console's file: it stores the
+ * other consoles' totals as negative offsets and the reset time, which
+ * every console applies (a game played before the latest reset is not
+ * "recent" any more).
+ */
 struct history_entry {
 	char id[17];
 	long long last;
 	long long time;
 	int sessions;
+	long long off_time;
+	int off_sessions;
+	long long reset;
+	long long r_last, r_time, r_reset;
+	int r_sessions;
 };
 
 struct collection {
@@ -191,6 +208,8 @@ static size_t game_cap;
 
 static char active_user[40];
 static struct history_entry *history;
+static char console_id[40];
+static int inotify_fd = -1, consoles_wd = -1;
 static size_t history_count;
 static size_t history_cap;
 static char (*favorites)[17];
@@ -1486,6 +1505,154 @@ static bool id_list_has(char (*list)[17], size_t count, const char *id)
 	return false;
 }
 
+/* The combined history of all the user's consoles. */
+static long long hist_reset(const struct history_entry *h)
+{
+	return h->reset > h->r_reset ? h->reset : h->r_reset;
+}
+
+static long long hist_last(const struct history_entry *h)
+{
+	long long last = h->last > h->r_last ? h->last : h->r_last;
+
+	return last > hist_reset(h) ? last : 0;
+}
+
+static long long hist_time(const struct history_entry *h)
+{
+	long long t = h->time + h->off_time + h->r_time;
+
+	return t > 0 ? t : 0;
+}
+
+static int hist_sessions(const struct history_entry *h)
+{
+	int n = h->sessions + h->off_sessions + h->r_sessions;
+
+	return n > 0 ? n : 0;
+}
+
+/* Statistics to zero on every console of the user: this console's own
+ * record cleared, the others' totals cancelled by offsets. */
+static void reset_history(struct history_entry *h)
+{
+	h->last = h->time = 0;
+	h->sessions = 0;
+	h->off_time = -h->r_time;
+	h->off_sessions = -h->r_sessions;
+	h->reset = (long long)time(NULL);
+}
+
+/* "id last time sessions [off_time off_sessions reset]" */
+static bool parse_history_line(const char *line, char *id, long long *v)
+{
+	long long sessions = 0, off_sessions = 0;
+	int n;
+
+	memset(v, 0, 6 * sizeof(*v));
+	if (line[0] == '#')
+		return false;
+	n = sscanf(line, "%31s %lld %lld %lld %lld %lld %lld", id, &v[0], &v[1], &sessions, &v[3],
+		   &off_sessions, &v[5]);
+	v[2] = sessions;
+	v[4] = off_sessions;
+	return (n == 4 || n == 7) && valid_game_id(id);
+}
+
+static void load_console_id(void)
+{
+	char text[64] = "";
+	FILE *fp = fopen(CONSOLE_ID_FILE, "r");
+
+	if (fp) {
+		if (fgets(text, sizeof(text), fp))
+			trim(text);
+		fclose(fp);
+	}
+	if (strlen(text) < 8 || strspn(text, "0123456789abcdef-") != strlen(text)) {
+		fp = fopen("/proc/sys/kernel/random/uuid", "r");
+		text[0] = '\0';
+		if (fp) {
+			if (fgets(text, sizeof(text), fp))
+				trim(text);
+			fclose(fp);
+		}
+		if (!text[0])
+			snprintf(text, sizeof(text), "%08lx-%08lx", (unsigned long)time(NULL), (unsigned long)getpid());
+		mkdir_p(STATE_ROOT "/config");
+		if (write_atomic(CONSOLE_ID_FILE, text, strlen(text)) != 0)
+			log_msg("console id not saved: %s", strerror(errno));
+	}
+	copy_text(console_id, sizeof(console_id), text);
+}
+
+/* The other consoles' files: r_* of every game, from scratch. */
+static void load_remote_history(void)
+{
+	char dir[PATH_MAX], own[96];
+	DIR *d;
+	struct dirent *e;
+
+	for (size_t i = 0; i < history_count; i++)
+		history[i].r_last = history[i].r_time = history[i].r_reset = history[i].r_sessions = 0;
+	if (!active_user[0])
+		return;
+	snprintf(dir, sizeof(dir), USERDATA_USERS "/%s/library/consoles", active_user);
+	snprintf(own, sizeof(own), "%s.tsv", console_id);
+	if (!(d = opendir(dir)))
+		return;
+	while ((e = readdir(d)) != NULL) {
+		size_t len = strlen(e->d_name);
+		char path[PATH_MAX + 260], line[256];
+		FILE *fp;
+
+		/* Only finished files: no dot files (Syncthing's temporary
+		 * names), no .sync-conflict copies, not this console. */
+		if (e->d_name[0] == '.' || len < 5 || strcmp(e->d_name + len - 4, ".tsv") ||
+		    strstr(e->d_name, ".sync-conflict") || !strcmp(e->d_name, own))
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		if (!(fp = fopen(path, "r")))
+			continue;
+		while (fgets(line, sizeof(line), fp)) {
+			char id[32];
+			long long v[6];
+			struct history_entry *h;
+
+			if (!parse_history_line(line, id, v))
+				continue;
+			h = history_for(id, true);
+			if (v[0] > h->r_last)
+				h->r_last = v[0];
+			h->r_time += v[1] + v[3];
+			h->r_sessions += (int)(v[2] + v[4]);
+			if (v[5] > h->r_reset)
+				h->r_reset = v[5];
+		}
+		fclose(fp);
+	}
+	closedir(d);
+}
+
+/* Follow library/consoles of the active user (created here). */
+static void watch_consoles(void)
+{
+	char dir[PATH_MAX];
+
+	if (inotify_fd < 0)
+		return;
+	if (consoles_wd >= 0)
+		inotify_rm_watch(inotify_fd, consoles_wd);
+	consoles_wd = -1;
+	if (!active_user[0])
+		return;
+	snprintf(dir, sizeof(dir), USERDATA_USERS "/%s/library/consoles", active_user);
+	mkdir_p(dir);
+	consoles_wd = inotify_add_watch(inotify_fd, dir, IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE | IN_MOVED_FROM);
+}
+
+static int save_history(void);
+
 static void load_user_state(void)
 {
 	char path[PATH_MAX];
@@ -1500,18 +1667,18 @@ static void load_user_state(void)
 	if ((fp = fopen(path, "r")) != NULL) {
 		while (fgets(line, sizeof(line), fp)) {
 			char id[32];
-			long long last, played;
-			int sessions;
+			long long v[6];
 			struct history_entry *h;
 
-			if (line[0] == '#' ||
-			    sscanf(line, "%31s %lld %lld %d", id, &last, &played, &sessions) != 4 ||
-			    !valid_game_id(id))
+			if (!parse_history_line(line, id, v))
 				continue;
 			h = history_for(id, true);
-			h->last = last;
-			h->time = played < 0 ? 0 : played;
-			h->sessions = sessions < 0 ? 0 : sessions;
+			h->last = v[0];
+			h->time = v[1] < 0 ? 0 : v[1];
+			h->sessions = v[2] < 0 ? 0 : (int)v[2];
+			h->off_time = v[3];
+			h->off_sessions = (int)v[4];
+			h->reset = v[5];
 		}
 		fclose(fp);
 	}
@@ -1553,6 +1720,16 @@ static void load_user_state(void)
 		}
 		fclose(fp);
 	}
+	load_remote_history();
+	watch_consoles();
+	/* History from before the export existed reaches the other consoles. */
+	{
+		char own[PATH_MAX + 64];
+
+		snprintf(own, sizeof(own), USERDATA_USERS "/%s/library/consoles/%s.tsv", active_user, console_id);
+		if (console_id[0] && history_count && access(own, F_OK) != 0 && save_history() != 0)
+			log_msg("history export failed");
+	}
 	log_msg("user %s: %zu history, %zu favorites, %zu collections",
 		active_user, history_count, favorite_count, collection_count);
 }
@@ -1565,7 +1742,8 @@ static int save_user_file(const char *name, struct strbuf *b)
 
 	if (!active_user[0])
 		return -1;
-	snprintf(dir, sizeof(dir), USERDATA_USERS "/%s/library", active_user);
+	snprintf(dir, sizeof(dir), USERDATA_USERS "/%s/library%s", active_user,
+		 strchr(name, '/') ? "/consoles" : "");
 	mkdir_p(dir);
 	user_file(name, path, sizeof(path));
 	rc = write_atomic(path, b->data ? b->data : "", b->len);
@@ -1579,11 +1757,31 @@ static int save_history(void)
 {
 	struct strbuf b = { 0 };
 
-	sb_append(&b, "# game-id last-played time-played sessions\n");
-	for (size_t i = 0; i < history_count; i++)
-		sb_append(&b, "%s %lld %lld %d\n", history[i].id, history[i].last,
-			  history[i].time, history[i].sessions);
-	return save_user_file("history.tsv", &b);
+	char name[96];
+	int rc;
+
+	sb_append(&b, "# game-id last-played time-played sessions off-time off-sessions reset\n");
+	for (size_t i = 0; i < history_count; i++) {
+		const struct history_entry *h = &history[i];
+
+		/* Games only another console played: nothing of our own. */
+		if (!h->last && !h->time && !h->sessions && !h->off_time && !h->off_sessions && !h->reset)
+			continue;
+		sb_append(&b, "%s %lld %lld %d %lld %d %lld\n", h->id, h->last, h->time, h->sessions,
+			  h->off_time, h->off_sessions, h->reset);
+	}
+	/* The same record for the user's other consoles (Play Activity). */
+	{
+		struct strbuf copy = { 0 };
+
+		if (b.data)
+			sb_append(&copy, "%s", b.data);
+		snprintf(name, sizeof(name), "consoles/%s.tsv", console_id);
+		if (console_id[0] && save_user_file(name, &copy))
+			log_msg("history export failed");
+	}
+	rc = save_user_file("history.tsv", &b);
+	return rc;
 }
 
 
@@ -1639,7 +1837,7 @@ static void append_game(struct strbuf *b, const char *key, const struct game *g)
 	sb_append(b, "%s", g->cover ? g->cover : "");
 	/* Field 9 (the former favorite flag): where the game is, 0 = SD1, 2 = SD2. */
 	sb_append(b, "\t%d\t%lld\t%lld\t%d\t%d\t%d\t%d\t%s\n", s->aspect,
-		  h ? h->last : 0LL, h ? h->time : 0LL,
+		  h ? hist_last(h) : 0LL, h ? hist_time(h) : 0LL,
 		  g->available ? 1 : 0, rel_on_sd2(g->rel) ? 2 : 0, g->year, g->players,
 		  g->genre ? g->genre : "");
 }
@@ -1649,7 +1847,9 @@ static int history_compare(const void *a, const void *b)
 	const struct history_entry *x = *(const struct history_entry *const *)a;
 	const struct history_entry *y = *(const struct history_entry *const *)b;
 
-	return (x->last < y->last) - (x->last > y->last);
+	long long a_last = hist_last(x), b_last = hist_last(y);
+
+	return (a_last < b_last) - (a_last > b_last);
 }
 
 /* Played games, most recent first; limit 0 lists the whole history. */
@@ -1664,7 +1864,7 @@ static void append_recent(struct strbuf *b, const char *key, size_t limit)
 	if (!order)
 		abort();
 	for (size_t i = 0; i < history_count; i++)
-		if (history[i].last > 0)
+		if (hist_last(&history[i]) > 0)
 			order[n++] = &history[i];
 	qsort(order, n, sizeof(*order), history_compare);
 	for (size_t i = 0; i < n && (!limit || shown < limit); i++) {
@@ -1701,7 +1901,7 @@ static void append_previews(struct strbuf *b, int sys, const struct collection *
 		if (sys >= 0 ? g->sys != sys : !id_list_has(col->games, col->count, g->id))
 			continue;
 		h = active_user[0] ? history_for(g->id, false) : NULL;
-		last = h ? h->last : 0;
+		last = h ? hist_last(h) : 0;
 		/* Insertion into the short list sorted by last played. */
 		at = n;
 		while (at > 0 && when[at - 1] < last)
@@ -1886,7 +2086,7 @@ static bool keep_search(const struct game *g, const void *arg)
 		return false;
 	if (f->unplayed) {
 		h = active_user[0] ? history_for(g->id, false) : NULL;
-		if (h && h->last > 0)
+		if (h && hist_last(h) > 0)
 			return false;
 	}
 	return true;
@@ -2133,7 +2333,7 @@ static void build_details(struct strbuf *b, const struct game *g)
 
 	append_game(b, "game", g);
 	sb_append(b, "system_name=%s\nsessions=%d\npath=%s\nsize=%lld\nadded=%lld\n",
-		  systems[g->sys].name, h ? h->sessions : 0, g->rel, g->size, g->added);
+		  systems[g->sys].name, h ? hist_sessions(h) : 0, g->rel, g->size, g->added);
 	/* Absolute file and the ROM folder of its card, while the card is there. */
 	if (rom_path(file, sizeof(file), g->rel))
 		sb_append(b, "file=%s\nroot=%s\n", file,
@@ -2373,17 +2573,13 @@ static void handle_command(struct client *c, char *line)
 	} else if (!strcmp(line, "STATS_RESET") && arg) {
 		/* One game, or "all" of the active user's statistics (EPIC-020). */
 		if (!strcmp(arg, "all")) {
-			history_count = 0;
+			for (size_t i = 0; i < history_count; i++)
+				reset_history(&history[i]);
 		} else if (known_game(arg)) {
 			struct history_entry *h = history_for(arg, false);
 
-			if (h) {
-				size_t i = (size_t)(h - history);
-
-				memmove(&history[i], &history[i + 1],
-					(history_count - i - 1) * sizeof(*history));
-				history_count--;
-			}
+			if (h)
+				reset_history(h);
 		} else {
 			reply(c, "ERR args\n");
 			return;
@@ -2659,7 +2855,7 @@ static void finish_scan(void)
 int main(void)
 {
 	struct sigaction sa;
-	int listen_fd, inotify_fd, watch = -1;
+	int listen_fd, watch = -1;
 	FILE *pf;
 
 	memset(&sa, 0, sizeof(sa));
@@ -2676,13 +2872,14 @@ int main(void)
 	ensure_rom_dirs();
 	load_catalog();
 	load_apps();
+	load_console_id();
+	inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	refresh_active_user();
 
 	if (pipe2(scan_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
 		log_msg("pipe: %s", strerror(errno));
 		return 1;
 	}
-	inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (inotify_fd >= 0)
 		watch = inotify_add_watch(inotify_fd, ACTIVE_DIR,
 					  IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE | IN_CREATE);
@@ -2739,13 +2936,31 @@ int main(void)
 			} else if (map[j] == -3) {
 				char events[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
 				char before[40];
+				bool consoles = false, user = false;
+				ssize_t len;
 
-				while (read(inotify_fd, events, sizeof(events)) > 0)
-					;
+				while ((len = read(inotify_fd, events, sizeof(events))) > 0)
+					for (char *q = events; q < events + len;) {
+						const struct inotify_event *ev = (const struct inotify_event *)q;
+
+						/* Our own export is no news. */
+						if (ev->wd == consoles_wd)
+							consoles = consoles || !ev->len ||
+								   strncmp(ev->name, console_id, strlen(console_id));
+						else
+							user = true;
+						q += sizeof(*ev) + ev->len;
+					}
 				copy_text(before, sizeof(before), active_user);
-				refresh_active_user();
-				if (strcmp(before, active_user))
+				if (user)
+					refresh_active_user();
+				if (strcmp(before, active_user)) {
 					notify_all();
+				} else if (consoles) {
+					/* Another console's play history arrived. */
+					load_remote_history();
+					notify_all();
+				}
 			} else if (fds[j].revents & (POLLHUP | POLLERR)) {
 				close_client(&clients[map[j]]);
 			} else {

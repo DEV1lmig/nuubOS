@@ -789,11 +789,18 @@ fn append_action_log(line: &str) {
 
 fn users_command(command:&str)->std::io::Result<String>{let mut s=UnixStream::connect(USERS_SOCKET)?;s.set_read_timeout(Some(Duration::from_millis(700)))?;s.write_all(command.as_bytes())?;if !command.ends_with('\n'){s.write_all(b"\n")?;}s.shutdown(std::net::Shutdown::Write)?;let mut r=String::new();let _=s.read_to_string(&mut r);Ok(r)}
 /* No Quick Menu before a profile is in use or while nuubUI owns the whole
- * screen for a guided flow: user picker, first setup, safe mode (nuubUI
- * writes the context). The Power OSD stays available everywhere. */
+ * screen for a guided flow: user picker, first setup, safe mode, a
+ * full-screen operation (nuubUI writes the context). The Power OSD stays
+ * available everywhere but over an operation. */
 fn menu_allowed() -> bool {
     let c = fs::read_to_string(UI_CONTEXT).unwrap_or_default();
-    !matches!(c.trim(), "user-picker" | "oob" | "safe-mode")
+    !matches!(c.trim(), "user-picker" | "oob" | "safe-mode" | "operation")
+}
+
+/* nuubUI's full-screen operation screen (system update, SD2 restore) shows
+ * its own progress: no notification card over it (user request 2026-10-12). */
+fn operation_screen() -> bool {
+    fs::read_to_string(UI_CONTEXT).is_ok_and(|c| c.trim() == "operation")
 }
 
 fn switch_user_available()->bool{let c=fs::read_to_string(UI_CONTEXT).unwrap_or_default();if !matches!(c.trim(),"home"|"settings"){return false;}let Ok(r)=users_command("STATUS") else{return false;};r.lines().find_map(|l|l.strip_prefix("count=")).and_then(|v|v.parse::<i32>().ok()).unwrap_or(0)>1}
@@ -1675,6 +1682,15 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
             n.text("ssid").to_owned(),
             -1,
         ),
+        /* Another device asked to sync (nuubos-syncd): accepted in
+         * Settings → Connectivity → Syncthing. */
+        "sync.request" => (
+            ICON_WIFI,
+            SEVERITY_INFO,
+            tr(ui, 1083, "New sync request"),
+            n.text("name").to_owned(),
+            -1,
+        ),
         "wifi.lost" => (
             ICON_WIFI,
             SEVERITY_WARNING,
@@ -1711,12 +1727,11 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
                 "support-bundle" => tr(ui, 595, "Support bundle"),
                 "file-copy" => tr(ui, 623, "Copying files"),
                 "file-move" => tr(ui, 624, "Moving files"),
-                "backup-user" => tr(ui, 630, "Backup & Restore"),
-                "restore-user" => tr(ui, 635, "Restore"),
                 "update-download" => tr(ui, 660, "Downloading update"),
+                "update-install" => tr(ui, 984, "Installing update"),
                 "scrape-game" | "scrape-bulk" => tr(ui, 571, "Getting metadata"),
-                "sd2-backup" => tr(ui, 967, "Backup to SD2"),
-                "sd2-restore" => tr(ui, 940, "Restore from SD2"),
+                "sd2-backup" => tr(ui, 982, "Backup"),
+                "sd2-restore" => tr(ui, 1017, "Restore from Backup"),
                 "sd2-format" => tr(ui, 969, "Formatting SD2"),
                 "sd2-prepare" => tr(ui, 973, "Creating game folders"),
                 _ => return None,
@@ -1886,6 +1901,15 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
         "storage.sd2.unreadable" => (ICON_FAILED, SEVERITY_WARNING, tr(ui, 957, "SD2 can't be read"),
             tr(ui, 952, "You can format it in Settings › System › Storage"), -1),
         "storage.sd2.formatted" => (ICON_DONE, SEVERITY_SUCCESS, tr(ui, 971, "SD2 formatted"), String::new(), -1),
+        /* The daily update check (nuubos-update-auto). */
+        "update.available" => (ICON_DONE, SEVERITY_INFO,
+            tr(ui, 652, "nuubOS {0} available").replace("{0}", n.text("version")),
+            tr(ui, 991, "Install it from Settings › System › Software Update"), -1),
+        /* Outcome of an update, after the restart (nuubos-update-apply). */
+        "update.installed" => (ICON_DONE, SEVERITY_SUCCESS, tr(ui, 659, "Update installed"),
+            format!("nuubOS {}", n.text("version")), -1),
+        "update.rolledback" => (ICON_FAILED, SEVERITY_WARNING, tr(ui, 990, "The update could not be installed"),
+            tr(ui, 658, "The previous version was restored"), -1),
         "game.storage_lost" => (ICON_STORAGE, SEVERITY_WARNING, tr(ui, 961, "SD2 removed: game saved and closed"), String::new(), -1),
         _ => return None,
     };
@@ -4095,7 +4119,8 @@ fn end_session(
 }
 
 /* Power OSD (power key, in every context: Home, Settings, games, streams,
- * Web). The game waits paused underneath, as under the Quick Menu. */
+ * Web; never over a full-screen operation). The game waits paused
+ * underneath, as under the Quick Menu. */
 fn open_power_osd(
     ui: &QuickMenuWindow,
     mapped: &mut bool,
@@ -4104,6 +4129,11 @@ fn open_power_osd(
     qh: &QueueHandle<WaylandState>,
     conn: &Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    /* Not over a full-screen operation (system update, SD2 restore): a
+     * restart or Sleep would interrupt it (user request 2026-10-12). */
+    if operation_screen() {
+        return Ok(());
+    }
     ui.set_power_osd_index(0);
     ui.set_power_osd_confirm(false);
     ui.set_power_osd_open(true);
@@ -4881,7 +4911,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .toasts
                         .resumed_at
                         .is_some_and(|resume| received < resume);
-                    if !stale && !ui.get_lifecycle_active() {
+                    let hidden = ui.get_lifecycle_active() || operation_screen();
+                    /* A card shown when the operation screen opened goes. */
+                    if hidden && notifier.mapped {
+                        toast_dirty = true;
+                    }
+                    if !stale && !hidden {
                         let changed = if notification.verb == NotifyVerb::Dismiss {
                             notifier.toasts.dismiss(&notification.id)
                         } else {
@@ -4971,7 +5006,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if toast_dirty {
-            notifier.sync(&conn, ui.get_lifecycle_active());
+            notifier.sync(&conn, ui.get_lifecycle_active() || operation_screen());
         }
 
         /* Performance overlay: over a running game, never over the menu

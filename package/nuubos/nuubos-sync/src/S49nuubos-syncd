@@ -3,7 +3,8 @@
 
 DAEMON=/usr/sbin/nuubos-syncd
 PIDFILE=/run/nuubos/syncd.pid
-SOCKET=/run/nuubos/syncthing.sock
+SOCKET=/run/nuubos/syncd.sock
+GUI_SOCKET=/run/nuubos/syncthing/gui.sock
 
 syncd_running()
 {
@@ -17,7 +18,7 @@ start_service()
 {
     mkdir -p /run/nuubos
     syncd_running && return 0
-    rm -f "$PIDFILE" "$SOCKET"
+    rm -f "$PIDFILE" "$SOCKET" "$GUI_SOCKET"
     "$DAEMON" >/run/nuubos/syncd.log 2>&1 &
     return 0
 }
@@ -27,7 +28,7 @@ stop_service()
     if syncd_running; then
         kill -TERM "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null || true
     fi
-    rm -f "$PIDFILE" "$SOCKET"
+    rm -f "$PIDFILE" "$SOCKET" "$GUI_SOCKET"
     return 0
 }
 

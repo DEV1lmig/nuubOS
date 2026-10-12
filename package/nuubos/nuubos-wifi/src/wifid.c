@@ -189,6 +189,9 @@ static const char introspection_xml[] =
 /* Self-pipe: libdbus restarts its own poll on EINTR, so signals must wake
  * the main loop through a descriptor instead of a periodic timeout. */
 static int wake_pipe[2] = {-1, -1};
+/* The SSID whose IP profile (DHCP or manual) was applied for the current
+ * association ("" = none yet). */
+static char ip_ssid[128];
 /* The udhcpc of the current association (0 = none) and its SSID. */
 static pid_t dhcp_pid = 0;
 static char dhcp_ssid[128];
@@ -1035,6 +1038,12 @@ static bool rewrite_wpa_config(const char *remove_ssid, const char *add_ssid,
             if (strncmp(p, "update_config=", 14) == 0) {
                 fputs("update_config=1\n", out);
                 update_config_seen = true;
+            } else if (strncmp(p, "country=", 8) == 0) {
+                /*
+                 * The regulatory domain follows the user's region
+                 * (regionald, iw reg set); a fixed country here would
+                 * override it when wpa_supplicant starts.
+                 */
             } else {
                 fputs(line, out);
             }
@@ -1042,7 +1051,6 @@ static bool rewrite_wpa_config(const char *remove_ssid, const char *add_ssid,
         fclose(in);
     } else {
         fputs("ctrl_interface=/var/run/wpa_supplicant\n", out);
-        fputs("country=IT\n", out);
     }
 
     if (!update_config_seen)
@@ -1456,6 +1464,26 @@ static void start_dhcp(const char *ssid)
         dhcp_pid = pid;
         copy_string(dhcp_ssid, sizeof(dhcp_ssid), ssid);
     }
+}
+
+static void spawn_apply_ip_profile(const char *ssid);
+
+/* Every path that refreshes the state (events, snapshot requests, scan
+ * results) can be the first to see a new association, so the main loop
+ * sets the address up here, once per association, whichever saw it: at
+ * boot a GetSnapshot often refreshed the state before the
+ * CTRL-EVENT-CONNECTED was handled, and the device stayed without an
+ * address until a manual reconnect (2026-10-12). */
+static void ensure_ip_profile(const struct wifi_state *state)
+{
+    if (strcmp(state->state, "connected") != 0) {
+        ip_ssid[0] = '\0';
+        return;
+    }
+    if (strcmp(ip_ssid, state->ssid) == 0)
+        return;
+    copy_string(ip_ssid, sizeof(ip_ssid), state->ssid);
+    spawn_apply_ip_profile(state->ssid);
 }
 
 static void spawn_apply_ip_profile(const char *ssid)
@@ -2440,8 +2468,7 @@ int main(void)
     }
 
     refresh_state(&current);
-    if (strcmp(current.state, "connected") == 0)
-        spawn_apply_ip_profile(current.ssid);
+    ensure_ip_profile(&current);
 
     if (!dbus_connection_get_unix_fd(conn, &dbus_fd))
         dbus_fd = -1;
@@ -2482,7 +2509,6 @@ int main(void)
                     bool resumed = loss_due_ms != 0 &&
                         strcmp(loss_ssid, current.ssid) == 0;
                     loss_due_ms = 0;
-                    spawn_apply_ip_profile(current.ssid);
                     if (!resumed)
                         post_wifi_notification("wifi.connected", current.ssid);
                 } else if (lost && loss_due_ms == 0) {
@@ -2534,6 +2560,8 @@ int main(void)
                 next_scan_due_ms = monotonic_ms() + SCAN_SESSION_INTERVAL_MS;
             }
         }
+
+        ensure_ip_profile(&current);
 
         /* The association ended (drop, Disconnect, Forget, Off: the SSID
          * changes or Wi-Fi is off): its DHCP client goes with it. */

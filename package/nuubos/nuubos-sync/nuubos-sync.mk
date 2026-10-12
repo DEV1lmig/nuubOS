@@ -4,20 +4,20 @@
 #
 ################################################################################
 
-NUUBOS_SYNC_VERSION = 0.1.0
+NUUBOS_SYNC_VERSION = 0.2.0
 NUUBOS_SYNC_SITE = $(BR2_EXTERNAL_NUUBOS_PATH)/package/nuubos/nuubos-sync/src
 NUUBOS_SYNC_SITE_METHOD = local
 NUUBOS_SYNC_LICENSE = MIT
 NUUBOS_SYNC_LICENSE_FILES = LICENSE
-NUUBOS_SYNC_DEPENDENCIES = cjson libcurl
+NUUBOS_SYNC_DEPENDENCIES = cjson libcurl nuubos-notify
 
 define NUUBOS_SYNC_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror \
-		$(@D)/syncd.c -o $(@D)/nuubos-syncd
+		-std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
+		$(@D)/syncd.c -o $(@D)/nuubos-syncd -lcjson -lcurl -lpthread
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
-		$(@D)/syncctl.c -o $(@D)/nuubos-syncctl -lcjson -lcurl
+		$(@D)/syncctl.c -o $(@D)/nuubos-syncctl
 endef
 
 define NUUBOS_SYNC_INSTALL_TARGET_CMDS

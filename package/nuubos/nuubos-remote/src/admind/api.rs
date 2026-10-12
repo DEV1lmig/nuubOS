@@ -157,7 +157,7 @@ pub fn topic(t: &str, q: &dyn Fn(&str) -> String) -> R {
         }
         "remote" => kv(&tool_ok("nuubos-remotectl", &["status"])?),
         "password" => json!({ "password": tool_ok("nuubos-remotectl", &["credential", "show"])?.trim() }),
-        "sync" => kv(&tool_ok("nuubos-syncctl", &["status"])?),
+        "sync" => kv(&sock("syncd", "STATUS")?),
         "scraper" => kv(&tool_ok("nuubos-scraper", &["account", "status"])?),
         "bios" => kv(&tool_ok("nuubos-biosctl", &["status"])?),
         "storage" => kv(&tool_ok("nuubos-storagectl", &["status"]).unwrap_or_default()),
@@ -179,16 +179,6 @@ pub fn topic(t: &str, q: &dyn Fn(&str) -> String) -> R {
             let list = kv(&tool_ok("nuubos-themectl", &["list"])?);
             let sel = if u.is_empty() { json!({}) } else { kv(&tool_ok("nuubos-themectl", &["selected", &u]).unwrap_or_default()) };
             json!({ "list": list["theme"], "selected": sel["id"], "tokens": mood() })
-        }
-        "backups" => {
-            let mut dirs = vec![format!("{}/userdata/backups", crate::root())];
-            if let Ok(rd) = fs::read_dir(format!("{}/media", crate::root())) {
-                for e in rd.flatten() {
-                    dirs.push(format!("{}/nuubos-backups", e.path().to_string_lossy()));
-                }
-            }
-            let args: Vec<&str> = std::iter::once("list").chain(dirs.iter().map(|s| s.as_str())).collect();
-            kv(&tool_ok("nuubos-backupctl", &args).unwrap_or_default())
         }
         "display" => {
             let d = svc::bin("nuubos-displayctl");
@@ -316,7 +306,7 @@ pub fn action(b: &Value) -> R {
         "system.autobattery" => { sock_ok("systemd", &format!("SET AUTO_BATTERY {}", int(&a("v"), 0, 50)?))?; ok() }
         "system.chargelimit" => { sock_ok("systemd", &format!("SET CHARGE_LIMIT {}", int(&a("v"), 80, 100)?))?; ok() }
         "system.sleep" => { sock_ok("systemd", &format!("SET SLEEP {}", int(&a("v"), 0, 240)?))?; ok() }
-        /* The games card (SD2) and the backup to it. */
+        /* The games card (SD2) and the console backup. */
         "storage.eject" => { sock_ok("systemd", "STORAGE SD2 EJECT")?; ok() }
         "storage.use" => { sock_ok("systemd", "STORAGE SD2 USE")?; ok() }
         "storage.backup.enabled" => { sock_ok("systemd", &format!("SET STORAGE BACKUP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
@@ -325,6 +315,7 @@ pub fn action(b: &Value) -> R {
             sock_ok("systemd", &format!("SET STORAGE BACKUP_ITEM {} {}", item, one_of(&a("v"), &["0", "1"])?))?;
             ok()
         }
+        "storage.backup.dest" => { sock_ok("systemd", &format!("SET STORAGE BACKUP_DEST {}", one_of(&a("v"), &["sd2", "sd1", "usb"])?))?; ok() }
         "storage.backup" => job("sd2-backup", &[]),
         "storage.prepare" => job("sd2-prepare", &[]),
         "storage.format" => job("sd2-format", &[&token(&a("cid"))?]),
@@ -386,10 +377,27 @@ pub fn action(b: &Value) -> R {
         "remote.regenerate" => { tool_ok("nuubos-remotectl", &["credential", "regenerate"])?; done("remote") }
 
         /* Syncthing (per user). */
-        "sync.enable" => { tool_ok("nuubos-syncctl", &[if flag(&a("v"))? == "1" { "enable" } else { "disable" }])?; done("sync") }
-        "sync.folder" => { tool_ok("nuubos-syncctl", &["folder", &one_of(&a("kind"), &["saves", "states", "screenshots"])?, if flag(&a("v"))? == "1" { "on" } else { "off" }])?; done("sync") }
-        "sync.accept" => { tool_ok("nuubos-syncctl", &["accept", &token(&a("device"))?])?; done("sync") }
-        "sync.remove" => { tool_ok("nuubos-syncctl", &["remove", &token(&a("device"))?])?; done("sync") }
+        "sync.enable" => { sock_ok("syncd", if flag(&a("v"))? == "1" { "ENABLE" } else { "DISABLE" })?; done("sync") }
+        "sync.folder" => {
+            let kind = one_of(&a("kind"), &["saves", "states", "screenshots", "library", "history"])?;
+            sock_ok("syncd", &format!("FOLDER\t{kind}\t{}", flag(&a("v"))?))?;
+            done("sync")
+        }
+        "sync.internet" => { sock_ok("syncd", &format!("INTERNET\t{}", flag(&a("v"))?))?; done("sync") }
+        "sync.relays" => { sock_ok("syncd", &format!("RELAYS\t{}", flag(&a("v"))?))?; done("sync") }
+        /* Adding a device reconfigures Syncthing: a longer wait. */
+        "sync.add" => {
+            svc::reply_ok(&sock_timeout("syncd", &format!("ADD\t{}", token(&a("device"))?), Duration::from_secs(30))?)?;
+            done("sync")
+        }
+        "sync.ignore" => {
+            svc::reply_ok(&sock_timeout("syncd", &format!("IGNORE\t{}", token(&a("device"))?), Duration::from_secs(30))?)?;
+            done("sync")
+        }
+        "sync.remove" => {
+            svc::reply_ok(&sock_timeout("syncd", &format!("REMOVE\t{}", token(&a("device"))?), Duration::from_secs(30))?)?;
+            done("sync")
+        }
 
         /* Wi-Fi (org.nuubOS.Wifi1). */
         "wifi.enable" => { call0("Wifi", "SetEnabled", &(flag(&a("v"))? == "1",))?; ok() }
@@ -500,7 +508,9 @@ pub fn action(b: &Value) -> R {
         /* Software update and recovery. */
         "update.check" => { tool_ok("nuubos-updatectl", &["check"])?; done("update") }
         "update.download" => job("update-download", &[]),
-        "update.install" => later("nuubos-update-apply", vec!["install".into()]),
+        "update.channel" => { tool_ok("nuubos-updatectl", &["channel", &one_of(&a("v"), &["stable", "beta", "alpha"])?])?; done("update") }
+        "update.auto" => { tool_ok("nuubos-updatectl", &["auto", if one_of(&a("v"), &["0", "1"])? == "1" { "on" } else { "off" }])?; done("update") }
+        "update.install" => job("update-install", &[]),
         "rec.repair" => { tool_ok("nuubos-recoveryctl", &["repair"])?; ok() }
         "rec.resetuser" => later("nuubos-recoveryctl", vec!["reset-user".into(), user()?]),
         "rec.factory" => later("nuubos-recoveryctl", vec!["factory-reset".into(), one_of(&a("v"), &["settings", "userdata"])?]),
@@ -538,17 +548,6 @@ pub fn action(b: &Value) -> R {
             tool_ok("nuubos-sharesctl", &[op.trim_start_matches("share."), &token(&a("name"))?])?;
             done("shares")
         }
-
-        /* Backups (jobs; restore restarts the active profile). */
-        "backup.create" => {
-            let dest = files::user_path(&a("dir")).ok_or("path")?;
-            let u = token(&a("user"))?;
-            let shots = if flag(&a("screenshots")).unwrap_or("0") == "1" { "screenshots" } else { "" };
-            let app = if flag(&a("appdata")).unwrap_or("0") == "1" { "appdata" } else { "" };
-            job("backup-user", &[&u, &dest, shots, app])
-        }
-        "backup.restore" => job("restore-user", &[&files::user_path(&a("file")).ok_or("path")?, &token(&a("user"))?]),
-        "backup.delete" => { tool_ok("nuubos-backupctl", &["delete", &files::user_path(&a("file")).ok_or("path")?])?; done("backups") }
 
         _ => Err("op".into()),
     }

@@ -1,0 +1,565 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] allwinner: h616: add native PSCI system suspend
+
+H616/H700 have no AR100 management core, so there is no SCP firmware
+(crust) to implement SYSTEM_SUSPEND and Linux could only use s2idle.
+
+Implement it natively on CPU 0: for a system-level power-down the core
+stays powered and the GIC CPU interface stays on. pwr_domain_pwr_down
+moves CPU 0 to OSC24M, stops PLL_CPUX, lowers VDD-CPU (AXP717 DCDC1 over
+R_I2C, whose Linux-owned setup is saved around each access) to 0.81 V,
+copies a small position-independent routine to SRAM A1 (unused by
+Linux), turns the MMU off and runs it. The routine stops the DRAM
+masters, puts the DRAM in software self-refresh, moves AHB/APB to
+OSC24M, stops every PLL but PLL_DDR and waits in WFI with IRQ/FIQ routed
+to EL3 (Linux masked every non-wake interrupt). On wake everything is
+restored in reverse order and BL31 re-enters through
+bl31_warm_entrypoint, as Cortex-A53 cannot abandon a power-down.
+
+VDD-SYS stays on, so device state and wake sources are the same as in
+s2idle. The DRAM controller clock must keep running: with CLKEN cleared
+it never leaves self-refresh again. RTC general purpose register 6 holds
+the last standby step (0x5a5a000N, 0x5a5a00e1/e6 self-refresh entry/exit
+timeout, GP5 then holds STATR), GP5 the VDD-CPU result (0x5a5b00NN, the
+DCDC1 register read before lowering it).
+
+The self-refresh sequence follows Crust's H6 DRAM driver
+(drivers/dram/sun50i-h6-dram.c, BSD-3-Clause OR GPL-2.0-only).
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/plat/allwinner/common/include/sunxi_private.h
++++ b/plat/allwinner/common/include/sunxi_private.h
+@@ -22,6 +22,10 @@
+ #endif
+ void sunxi_cpu_power_off_self(void);
+ void sunxi_power_down(void);
++#ifdef PLAT_sun50i_h616
++int sunxi_pmic_vdd_cpu_suspend(void);
++void sunxi_pmic_vdd_cpu_resume(int saved);
++#endif
+ 
+ #if SUNXI_PSCI_USE_NATIVE
+ void sunxi_set_native_psci_ops(const plat_psci_ops_t **psci_ops);
+--- a/plat/allwinner/common/sunxi_native_pm.c
++++ b/plat/allwinner/common/sunxi_native_pm.c
+@@ -4,6 +4,8 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <string.h>
++
+ #include <arch_helpers.h>
+ #include <common/debug.h>
+ #include <drivers/arm/gicv2.h>
+@@ -39,6 +41,89 @@
+ }
+ 
+ #ifdef PLAT_sun50i_h616
++/* Standby code in SRAM A1, which Linux does not use. */
++#define SUNXI_STANDBY_SRAM_BASE		SUNXI_SRAM_A1_BASE
++
++extern const char sunxi_standby_sram[], sunxi_standby_sram_end[];
++int sunxi_system_suspend_wfi(uintptr_t sram_entry);
++void __dead2 sunxi_system_resume_warm(void);
++
++#define SUNXI_CCU_PLL_CPUX_REG		(SUNXI_CCU_BASE + 0x000)
++#define SUNXI_CCU_CPUX_AXI_REG		(SUNXI_CCU_BASE + 0x500)
++#define SUNXI_CPUX_SRC_MASK		(7U << 24)
++#define SUNXI_PLL_LOCK			BIT(28)
++#define SUNXI_PLL_LOCK_TIMEOUT_US	1000
++/* RTC general purpose register 5: VDD-CPU step result, for diagnosis. */
++#define SUNXI_SUSPEND_VDD_REG		0x07000114
++
++static bool sunxi_is_system_suspend(const psci_power_state_t *target_state)
++{
++	return target_state->pwr_domain_state[PLAT_MAX_PWR_LVL] ==
++	       PLAT_MAX_OFF_STATE;
++}
++
++static void sunxi_pwr_domain_suspend(const psci_power_state_t *target_state)
++{
++	/*
++	 * Without a management core nothing could power CPU 0 back on:
++	 * for system suspend it stays powered and waits in the SRAM
++	 * standby loop, with the GIC CPU interface left on to wake it.
++	 */
++	if (sunxi_is_system_suspend(target_state))
++		return;
++
++	sunxi_pwr_domain_off(target_state);
++}
++
++static void sunxi_pwr_domain_pwr_down(const psci_power_state_t *target_state)
++{
++	size_t size = sunxi_standby_sram_end - sunxi_standby_sram;
++	uint32_t cpux_axi, pll_cpux;
++	unsigned int us;
++	int vdd_cpu;
++
++	if (!sunxi_is_system_suspend(target_state))
++		return;
++
++	/* CPU 0 from OSC24M, PLL_CPUX off, then VDD-CPU down. */
++	cpux_axi = mmio_read_32(SUNXI_CCU_CPUX_AXI_REG);
++	pll_cpux = mmio_read_32(SUNXI_CCU_PLL_CPUX_REG);
++	mmio_write_32(SUNXI_CCU_CPUX_AXI_REG, cpux_axi & ~SUNXI_CPUX_SRC_MASK);
++	dsbsy();
++	isb();
++	mmio_write_32(SUNXI_CCU_PLL_CPUX_REG, pll_cpux & ~BIT(31));
++	vdd_cpu = sunxi_pmic_vdd_cpu_suspend();
++	mmio_write_32(SUNXI_SUSPEND_VDD_REG, 0x5a5b0000U | (vdd_cpu & 0xffffU));
++
++	/* The data cache is already off: the copy goes straight to SRAM. */
++	memcpy((void *)SUNXI_STANDBY_SRAM_BASE, sunxi_standby_sram, size);
++	dsbsy();
++
++	(void)sunxi_system_suspend_wfi(SUNXI_STANDBY_SRAM_BASE);
++
++	sunxi_pmic_vdd_cpu_resume(vdd_cpu);
++	mmio_write_32(SUNXI_CCU_PLL_CPUX_REG, pll_cpux);
++	for (us = 0; us < SUNXI_PLL_LOCK_TIMEOUT_US; ++us) {
++		if ((mmio_read_32(SUNXI_CCU_PLL_CPUX_REG) & SUNXI_PLL_LOCK) != 0)
++			break;
++		udelay(1);
++	}
++	udelay(20);
++	mmio_write_32(SUNXI_CCU_CPUX_AXI_REG, cpux_axi);
++	dsbsy();
++	isb();
++
++	sunxi_system_resume_warm();
++}
++
++static void sunxi_get_sys_suspend_power_state(psci_power_state_t *req_state)
++{
++	unsigned int i;
++
++	for (i = MPIDR_AFFLVL0; i <= PLAT_MAX_PWR_LVL; ++i)
++		req_state->pwr_domain_state[i] = PLAT_MAX_OFF_STATE;
++}
++
+ static int sunxi_validate_power_state(unsigned int power_state,
+ 				      psci_power_state_t *req_state)
+ {
+@@ -101,9 +186,11 @@
+ 	.pwr_domain_off			= sunxi_pwr_domain_off,
+ 	.pwr_domain_on_finish		= sunxi_pwr_domain_on_finish,
+ #ifdef PLAT_sun50i_h616
+-	.pwr_domain_suspend		= sunxi_pwr_domain_off,
++	.pwr_domain_suspend		= sunxi_pwr_domain_suspend,
+ 	.pwr_domain_suspend_finish	= sunxi_pwr_domain_on_finish,
++	.pwr_domain_pwr_down		= sunxi_pwr_domain_pwr_down,
+ 	.validate_power_state		= sunxi_validate_power_state,
++	.get_sys_suspend_power_state	= sunxi_get_sys_suspend_power_state,
+ #endif
+ 	.system_off			= sunxi_system_off,
+ 	.system_reset			= sunxi_system_reset,
+--- a/plat/allwinner/sun50i_h616/platform.mk
++++ b/plat/allwinner/sun50i_h616/platform.mk
+@@ -13,6 +13,8 @@
+ # The differences between the platforms are covered by the include files.
+ include plat/allwinner/common/allwinner-common.mk
+ 
++BL31_SOURCES		+=	plat/allwinner/sun50i_h616/sunxi_suspend.S
++
+ # the above could be overwritten on the command line
+ ifeq (${SUNXI_PSCI_USE_SCPI}, 1)
+     $(error "H616 does not support SCPI PSCI ops")
+--- a/plat/allwinner/sun50i_h616/sunxi_power.c
++++ b/plat/allwinner/sun50i_h616/sunxi_power.c
+@@ -15,6 +15,7 @@
+ #include <common/fdt_wrappers.h>
+ #include <drivers/allwinner/axp.h>
+ #include <drivers/allwinner/sunxi_rsb.h>
++#include <drivers/delay_timer.h>
+ #include <drivers/mentor/mi2cv.h>
+ #include <lib/mmio.h>
+ #include <libfdt.h>
+@@ -271,6 +272,74 @@
+ 	}
+ }
+ 
++/*
++ * VDD-CPU (AXP717 DCDC1) during system suspend: CPU 0 waits in WFI from
++ * OSC24M, so it is lowered to 0.81 V (0.5 V + 31 * 10 mV) and restored
++ * before PLL_CPUX runs again. The R_I2C controller, its clock/reset and
++ * the PL0/PL1 pin setup belong to Linux: they are saved around every
++ * access (Linux re-initialises the controller on runtime resume).
++ */
++#define AXP717_DCDC1_CONTROL		0x83
++#define AXP717_DCDC_V_OUT_MASK		0x7f
++#define AXP717_VDD_CPU_SUSPEND_SEL	31
++/* Generous for any DCDC1 ramp back up to the OPP voltage. */
++#define AXP717_VDD_CPU_RAMP_US		2000
++
++#define SUNXI_R_TWI_GATE_RESET_REG	(SUNXI_R_PRCM_BASE + 0x19c)
++
++static uint32_t r_twi_saved[4];
++
++static void r_twi_save(void)
++{
++	r_twi_saved[0] = mmio_read_32(SUNXI_R_PIO_BASE + 0x00);
++	r_twi_saved[1] = mmio_read_32(SUNXI_R_PIO_BASE + 0x14);
++	r_twi_saved[2] = mmio_read_32(SUNXI_R_PIO_BASE + 0x1c);
++	r_twi_saved[3] = mmio_read_32(SUNXI_R_TWI_GATE_RESET_REG);
++}
++
++static void r_twi_restore(void)
++{
++	mmio_write_32(SUNXI_R_TWI_GATE_RESET_REG, r_twi_saved[3]);
++	mmio_write_32(SUNXI_R_PIO_BASE + 0x1c, r_twi_saved[2]);
++	mmio_write_32(SUNXI_R_PIO_BASE + 0x14, r_twi_saved[1]);
++	mmio_write_32(SUNXI_R_PIO_BASE + 0x00, r_twi_saved[0]);
++}
++
++int sunxi_pmic_vdd_cpu_suspend(void)
++{
++	int val;
++
++	if (pmic != AXP717 || is_using_rsb())
++		return -ENODEV;
++
++	r_twi_save();
++	val = pmic_bus_init(SUNXI_SOC_H616, pmic_bus_addr);
++	if (val == 0) {
++		val = axp_read(AXP717_DCDC1_CONTROL);
++		if (val >= 0 &&
++		    (val & AXP717_DCDC_V_OUT_MASK) > AXP717_VDD_CPU_SUSPEND_SEL &&
++		    axp_write(AXP717_DCDC1_CONTROL,
++			      (val & ~AXP717_DCDC_V_OUT_MASK) |
++			      AXP717_VDD_CPU_SUSPEND_SEL) != 0)
++			val = -EIO;
++	}
++	r_twi_restore();
++
++	return val;
++}
++
++void sunxi_pmic_vdd_cpu_resume(int saved)
++{
++	if (saved < 0)
++		return;
++
++	r_twi_save();
++	if (pmic_bus_init(SUNXI_SOC_H616, pmic_bus_addr) == 0)
++		(void)axp_write(AXP717_DCDC1_CONTROL, saved);
++	r_twi_restore();
++	udelay(AXP717_VDD_CPU_RAMP_US);
++}
++
+ #define SUNXI_CPUIDLE_VERSION_MASK	0x7U
+ #define SUNXI_CPUIDLE_V1_CTRL_REG	(SUNXI_R_CPUCFG_BASE + 0x010c)
+ 
+--- /dev/null
++++ b/plat/allwinner/sun50i_h616/sunxi_suspend.S
+@@ -0,0 +1,309 @@
++/*
++ * Copyright (c) 2026, nuubOS Project. All rights reserved.
++ *
++ * The DRAM self-refresh sequence follows the H6 one in Crust
++ * (drivers/dram/sun50i-h6-dram.c, Copyright The Crust Firmware Authors,
++ * BSD-3-Clause), adapted to the software self-refresh request of the
++ * H616/H700 controller that U-Boot's DRAM init also uses.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#include <arch.h>
++#include <asm_macros.S>
++
++#include <sunxi_mmap.h>
++
++#define CCU_PLL_PERI0		0x020
++#define CCU_PLL_PERI1		0x028
++#define CCU_PLL_GPU		0x030
++#define CCU_PLL_VIDEO0		0x040
++#define CCU_PLL_VIDEO1		0x048
++#define CCU_PLL_VIDEO2		0x050
++#define CCU_PLL_VE		0x058
++#define CCU_PLL_DE		0x060
++#define CCU_PLL_AUDIO		0x078
++#define CCU_PSI_AHB		0x510
++#define CCU_AHB3		0x51c
++#define CCU_APB1		0x520
++#define CCU_APB2		0x524
++#define PLL_ENABLE		(1 << 31)
++
++#define MCTL_COM_BASE		0x047fa000
++#define MCTL_CTL_BASE		0x047fb000
++#define MC_MAER0		0x020
++#define MC_MAER1		0x024
++#define MC_MAER2		0x028
++#define CTL_STATR		0x004
++#define CTL_PWRCTL		0x030
++#define STATR_OP_MODE_MASK	7
++#define STATR_OP_MODE_NORMAL	1
++#define STATR_OP_MODE_SELFREF	3
++#define PWRCTL_SELFREF_SW	(1 << 5)
++
++/* Saved register values, in SRAM A1 well past the copied code. */
++#define SAVE_BASE		(SUNXI_SRAM_A1_BASE + 0x7000)
++#define SAVE_MAER0		0x00
++#define SAVE_MAER1		0x04
++#define SAVE_MAER2		0x08
++#define SAVE_PSI_AHB		0x14
++#define SAVE_AHB3		0x18
++#define SAVE_APB1		0x1c
++#define SAVE_APB2		0x20
++#define SAVE_PLL(n)		(0x40 + (n) * 4)
++
++/* 10 ms of the 24 MHz system counter. */
++#define SELFREF_TIMEOUT		240000
++/* 1 ms of the 24 MHz system counter. */
++#define PLL_LOCK_TIMEOUT	24000
++/* 20 us of the 24 MHz system counter. */
++#define PLL_SETTLE_TICKS	480
++
++/* RTC general purpose register 6: last standby step, for diagnosis. */
++#define STANDBY_STEP_REG	0x07000118
++#define STANDBY_STEP(n)		(0x5a5a0000 | (n))
++
++	.globl	sunxi_standby_sram
++	.globl	sunxi_standby_sram_end
++	.globl	sunxi_system_suspend_wfi
++	.globl	sunxi_system_resume_warm
++
++	.macro	standby_step _n
++	mov_imm	w1, STANDBY_STEP(\_n)
++	str	w1, [x12]
++	dsb	sy
++	.endm
++
++	/* Busy-wait _ticks of the system counter (x2, x3 clobbered). */
++	.macro	wait_ticks _ticks
++	mrs	x2, cntpct_el0
++	add	x2, x2, #\_ticks
++.Lwait\@:
++	mrs	x3, cntpct_el0
++	cmp	x3, x2
++	b.lo	.Lwait\@
++	.endm
++
++	/* Save a CCU register and clear it (OSC24M source, no divider). */
++	.macro	ccu_save_clear _off, _slot
++	ldr	w1, [x9, #\_off]
++	str	w1, [x13, #\_slot]
++	str	wzr, [x9, #\_off]
++	.endm
++
++	.macro	ccu_restore _off, _slot
++	ldr	w1, [x13, #\_slot]
++	str	w1, [x9, #\_off]
++	.endm
++
++	.macro	pll_off _off, _n
++	ldr	w1, [x9, #\_off]
++	str	w1, [x13, #SAVE_PLL(\_n)]
++	bic	w1, w1, #PLL_ENABLE
++	str	w1, [x9, #\_off]
++	.endm
++
++	/* Restore a PLL and wait for its lock if it was running. */
++	.macro	pll_on _off, _n
++	ldr	w1, [x13, #SAVE_PLL(\_n)]
++	str	w1, [x9, #\_off]
++	tbz	w1, #31, .Lpll_done\@
++	mrs	x2, cntpct_el0
++	mov_imm	x3, PLL_LOCK_TIMEOUT
++	add	x2, x2, x3
++.Lpll_poll\@:
++	ldr	w1, [x9, #\_off]
++	tbnz	w1, #28, .Lpll_done\@
++	mrs	x3, cntpct_el0
++	cmp	x3, x2
++	b.lo	.Lpll_poll\@
++.Lpll_done\@:
++	.endm
++
++/*
++ * int sunxi_standby_sram(void)
++ *
++ * Copied to SRAM A1 and run from there with the MMU and the data cache
++ * off and no stack: DRAM is in self-refresh while it waits. CPU 0 already
++ * runs from OSC24M. Puts the DRAM in self-refresh, moves the AHB/APB
++ * buses to OSC24M, turns every PLL but
++ * PLL_DDR off, waits for an interrupt and undoes all of it. Position
++ * independent: no literal pools, no calls outside this function; only
++ * caller-saved registers.
++ *
++ * Returns 0 after a wake-up, 1 if the DRAM never entered self-refresh
++ * (nothing was changed then).
++ */
++func sunxi_standby_sram
++	mov_imm	x9, SUNXI_CCU_BASE
++	mov_imm	x10, MCTL_CTL_BASE
++	mov_imm	x11, MCTL_COM_BASE
++	mov_imm	x12, STANDBY_STEP_REG
++	mov_imm	x13, SAVE_BASE
++	standby_step 1
++
++	/* Stop every DRAM master. */
++	ldr	w1, [x11, #MC_MAER0]
++	str	w1, [x13, #SAVE_MAER0]
++	ldr	w1, [x11, #MC_MAER1]
++	str	w1, [x13, #SAVE_MAER1]
++	ldr	w1, [x11, #MC_MAER2]
++	str	w1, [x13, #SAVE_MAER2]
++	str	wzr, [x11, #MC_MAER0]
++	str	wzr, [x11, #MC_MAER1]
++	str	wzr, [x11, #MC_MAER2]
++	dsb	sy
++
++	/* Request software self-refresh and wait for the controller. */
++	ldr	w1, [x10, #CTL_PWRCTL]
++	orr	w1, w1, #PWRCTL_SELFREF_SW
++	str	w1, [x10, #CTL_PWRCTL]
++	dsb	sy
++	mrs	x2, cntpct_el0
++	mov_imm	x3, SELFREF_TIMEOUT
++	add	x2, x2, x3
++1:	ldr	w1, [x10, #CTL_STATR]
++	and	w1, w1, #STATR_OP_MODE_MASK
++	cmp	w1, #STATR_OP_MODE_SELFREF
++	b.eq	2f
++	mrs	x3, cntpct_el0
++	cmp	x3, x2
++	b.lo	1b
++
++	/* Timed out: leave self-refresh and give up. */
++	standby_step 0xe1
++	mov	w0, #1
++	b	7f
++
++2:	standby_step 2
++
++	/* Buses from OSC24M, undivided, so PLL_PERI0 can stop. */
++	ccu_save_clear CCU_PSI_AHB, SAVE_PSI_AHB
++	ccu_save_clear CCU_AHB3, SAVE_AHB3
++	ccu_save_clear CCU_APB1, SAVE_APB1
++	ccu_save_clear CCU_APB2, SAVE_APB2
++	dsb	sy
++	isb
++
++	pll_off	CCU_PLL_PERI0, 0
++	pll_off	CCU_PLL_PERI1, 1
++	pll_off	CCU_PLL_GPU, 2
++	pll_off	CCU_PLL_VIDEO0, 3
++	pll_off	CCU_PLL_VIDEO1, 4
++	pll_off	CCU_PLL_VIDEO2, 5
++	pll_off	CCU_PLL_VE, 6
++	pll_off	CCU_PLL_DE, 7
++	pll_off	CCU_PLL_AUDIO, 8
++	dsb	sy
++	standby_step 3
++
++	/*
++	 * Wait for an interrupt. The GIC CPU interface stays enabled and
++	 * Linux masked every interrupt that is not a wake source; routing
++	 * IRQ/FIQ to EL3 lets them end WFI while PSTATE keeps them masked.
++	 */
++	mrs	x15, scr_el3
++	orr	x1, x15, #(SCR_IRQ_BIT | SCR_FIQ_BIT)
++	msr	scr_el3, x1
++	isb
++	dsb	sy
++	wfi
++	msr	scr_el3, x15
++	isb
++	standby_step 4
++
++	pll_on	CCU_PLL_AUDIO, 8
++	pll_on	CCU_PLL_DE, 7
++	pll_on	CCU_PLL_VE, 6
++	pll_on	CCU_PLL_VIDEO2, 5
++	pll_on	CCU_PLL_VIDEO1, 4
++	pll_on	CCU_PLL_VIDEO0, 3
++	pll_on	CCU_PLL_GPU, 2
++	pll_on	CCU_PLL_PERI1, 1
++	pll_on	CCU_PLL_PERI0, 0
++	wait_ticks PLL_SETTLE_TICKS
++
++	ccu_restore CCU_APB2, SAVE_APB2
++	ccu_restore CCU_APB1, SAVE_APB1
++	ccu_restore CCU_AHB3, SAVE_AHB3
++	ccu_restore CCU_PSI_AHB, SAVE_PSI_AHB
++	dsb	sy
++	isb
++
++	standby_step 5
++	mov	w0, #0
++
++7:
++	/* Leave self-refresh and let the masters back in. */
++	ldr	w1, [x10, #CTL_PWRCTL]
++	bic	w1, w1, #PWRCTL_SELFREF_SW
++	str	w1, [x10, #CTL_PWRCTL]
++	dsb	sy
++	mrs	x2, cntpct_el0
++	mov_imm	x3, SELFREF_TIMEOUT
++	add	x2, x2, x3
++6:	ldr	w1, [x10, #CTL_STATR]
++	and	w1, w1, #STATR_OP_MODE_MASK
++	cmp	w1, #STATR_OP_MODE_NORMAL
++	b.eq	8f
++	mrs	x3, cntpct_el0
++	cmp	x3, x2
++	b.lo	6b
++	/*
++	 * Never left self-refresh: record it and the raw STATR in RTC GP5,
++	 * nothing else can be done.
++	 */
++	ldr	w1, [x10, #CTL_STATR]
++	str	w1, [x12, #-4]
++	standby_step 0xe6
++	b	6b
++8:
++	ldr	w1, [x13, #SAVE_MAER0]
++	str	w1, [x11, #MC_MAER0]
++	ldr	w1, [x13, #SAVE_MAER1]
++	str	w1, [x11, #MC_MAER1]
++	ldr	w1, [x13, #SAVE_MAER2]
++	str	w1, [x11, #MC_MAER2]
++	dsb	sy
++	standby_step 6
++	ret
++sunxi_standby_sram_end:
++endfunc sunxi_standby_sram
++
++/*
++ * int sunxi_system_suspend_wfi(uintptr_t sram_entry)
++ *
++ * Turns the MMU off (the translation tables are in DRAM), runs the
++ * standby code copied to SRAM and, once DRAM is back, turns the MMU on
++ * again (the data cache stays off, as the power-down left it).
++ */
++func sunxi_system_suspend_wfi
++	stp	x29, x30, [sp, #-16]!
++	mrs	x1, sctlr_el3
++	bic	x1, x1, #SCTLR_M_BIT
++	bic	x1, x1, #SCTLR_C_BIT
++	msr	sctlr_el3, x1
++	isb
++	/* Drop stale instructions for the SRAM copy. */
++	ic	iallu
++	dsb	sy
++	isb
++	blr	x0
++	mrs	x1, sctlr_el3
++	orr	x1, x1, #SCTLR_M_BIT
++	msr	sctlr_el3, x1
++	isb
++	ldp	x29, x30, [sp], #16
++	ret
++endfunc sunxi_system_suspend_wfi
++
++/*
++ * void sunxi_system_resume_warm(void)
++ *
++ * Re-enters BL31 through the warm boot path as if CPU 0 had been powered
++ * off: the caches were already cleaned and the core left coherency for
++ * the system power-down, and a Cortex-A53 cannot abandon it.
++ */
++func sunxi_system_resume_warm
++	b	bl31_warm_entrypoint
++endfunc sunxi_system_resume_warm

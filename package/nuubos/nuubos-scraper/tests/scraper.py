@@ -152,9 +152,10 @@ try:
     check('rating 0-100', 'rating=90' in m)
     check('multi-line description', 'description=First line\\n\\nSecond: paragraph' in m)
     check('cover installed', open(ud + '/library/covers/snes/Mario.png', 'rb').read().startswith(b'\x89PNG'))
-    check('screenshot installed', 'screenshot=' in m and os.path.exists(ud + '/library/screenshots/snes/Mario.png'))
+    check('no screenshot', 'screenshot=' not in m and not os.path.exists(ud + '/library/screenshots'))
     c = calls()
     check('gather + generate', "'-s', 'screenscraper'" in c and "'-f', 'pegasus'" in c and "'-p', 'snes'" in c)
+    check('screenshots not cached', 'noscreenshots' in c)
     cfg = run + '/scraper/.skyscraper/config.ini'
     ini = open(cfg).read()
     check('account in tmpfs config only', 'userCreds="me:p\\"w"' in ini and (os.stat(cfg).st_mode & 0o077) == 0)
@@ -180,13 +181,12 @@ try:
 
     # Fill: what is there stays, what is missing comes back.
     m = meta('Mario').replace('title=Super Mario World', 'title=My Title')
-    m = '\n'.join(l for l in m.splitlines() if not l.startswith(('description=', 'screenshot='))) + '\n'
+    m = '\n'.join(l for l in m.splitlines() if not l.startswith('description=')) + '\n'
     open(ud + '/library/metadata/snes/Mario.txt', 'w').write(m)
-    os.unlink(ud + '/library/screenshots/snes/Mario.png')
     out = job('game', ids['Mario'], 'fill')
     m = meta('Mario')
     check('fill keeps existing data', 'title=My Title' in m)
-    check('fill adds the missing', 'description=First line' in m and os.path.exists(ud + '/library/screenshots/snes/Mario.png'))
+    check('fill adds the missing', 'description=First line' in m)
     check('complete game skipped by fill', 'complete' in job('game', ids['Mario'], 'fill'))
     out = job('game', ids['Mario'], 'force')
     check('update (force) refreshes', '@result scraped' in out and 'title=Super Mario World' in meta('Mario'))
@@ -210,8 +210,7 @@ try:
 
     check('reject', sc('reject', ids['Zelda']).startswith('OK') and os.path.exists(ud + '/library/metadata/snes/Zelda.rejected'))
     check('clear removes scraped media', sc('clear', ids['Mario']).startswith('OK')
-          and not os.path.exists(ud + '/library/covers/snes/Mario.png')
-          and not os.path.exists(ud + '/library/screenshots/snes/Mario.png') and meta('Mario') == '')
+          and not os.path.exists(ud + '/library/covers/snes/Mario.png') and meta('Mario') == '')
     sc('provider', 'set', 'screenscraper')
     out = job('bulk', 'all')
     check('bulk: one Skyscraper run per system, progress', '@progress' in out and "'--includefrom'" in calls())
