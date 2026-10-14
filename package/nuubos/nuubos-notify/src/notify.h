@@ -56,9 +56,15 @@
  *   stream.pair.failed      name=
  *   stream.failed           reason=unreachable|unpaired|app|start|connection|steamlink
  *                           [name=]    (stream could not start / was lost)
+ *   stream.wake.failed      name=      (Wake-on-LAN sent, the PC never answered)
  *   stream.steamlink.installed version=   (Valve Steam Link downloaded)
  *   stream.steamlink.failed reason=network|space|archive|write
  *   sync.request            name=      (a device asks to sync: nuubos-syncd)
+ *   cast.started            name= delay=low|high   (screen cast to a receiver: nuubos-castd)
+ *   cast.ended              name= reason=stopped|network  (ended on the receiver / lost)
+ *   cast.failed             reason=unreachable|refused|unsupported|encoder|capture|network [name=]
+ *   cast.encoder.installed             (Cisco OpenH264 downloaded, Miracast)
+ *   cast.encoder.failed     reason=network|space|verify|write
  *
  * Values are percent-encoded. Sending is fire-and-forget and never blocks:
  * a missing or busy router simply drops a transient notification.

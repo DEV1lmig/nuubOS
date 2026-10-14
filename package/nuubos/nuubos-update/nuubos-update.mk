@@ -16,9 +16,9 @@ NUUBOS_UPDATE_DEPENDENCIES = libcurl libsodium zlib
 # reported unavailable.
 NUUBOS_UPDATE_PUBKEY = $(shell tr -d ' \n' < $(BR2_EXTERNAL_NUUBOS_PATH)/board/nuubos/common/ota/update-key.pub 2>/dev/null)
 
-# Release channel of a device that never chose one (stable|beta|alpha):
-# alpha while nuubOS has no stable release.
-NUUBOS_UPDATE_DEFAULT_CHANNEL = alpha
+# Release channel of a device that never chose one (stable|rc|nightly):
+# nightly while nuubOS has no stable release.
+NUUBOS_UPDATE_DEFAULT_CHANNEL = nightly
 
 define NUUBOS_UPDATE_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \

@@ -7,6 +7,9 @@ INPUT_RUNTIME=/run/nuubos/input
 SUPPRESS_START="$INPUT_RUNTIME/suppress-start"
 SUPPRESS_POWER="$INPUT_RUNTIME/suppress-power"
 INTERRUPTS=/proc/interrupts
+# The hardware watchdog keeps counting while the SoC sleeps (sunxi_wdt has
+# no suspend handling): it is stopped for the sleep and started again.
+WATCHDOG=/etc/init.d/S12nuubos-watchdog
 
 suspend_log()
 {
@@ -87,9 +90,11 @@ resume_wifi()
 		suspend_log "Wi-Fi resume requested from existing wpa_supplicant"
 	fi
 
-	# Restore the production radio policy in case the driver reset it.
-	if command -v iw >/dev/null 2>&1; then
-		iw dev wlan0 set power_save off >/dev/null 2>&1 || true
+	# The radio power-save policy belongs to nuubos-wifid (on, off only
+	# during low-latency sessions): ask it to apply it again in case the
+	# driver reset it across the sleep.
+	if [ -r /run/nuubos/wifid.pid ]; then
+		kill -USR1 "$(cat /run/nuubos/wifid.pid)" 2>/dev/null || true
 	fi
 }
 
@@ -110,6 +115,8 @@ POWER_IRQ_BEFORE="$(read_irq_count "axp20x-pek-dbf")"
 printf '%s\n' "${START_IRQ_BEFORE:-unknown}" > "$SUPPRESS_START"
 printf '%s\n' "${POWER_IRQ_BEFORE:-unknown}" > "$SUPPRESS_POWER"
 
+[ -x "$WATCHDOG" ] && "$WATCHDOG" stop
+
 sync
 
 # Deep sleep (suspend-to-RAM, BL31 SYSTEM_SUSPEND) when the firmware offers
@@ -122,11 +129,14 @@ if grep -qw deep "$MEM_SLEEP" 2>/dev/null; then
 fi
 
 if ! echo "$SLEEP_STATE" > "$POWER_STATE"; then
+	[ -x "$WATCHDOG" ] && "$WATCHDOG" start
 	cancel_wake_guards
 	run_device_hook resume >/dev/null 2>&1 || true
 	suspend_log "$SLEEP_NAME entry failed" >&2
 	exit 1
 fi
+
+[ -x "$WATCHDOG" ] && "$WATCHDOG" start
 
 resolve_wake_guard START "$SUPPRESS_START" "$START_IRQ_BEFORE" \
 	"$(read_irq_count "Key Start")"

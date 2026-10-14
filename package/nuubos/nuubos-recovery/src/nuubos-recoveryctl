@@ -208,6 +208,8 @@ apply_pending()
         # S03 then recreates the layout and a fresh config with SETUP_COMPLETE=0.
         wipe_dir_contents "$STATE" ssh recovery lost+found
         wipe_dir_contents "$STATE/ssh" dropbear root
+        # Keys that signed in as root go with the device credential.
+        rm -f "$STATE/ssh/root/authorized_keys"
         rm -f "${PENDING:?}" "${RECOVERY:?}/safe-mode" "${RECOVERY:?}/ui-crashes"
         sync
         event "factory-reset state applied scope=$scope"

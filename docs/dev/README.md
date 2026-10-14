@@ -14,5 +14,5 @@
 | connectivity | Wi-Fi, Bluetooth, remote, files, Syncthing | 24, 25, 37.19–20, 37.26 |
 | input | controllers, mapping | 26 |
 | emulation | RetroArch, game UX | 18, 37.13, 37.18 |
-| streaming-media | Moonlight, Steam Link, media, Web | 37.14–15, 37.25, 37.27 |
+| streaming-media | Moonlight, Steam Link, media, Web, screen casting | 37.14–15, 37.25, 37.27 |
 | open-items | known defects | 37.8 |

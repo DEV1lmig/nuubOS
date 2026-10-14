@@ -25,6 +25,7 @@ classify_sink()
 {
     text="$(inspect_lower "$1")"
     case "$text" in
+        *nuubos_cast*) echo cast ;;
         *bluez_output*|*bluetooth*) echo bluetooth ;;
         *hdmi*|*displayport*|*display\ port*|*iec958*) echo hdmi ;;
         *nuubos_analog*|*codec*|*analog*|*sun4i*|*sun50i*|*h700*) echo analog ;;
@@ -43,7 +44,7 @@ find_sink()
             return 0
         fi
         if [ "$want" = "analog" ] && [ -z "$fallback" ] && \
-           [ "$kind" != "bluetooth" ] && [ "$kind" != "hdmi" ]; then
+           [ "$kind" != "bluetooth" ] && [ "$kind" != "hdmi" ] && [ "$kind" != "cast" ]; then
             fallback="$id"
         fi
     done
@@ -63,6 +64,7 @@ select_sink()
         speaker|headphones|analog) kind=analog ;;
         hdmi) kind=hdmi ;;
         bluetooth) kind=bluetooth ;;
+        cast) kind=cast ;;
         *) echo "unsupported output: $requested" >&2; return 2 ;;
     esac
 
@@ -80,7 +82,8 @@ select_sink()
     # policy. HDMI remains unity because the TV / receiver owns media volume.
     if [ "$kind" = "analog" ]; then
         wpctl set-mute "$id" 0 >/dev/null 2>&1 || true
-    elif [ "$kind" = "hdmi" ]; then
+    elif [ "$kind" = "hdmi" ] || [ "$kind" = "cast" ]; then
+        # The receiver of a screen cast owns the volume like a TV on HDMI.
         wpctl set-mute "$id" 0 >/dev/null 2>&1 || true
         wpctl set-volume "$id" 1.0 >/dev/null 2>&1 || true
     fi
@@ -99,6 +102,7 @@ case "${1:-}" in
             speaker|headphones|analog) find_sink analog ;;
             hdmi) find_sink hdmi ;;
             bluetooth) find_sink bluetooth ;;
+            cast) find_sink cast ;;
             *) exit 2 ;;
         esac
         ;;

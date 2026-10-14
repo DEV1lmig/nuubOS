@@ -1,0 +1,56 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] media: cedrus: use a 32-aligned stride for linear NV12
+
+With the untiled (linear) primary output, the H616 video engine (H6
+variant) reads H.264 reference frames as if the line stride were
+32-aligned. Cedrus programmed and exported a 16-aligned stride, so any
+width that is a multiple of 16 but not of 32 (720: RG CubeXX 720x720,
+RG34XX 720x480, Steam Link's 720x406) decoded the IDR frame correctly
+and corrupted every predicted frame (horizontal streaks, green blocks),
+with no decode error reported. 640 and 1920 were unaffected.
+
+Use ALIGN(width, 32) for bytesperline, the chroma buffer length and the
+VE line stride registers, so userspace and the hardware agree.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_video.c
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_video.c
+@@ -153,8 +153,12 @@
+ 	case V4L2_PIX_FMT_NV21:
+ 	case V4L2_PIX_FMT_YUV420:
+ 	case V4L2_PIX_FMT_YVU420:
+-		/* 16-aligned stride. */
+-		bytesperline = ALIGN(width, 16);
++		/*
++		 * 32-aligned stride: the H6/H616 video engine reads H.264
++		 * reference frames with a 32-aligned stride; a 16-aligned one
++		 * (e.g. 720 wide) corrupts every predicted frame.
++		 */
++		bytesperline = ALIGN(width, 32);
+ 
+ 		/* 16-aligned height. */
+ 		height = ALIGN(height, 16);
+--- a/drivers/staging/media/sunxi/cedrus/cedrus_hw.c
++++ b/drivers/staging/media/sunxi/cedrus/cedrus_hw.c
+@@ -89,7 +89,7 @@
+ 	case V4L2_PIX_FMT_NV21:
+ 	case V4L2_PIX_FMT_YUV420:
+ 	case V4L2_PIX_FMT_YVU420:
+-		chroma_size = ALIGN(width, 16) * ALIGN(height, 16) / 2;
++		chroma_size = ALIGN(width, 32) * ALIGN(height, 16) / 2;
+ 
+ 		switch (fmt->pixelformat) {
+ 		case V4L2_PIX_FMT_NV12:
+@@ -111,8 +111,9 @@
+ 		reg = chroma_size / 2;
+ 		cedrus_write(dev, VE_PRIMARY_CHROMA_BUF_LEN, reg);
+ 
+-		reg = VE_PRIMARY_FB_LINE_STRIDE_LUMA(ALIGN(width, 16)) |
+-		      VE_PRIMARY_FB_LINE_STRIDE_CHROMA(ALIGN(width, 16) / 2);
++		/* Same 32-aligned stride as cedrus_prepare_format(). */
++		reg = VE_PRIMARY_FB_LINE_STRIDE_LUMA(ALIGN(width, 32)) |
++		      VE_PRIMARY_FB_LINE_STRIDE_CHROMA(ALIGN(width, 32) / 2);
+ 		cedrus_write(dev, VE_PRIMARY_FB_LINE_STRIDE, reg);
+ 
+ 		break;

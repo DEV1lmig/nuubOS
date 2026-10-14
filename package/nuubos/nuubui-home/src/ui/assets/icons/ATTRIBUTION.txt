@@ -15,3 +15,13 @@ folder, file, image, music, film, hard-drive, network-wired, sd-card,
 box-archive, palette, folder-plus, paste, server, tv.
 
 nuubOS own icons (MIT, not Font Awesome): desktop.svg, plus.svg.
+
+Font Awesome Free 6.7.2 icons added 2026-10-12 (Files and Media redesign): solid pause,
+forward-step, backward-step, shuffle, repeat, square-check, circle-info, compact-disc, list,
+clock-rotate-left, arrow-turn-up; brands usb.
+
+Font Awesome Free 6.7.2 solid icon added 2026-10-13 (Moonlight Wake PC): power-off.
+
+Font Awesome Free 6.7.2 solid icon added 2026-10-13 (mute indicator in the top bar): volume-xmark.
+
+Font Awesome Free 6.7.2 solid icon added 2026-10-14 (game tags): tag.

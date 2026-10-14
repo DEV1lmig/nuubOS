@@ -4964,6 +4964,7 @@ Provide RetroArch as the default emulation backend where libretro is the best fi
 - The supported core/system matrix is explicit and qualified; nuubOS does not ship every possible core merely because it exists.
 - Working defaults take priority over exposing every RetroArch option.
 - Core binaries are device-global; configuration is per-user where appropriate.
+- Cheats, netplay and more emulators have native nuubOS flows (user decision 2026-10-14, pulled forward before the RC): cheats per user and game from the Quick Menu (the libretro cheat collection downloaded on request, never in hardcore mode or with netplay); netplay on the local network (Host Game from the Quick Menu, the Netplay application in Home to join, RetroArch-compatible); Game Settings → Get More Emulators downloads libretro buildbot cores for the game's system on request (not qualified by nuubOS, never part of the image).
 
 **Acceptance baseline**
 A qualified system can be launched from the Library, played with the configured controller, saved, exited and returned to nuubUI without interacting with native RetroArch menus. Two users can retain independent supported configuration.
@@ -5494,6 +5495,9 @@ Representative qualified local media from supported storage plays correctly, sur
 **Platform/GAP**
 Requires media framework/player choice, Cedrus decode validation, subtitle support and audio-route integration.
 
+**Product decision update (user, 2026-10-12)**
+- Media becomes a complete media center ("un media center completo deve essere"): shelves with artwork, Continue Watching, albums, user playlists, Shuffle All, Now Playing with queue, network shares and Jellyfin as sources, music that keeps playing behind nuubUI and behind games with Quick Menu controls and a Game/Music volume mixer, high-resolution FLAC output, Screen Off as a music player. It still keeps no database: content is read from the folders when shown. Implementation: docs/dev/streaming-media.md.
+
 ### Refinement result
 
 EPIC-028 is considered **REFINED**. Exact implementation technologies and final per-device qualification remain subject to the relevant platform Enablers and regression matrices.
@@ -5534,6 +5538,8 @@ For each protocol: discover a qualified receiver, establish playback/mirroring, 
 ### Refinement result
 
 EPIC-029 starts after the RC (after Linux 7.3 and deep sleep); protocol order and per-receiver qualification follow the feasibility above.
+
+**Implementation (user request 2026-10-13, pulled forward before the RC):** screen mirroring with Google Cast (Cast Streaming, low delay; Default Media Receiver live WebM fallback, high delay), Miracast over Infrastructure (MS-MICE, low delay, H.264 from Cisco's OpenH264 downloaded by the user) and DLNA (live MPEG-2 transport stream, high delay); one receiver list in the Quick Menu (only low-delay receivers over a game), preferences in Settings → Display & Audio. AirPlay not implemented (mirroring is FairPlay-protected). Media casting (the receiver plays a file) and per-receiver hardware qualification remain open. Details: docs/dev/streaming-media.md.
 
 ---
 

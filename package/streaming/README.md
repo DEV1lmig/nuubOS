@@ -49,6 +49,11 @@ whole system 6-9 % of four cores including labwc composition.
   are read, each as the player given by its product id; `-noquitcombo`.
 - 0005: `-control`: `@event` lines on stdout and `STATS`/`QUIT` on stdin
   for streamd; `status` action; a failed connection ends the process.
+- 0006: `BUTTONS <hex>` on the control channel holds extra buttons on
+  player 1 (the Home button the console keeps for its Quick Menu); `status`
+  reports the host's `mac=` (Wake-on-LAN); `@stats` adds `bytes`,
+  `host_latency`/`host_frames` (Sunshine's per-frame host processing time,
+  1/10 ms) and `lost` (frame-number gaps).
 
 ## FFmpeg
 

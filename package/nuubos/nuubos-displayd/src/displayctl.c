@@ -28,8 +28,9 @@ static void usage(const char *argv0)
 		"  %s brightness-live 0..100\n"
 		"  %s hdmi\n"
 		"  %s restore\n"
-		"  %s reset\n",
-		argv0, argv0, argv0, argv0, argv0, argv0);
+		"  %s reset\n"
+		"  %s screen on|off|status\n",
+		argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static int parse_percent(const char *text, unsigned int *value)
@@ -516,6 +517,58 @@ static int command_restore(void)
 }
 
 /*
+ * Screen off with the system running (Media "Screen Off", user request
+ * 2026-10-12: the console as a music player). Every backlight is powered
+ * down through the standard bl_power (FB_BLANK_POWERDOWN = 4), so on/off
+ * panels work too; the brightness value is untouched and comes back with
+ * "on". The marker tells nuubUI and the Quick Menu that the next key only
+ * wakes the screen. HDMI is not blanked (the TV has its own power).
+ */
+#define SCREEN_OFF_MARK "/run/nuubos/screen-off"
+
+static int command_screen(const char *arg)
+{
+	DIR *dir;
+	struct dirent *entry;
+	unsigned long value;
+	int rc = 0;
+
+	if (!strcmp(arg, "status")) {
+		printf("%s\n", access(SCREEN_OFF_MARK, F_OK) == 0 ? "off" : "on");
+		return 0;
+	}
+	if (strcmp(arg, "on") && strcmp(arg, "off"))
+		return 2;
+	value = !strcmp(arg, "off") ? 4 : 0;
+	dir = opendir(BACKLIGHT_CLASS_DIR);
+	if (!dir)
+		return 1;
+	while ((entry = readdir(dir)) != NULL) {
+		char path[512];
+
+		if (entry->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path), "%s/%s/bl_power", BACKLIGHT_CLASS_DIR, entry->d_name);
+		if (access(path, W_OK) == 0 && write_ulong_file(path, value) != 0)
+			rc = 1;
+	}
+	closedir(dir);
+	if (value) {
+		FILE *f = fopen(SCREEN_OFF_MARK, "w");
+
+		if (f)
+			fclose(f);
+	} else {
+		unlink(SCREEN_OFF_MARK);
+	}
+	/* The power policy caps the CPU while the screen is off (power.sh);
+	 * a failure there must not fail the screen command. */
+	if (system("/usr/sbin/nuubos-power-mode refresh >/dev/null 2>&1") != 0)
+		fprintf(stderr, "displayctl: power refresh failed\n");
+	return rc;
+}
+
+/*
  * Reset System Settings: persist the product default brightness and apply it
  * to a variable backlight. On/off-only hardware only gets the persistent
  * value; the kernel keeps a blanked panel dark while HDMI is active.
@@ -558,6 +611,9 @@ int main(int argc, char **argv)
 
 	if (argc == 2 && strcmp(argv[1], "hdmi") == 0)
 		return command_hdmi();
+
+	if (argc == 3 && strcmp(argv[1], "screen") == 0)
+		return command_screen(argv[2]);
 
 	if (argc == 2 && strcmp(argv[1], "restore") == 0)
 		return command_restore();

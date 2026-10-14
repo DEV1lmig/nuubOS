@@ -64,6 +64,8 @@ struct LibGame {
     available: bool,
     /* On the games card (libraryd field 9 = 2). */
     on_sd2: bool,
+    /* The user's tags (field 13), libraryd order: status, then broken. */
+    tags: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -190,6 +192,34 @@ fn parse_game(value: &str) -> Option<LibGame> {
         time: f[6].parse().unwrap_or(0),
         available: f[7] == "1",
         on_sd2: f.get(8) == Some(&"2"),
+        tags: f.get(12).map(|t| t.split(',').filter(|t| !t.is_empty()).map(String::from).collect()).unwrap_or_default(),
+    })
+}
+
+/* Game tags (libraryd TAG_SET/TAG_CLEAR), in libraryd order: the status
+ * tags (one at a time), then Broken. */
+pub(crate) const TAGS: [&str; 6] = ["backlog", "playing", "completed", "mastered", "dropped", "broken"];
+
+pub(crate) fn tag_label(ui: &HomeWindow, tag: &str) -> String {
+    match tag {
+        "backlog" => tr(ui, 1231, "Backlog"),
+        "playing" => tr(ui, 1232, "Playing"),
+        "completed" => tr(ui, 1233, "Completed"),
+        "mastered" => tr(ui, 1234, "100%"),
+        "dropped" => tr(ui, 1235, "Dropped"),
+        "broken" => tr(ui, 1236, "Broken"),
+        _ => tag.to_owned(),
+    }
+}
+
+pub(crate) fn tag_color(tag: &str) -> Color {
+    parse_color(match tag {
+        "backlog" => "#8e9aaf",
+        "playing" => "#4f9cf9",
+        "completed" => "#3ec27a",
+        "mastered" => "#f2c94c",
+        "dropped" => "#a08679",
+        _ => "#ef5350",
     })
 }
 
@@ -528,6 +558,10 @@ fn game_card(ui: &HomeWindow, snap: &LibSnapshot, g: &LibGame, load: bool) -> Ho
         x_units: 0.0,
         accent,
         available: g.available,
+        tag1: g.tags.first().map(|t| tag_label(ui, t)).unwrap_or_default().into(),
+        tag1_color: g.tags.first().map(|t| tag_color(t)).unwrap_or_default(),
+        tag2: g.tags.get(1).map(|t| tag_label(ui, t)).unwrap_or_default().into(),
+        tag2_color: g.tags.get(1).map(|t| tag_color(t)).unwrap_or_default(),
         focused: false,
         ..Default::default()
     }
@@ -652,6 +686,7 @@ fn build_home(ui: &HomeWindow) {
                         "files" => tr(ui, 609, "Files").into(),
                         "media" => tr(ui, 665, "Media").into(),
                         "web" => tr(ui, 678, "Web").into(),
+                        "netplay" => tr(ui, 1239, "Netplay").into(),
                         _ => a.name.clone().into(),
                     },
                     cover_path: a.icon.clone().into(),
@@ -1359,6 +1394,10 @@ pub fn handle_home_action(ui: &HomeWindow, action: &str) {
                     crate::mediaui::open(ui)
                 }
                 _ if card.key.as_str() == "web" => crate::webui::open(ui),
+                _ if card.key.as_str() == "netplay" => {
+                    app_page_icon(ui, &card);
+                    crate::netplayui::open(ui)
+                }
                 /* Other applications need the future application session
                  * service. */
                 _ => show_notice(ui, tr(ui, 411, "Launching is not available yet")),

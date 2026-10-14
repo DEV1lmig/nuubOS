@@ -7,7 +7,7 @@
 # WHAT'S NEW) and on the GitHub release, plain text, one item per line
 # ("- " bullets allowed), at most 4000 bytes; signed inside the manifest.
 #
-# CHANNEL: stable | beta | alpha. Input: output/h700/images/rootfs.ext4
+# CHANNEL: stable | rc | nightly. Input: output/h700/images/rootfs.ext4
 # (the system slot image) and rootfs.tar (its build serial) from a full
 # image build. Output in OUTDIR, published by tools/ota/publish.sh:
 #   <tag>/nuubos-system-<version>.img.gz       payload (release <tag>)
@@ -20,7 +20,7 @@
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-}"; CHANNEL="${2:-}"; NOTES_FILE="${3:-}"
 KEYTOOL="$ROOT/tools/ota/release-key.py"
-[ -n "$OUT" ] || { echo "Usage: $0 OUTDIR stable|beta|alpha [NOTES_FILE]" >&2; exit 2; }
+[ -n "$OUT" ] || { echo "Usage: $0 OUTDIR stable|rc|nightly [NOTES_FILE]" >&2; exit 2; }
 NOTES=""
 if [ -n "$NOTES_FILE" ]; then
     [ -f "$NOTES_FILE" ] || { echo "[FAIL] $NOTES_FILE missing" >&2; exit 1; }
@@ -28,7 +28,7 @@ if [ -n "$NOTES_FILE" ]; then
     # One manifest line: backslash and new lines escaped (\\, \n).
     NOTES="$(sed 's/\\/\\\\/g' "$NOTES_FILE" | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')"
 fi
-case "$CHANNEL" in stable|beta|alpha) ;; *) echo "[FAIL] channel must be stable, beta or alpha" >&2; exit 2 ;; esac
+case "$CHANNEL" in stable|rc|nightly) ;; *) echo "[FAIL] channel must be stable, rc or nightly" >&2; exit 2 ;; esac
 IMAGES="$ROOT/output/h700/images"
 IMG="$IMAGES/rootfs.ext4"; TAR="$IMAGES/rootfs.tar"
 [ -f "$IMG" ] && [ -f "$TAR" ] || { echo "[FAIL] $IMG or $TAR missing: run a full image build" >&2; exit 1; }

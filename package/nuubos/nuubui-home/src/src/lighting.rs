@@ -77,7 +77,7 @@ fn apply(ui: &HomeWindow, state: State) {
 pub fn lifecycle(phase: &'static str) {
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             proxy(&connection)?.call_method("Lifecycle", &(phase,))?;
             Ok(())
         })();
@@ -91,7 +91,7 @@ pub fn refresh(ui: &HomeWindow) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<State> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = proxy(&connection)?;
             let state: State = proxy.call("GetState", &())?;
             Ok(state)
@@ -111,7 +111,7 @@ pub fn start_listener(ui: &HomeWindow) {
     refresh(ui);
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let Ok(connection) = zbus::blocking::Connection::system() else {
+        let Ok(connection) = crate::bus::system() else {
             return;
         };
         let Ok(proxy) = proxy(&connection) else {
@@ -144,7 +144,7 @@ enum Call {
 fn call(call: Call) {
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = proxy(&connection)?;
             match &call {
                 Call::Text(method, value) => proxy.call(*method, &(value.as_str(),)),
@@ -284,4 +284,39 @@ pub fn handle_page(ui: &HomeWindow, action: &str) {
 pub fn reset_page(ui: &HomeWindow) {
     ui.set_lighting_index(0);
     ui.set_lighting_scroll(0);
+}
+
+/* Media app options (lightingd owns them). Blocking: call from a worker
+ * thread. Media layer: the ring shows the playing track's progress (off =
+ * the effect above). Screen-off lighting: keep the ring on while the
+ * screen is off (off = dark). */
+fn get_bool(method: &str) -> Option<bool> {
+    let connection = crate::bus::system().ok()?;
+    let value = proxy(&connection).ok()?.call(method, &()).ok();
+    value
+}
+
+fn set_bool(method: &str, enabled: bool) -> bool {
+    (|| -> zbus::Result<()> {
+        let connection = crate::bus::system()?;
+        let result = proxy(&connection)?.call(method, &(enabled,));
+        result
+    })()
+    .is_ok()
+}
+
+pub fn media_progress() -> Option<bool> {
+    get_bool("GetMediaProgress")
+}
+
+pub fn set_media_progress(enabled: bool) -> bool {
+    set_bool("SetMediaProgress", enabled)
+}
+
+pub fn screen_off_lighting() -> Option<bool> {
+    get_bool("GetScreenOffLighting")
+}
+
+pub fn set_screen_off_lighting(enabled: bool) -> bool {
+    set_bool("SetScreenOffLighting", enabled)
 }

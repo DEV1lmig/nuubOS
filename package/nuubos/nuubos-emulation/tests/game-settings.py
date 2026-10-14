@@ -2,7 +2,8 @@
 # Host test: nuubos-emud per-game overrides (EPIC-018), user-key restore,
 # screenshots (EPIC-021), achievements session keys (EPIC-017), the user's
 # emulation settings, slot rotation, resume/start modes and the session
-# shader (pixel perfect, CRT, bezels), driving
+# shader (pixel perfect, CRT, bezels), downloaded emulators, cheats and
+# netplay (Host Game relaunch, LAN discovery), driving
 # the real libraryd and emud with a fake RetroArch that, like the real one,
 # saves its whole configuration on exit.
 # Run: python3 package/nuubos/nuubos-emulation/tests/game-settings.py
@@ -31,6 +32,34 @@ open(emu_share + '/retroarch.cfg', 'w').write(
 open(emu_share + '/retroarch-core-options.cfg', 'w').write('')
 open(emu_share + '/shaders/global.glslp', 'w').write('')
 open(emu_share + '/display.conf', 'w').write('snes|crt\n')
+open(emu_share + '/libretro.conf', 'w').write('snes|Nintendo - Super Nintendo Entertainment System\n')
+# Core-info: snes9x and a downloaded core for SNES, another for GBA only.
+info = t + '/info'
+os.makedirs(info)
+for c, db, name in (('snes9x', 'Nintendo - Super Nintendo Entertainment System', 'Snes9x'),
+                    ('mesen-s', 'Nintendo - Super Nintendo Entertainment System|Nintendo - Game Boy', 'Mesen-S'),
+                    ('gpsp', 'Nintendo - Game Boy Advance', 'gpSP')):
+    open('%s/%s_libretro.info' % (info, c), 'w').write('corename = "%s"\ndatabase = "%s"\n' % (name, db))
+os.makedirs(ud + '/retroarch/cores')
+for c in ('mesen-s', 'gpsp'):
+    open(ud + '/retroarch/cores/%s_libretro.so' % c, 'w').write('')
+# Cheats: the user's own file, the collection's of the same title.
+coll = ud + '/cheats/libretro/Nintendo - Super Nintendo Entertainment System'
+os.makedirs(ud + '/cheats/snes')
+os.makedirs(ud + '/cheats/libretro')
+cht = 'cheats = 3\n\ncheat0_desc = "Lives"\ncheat0_code = "7E0DBE:09"\ncheat0_enable = true\n\ncheat1_desc = "Coins"\ncheat1_code = "7E0DBF:63"\ncheat1_enable = false\n\ncheat2_code = "7E0019:02"\n'
+# The collection: an archive and its index (nuubos-libretroctl); emud
+# extracts the game's files.
+import zipfile
+with zipfile.ZipFile(ud + '/cheats/libretro/cheats.zip', 'w') as z:
+    for n in ('Mario (USA).cht', 'Mario (USA) (Game Genie).cht', 'Zelda (USA).cht'):
+        z.writestr('Nintendo - Super Nintendo Entertainment System/' + n, cht)
+    z.writestr('Nintendo - Game Boy/Mario (USA).cht', cht)
+open(ud + '/cheats/libretro/index.txt', 'w').write(''.join(
+    'Nintendo - Super Nintendo Entertainment System/%s\n' % n
+    for n in ('Mario (USA).cht', 'Mario (USA) (Game Genie).cht', 'Zelda (USA).cht'))
+    + 'Nintendo - Game Boy/Mario (USA).cht\n')
+open(ud + '/cheats/snes/Mario.cht', 'w').write(cht)
 open(t + '/inc/nuubos/notify.h', 'w').write(open(notify_h).read())
 
 fake = t + '/retroarch'
@@ -44,11 +73,14 @@ done
 echo "$core" > "%s/launched-core"
 echo "${NUUBOS_RA_RENDER_HEIGHT:-}" > "%s/render-height"
 cp "$app" "%s/last-session.cfg"
+grep -q -- '--host' "%s/args" && { echo "NETPLAY hosting"; echo "NETPLAY joined bob"; }
 shots=$(sed -n 's/^screenshot_directory = "\(.*\)"/\1/p' "$app")
 states=$(sed -n 's/^savestate_directory = "\(.*\)"/\1/p' "$app")
 while read -r line; do
   case "$line" in
     SCREENSHOT) printf 'PNG' > "$shots/Mario-001.png" ;;
+    CHEATS_LOAD*) echo "$line" >> "%s/cheats-loaded"; echo "CHEATS_LOAD OK" ;;
+    NETPLAY_STOP) echo "NETPLAY_STOP OK"; echo "NETPLAY off" ;;
     SAVE_STATE_SLOT*) n=${line#SAVE_STATE_SLOT }; f="$states/Mario.state$n"
       [ "$n" = 0 ] && f="$states/Mario.state"; [ "$n" = -1 ] && f="$states/Mario.state.auto"
       sleep 0.05; printf S > "$f"; echo "SAVE_STATE_SLOT $n OK" ;;
@@ -58,7 +90,7 @@ done
 # config_save_on_exit: the appended keys end up in the user file.
 awk -F' = ' 'NR==FNR{v[$1]=$0; next} ($1 in v){print v[$1]; delete v[$1]; next} {print} END{for(k in v) print v[k]}' "$app" "$cfg" > "$cfg.new" && mv "$cfg.new" "$cfg"
 exit 0
-''' % (t, t, t, t))
+''' % (t, t, t, t, t, t))
 os.chmod(fake, 0o755)
 
 common = ['-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-Wno-format-truncation',
@@ -67,6 +99,7 @@ subprocess.check_call(['gcc'] + common + ['-DUSERDATA_ROOT="%s"' % ud, '-DSHARE_
                        lib + '/libraryd.c', '-o', t + '/libraryd', '-lpthread'])
 subprocess.check_call(['gcc'] + common + ['-DUSERDATA="%s"' % ud, '-DSTATE_USERS="%s"' % state,
                        '-DSHARE_DIR="%s"' % emu_share, '-DBUNDLED_CORES="%s"' % cores,
+                       '-DCORE_INFO_DIR="%s"' % info,
                        '-DRETROARCH_BIN="%s"' % fake, '-DHDMI_ENABLED="%s/hdmi-enabled"' % t, pkg + '/emud.c', '-o', t + '/emud'])
 
 notes = []
@@ -103,7 +136,7 @@ def cmd(sock, line, until=None):
             break
         if not chunk: break
         data += chunk
-        if data.endswith(b'end=1\n') or (until is None and data.endswith(b'\n') and not data.startswith((b'core=', b'state=', b'game=', b'user=', b'slots=', b'boot_screens='))):
+        if data.endswith(b'end=1\n') or (until is None and data.endswith(b'\n') and not data.startswith((b'core=', b'state=', b'game=', b'user=', b'slots=', b'boot_screens=', b'available=', b'host='))):
             break
     s.close(); return data.decode()
 
@@ -118,7 +151,10 @@ try:
     wait(lambda: 'games=1' in cmd('libraryd.sock', 'STATUS'))
     game = [l for l in cmd('libraryd.sock', 'GAMES\tsystem:snes').splitlines() if l.startswith('game=')][0].split('=')[1].split('\t')[0]
     gs = cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game)
-    check('defaults', 'core=snes9x\n' in gs and 'core_override=\n' in gs and 'cores=snes9x,bsnes\n' in gs)
+    check('defaults', 'core=snes9x\n' in gs and 'core_override=\n' in gs and 'cores=snes9x,bsnes,mesen-s\n' in gs)
+    check('match file name', cmd('libraryd.sock', 'MATCH\tmario.SFC') == 'OK %s\tsnes\n' % game)
+    check('match without extension', cmd('libraryd.sock', 'MATCH\tMario.zip') == 'OK %s\tsnes\n' % game)
+    check('match none', cmd('libraryd.sock', 'MATCH\tZelda.sfc').startswith('ERR'))
     check('reject unknown core', cmd('emud.sock', 'GAME_SET\t%s\tsnes\tcore\tmissing' % game).startswith('ERR'))
     check('reject bad aspect', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taspect\t5:4' % game).startswith('ERR'))
     check('set core', cmd('emud.sock', 'GAME_SET\t%s\tsnes\tcore\tbsnes' % game).startswith('OK'))
@@ -130,7 +166,19 @@ try:
     open(state + '/' + user + '/secrets/retroachievements.conf', 'w').write(
         'USERNAME=alice\nTOKEN=tok123\nENABLED=1\nHARDCORE=1\n')
     open(t + '/hdmi-enabled', 'w').write('enabled\n')
+    # One-time core option updates: a key still at its old default moves to
+    # the new one, a value the user chose is kept, each id runs once.
+    open(emu_share + '/core-option-updates.conf', 'w').write(
+        '# comment\nu1|opt_a|disabled|2\nu2|opt_b|disabled|enabled\n')
+    radir = '%s/users/%s/appdata/retroarch' % (ud, user)
+    os.makedirs(radir, exist_ok=True)
+    open(radir + '/retroarch-core-options.cfg', 'w').write(
+        'opt_a = "disabled"\nopt_b = "3"\nopt_c = "x"\n')
     check('launch', cmd('emud.sock', 'LAUNCH\t' + game).startswith('OK'))
+    opts = open(radir + '/retroarch-core-options.cfg').read()
+    check('core option update applied', 'opt_a = "2"\n' in opts)
+    check('user core option kept', 'opt_b = "3"\n' in opts and 'opt_c = "x"\n' in opts)
+    check('core option updates recorded', open(radir + '/core-option-updates').read() == 'u1\nu2\n')
     check('core override used', wait(lambda: os.path.exists(t + '/launched-core')) and
           open(t + '/launched-core').read().strip().endswith('bsnes_libretro.so'))
     sess = open(t + '/last-session.cfg').read()
@@ -151,6 +199,8 @@ try:
     check('screenshot confirmed', wait(lambda: any('game.screenshot.saved' in n for n in notes)))
     check('quit', cmd('emud.sock', 'QUIT').startswith('OK'))
     check('idle again', wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS')))
+    opts = open(radir + '/retroarch-core-options.cfg').read()
+    open(radir + '/retroarch-core-options.cfg', 'w').write(opts.replace('opt_a = "2"', 'opt_a = "disabled"'))
     hsdir = '%s/users/%s/states/snes/' % (ud, user)
     check('hardcore quit saves no state', not os.listdir(hsdir))
     check('hardcore STATES by game', 'hardcore=1\n' in cmd('emud.sock', 'STATES\t' + game))
@@ -269,9 +319,110 @@ try:
           and 'textures = "SYSICON;BRAND"' in glslp and 'HAS_ICON = "0"' in glslp
           and 'bezel-logo.png' in glslp)
     cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    # Cheats.
+    cmd('emud.sock', 'SET\tbezels\t0')
+    check('cheats need a game', cmd('emud.sock', 'CHEATS').startswith('ERR no-session'))
+    launch('new')
+    ch = cmd('emud.sock', 'CHEATS')
+    lists = [l.split('=', 1)[1].split('\t')[1] for l in ch.splitlines() if l.startswith('list=')]
+    check('cheat lists ranked', lists == ['Mario', 'Mario (USA)', 'Mario (USA) (Game Genie)'])
+    check('game lists extracted', os.path.exists(coll + '/Mario (USA) (Game Genie).cht')
+          and not os.path.exists(coll + '/Zelda (USA).cht')
+          and not os.path.exists(ud + '/cheats/libretro/Nintendo - Game Boy'))
+    check('cheats of the best list', 'available=1\n' in ch and 'file=%s/cheats/snes/Mario.cht\n' % ud in ch
+          and 'cheat=0\t0\tLives\n' in ch and 'cheat=1\t0\tCoins\n' in ch and 'cheat=2\t0\t\n' in ch)
+    check('cheat on', cmd('emud.sock', 'CHEAT_SET\t1\t1') == 'OK\n')
+    sc = open(run + '/emulation/session.cht').read()
+    check('session cheats', 'cheat1_enable = "true"' in sc and 'cheat0_enable' not in sc and 'cheat0_code' in sc)
+    check('cheats loaded', wait(lambda: os.path.exists(t + '/cheats-loaded') and
+          'CHEATS_LOAD %s/emulation/session.cht' % run in open(t + '/cheats-loaded').read()))
+    check('cheats count', 'cheats_on=1\n' in cmd('emud.sock', 'STATUS'))
+    check('cheat shown on', 'cheat=1\t1\tCoins\n' in cmd('emud.sock', 'CHEATS'))
+    conf = open('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)).read()
+    check('cheats stored', 'cheat_file=%s/cheats/snes/Mario.cht\n' % ud in conf and 'cheats=1\n' in conf)
+    check('reject other list', cmd('emud.sock', 'CHEAT_FILE\t%s/Zelda (USA).cht' % coll) == 'ERR list\n')
+    check('pick list', cmd('emud.sock', 'CHEAT_FILE\t%s/Mario (USA).cht' % coll) == 'OK\n')
+    check('picked list clears', 'cheats_on=0\n' in cmd('emud.sock', 'STATUS')
+          and 'file=%s/Mario (USA).cht\n' % coll in cmd('emud.sock', 'CHEATS'))
+    check('cheat on again', cmd('emud.sock', 'CHEAT_SET\t0\t1') == 'OK\n')
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    os.remove(t + '/cheats-loaded')
+    # A new collection removed the extracted files: the chosen one comes back.
+    os.remove(coll + '/Mario (USA).cht')
+    launch('new')
+    check('cheats at launch', wait(lambda: os.path.exists(t + '/cheats-loaded'))
+          and 'cheats_on=1\n' in cmd('emud.sock', 'STATUS'))
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    open(state + '/' + user + '/secrets/retroachievements.conf', 'w').write(
+        'USERNAME=alice\nTOKEN=tok123\nENABLED=1\nHARDCORE=1\n')
+    os.remove(t + '/cheats-loaded')
+    launch('new')
+    check('no cheats in hardcore', 'available=0\nreason=hardcore\n' in cmd('emud.sock', 'CHEATS')
+          and cmd('emud.sock', 'CHEAT_SET\t1\t1') == 'ERR hardcore\n' and not os.path.exists(t + '/cheats-loaded'))
+    check('no netplay in hardcore', cmd('emud.sock', 'NETPLAY_HOST') == 'ERR hardcore\n')
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    open(state + '/' + user + '/secrets/retroachievements.conf', 'w').write(
+        'USERNAME=alice\nTOKEN=tok123\nENABLED=1\nHARDCORE=0\n')
+
+    # Netplay: Host Game closes the game and starts it again as a host.
+    os.makedirs(state + '/' + user, exist_ok=True)
+    open(state + '/' + user + '/profile.conf', 'w').write('USER_NAME=Alice\n')
+    launch('new')
+    sess = session()
+    check('netplay session keys', 'netplay_nickname = "Alice"' in sess and 'netplay_public_announce = "false"' in sess
+          and 'netplay_ip_port = "55435"' in sess)
+    check('netplay off', 'netplay=off\n' in cmd('emud.sock', 'STATUS'))
+    os.remove(t + '/args')
+    check('host game', cmd('emud.sock', 'NETPLAY_HOST') == 'OK\n')
+    check('relaunched as host', wait(lambda: os.path.exists(t + '/args') and '--host' in args()))
+    check('hosting with a player', wait(lambda: 'netplay=host\nnetplay_peers=1\nnetplay_peer=bob\n' in cmd('emud.sock', 'STATUS')))
+    check('resumed from the saved progress', '--entryslot' in args())
+    check('no cheats with netplay', 'reason=netplay' in cmd('emud.sock', 'CHEATS'))
+    check('host twice refused', cmd('emud.sock', 'NETPLAY_HOST') == 'ERR busy\n')
+    check('stop hosting', cmd('emud.sock', 'NETPLAY_STOP') == 'OK\n')
+    check('netplay off again', wait(lambda: 'netplay=off\n' in cmd('emud.sock', 'STATUS')))
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    check('reject bad join', cmd('emud.sock', 'LAUNCH\t%s\tnew\tconnect:1.2.3:55435:snes9x' % game) == 'ERR net\n')
+    check('reject join core', cmd('emud.sock', 'LAUNCH\t%s\tnew\tconnect:192.168.1.9:55435:gpsp' % game) == 'ERR no-core\n')
+    os.remove(t + '/args')
+    check('join', cmd('emud.sock', 'LAUNCH\t%s\tresume\tconnect:192.168.1.9:55436:mesen-s' % game) == 'OK\n')
+    check('join args', wait(lambda: os.path.exists(t + '/args')) and '--connect 192.168.1.9 --port 55436' in args()
+          and '--entryslot' not in args() and 'mesen-s_libretro.so' in open(t + '/launched-core').read())
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+
+    # LAN discovery: a fake RetroArch host answering the broadcast.
+    import struct
+    host = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    host.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        host.bind(('', 55435))
+    except OSError:
+        host = None
+    if host:
+        asked = []
+        def answer():
+            host.settimeout(3)
+            try:
+                q, addr = host.recvfrom(64)
+            except OSError:
+                return
+            asked.append(addr)
+            if q == struct.pack('!I', 0x52414E51):
+                pkt = struct.pack('!IiiI', 0x52414E53, 0, 55435, 0) + b'bob'.ljust(32, b'\0') \
+                    + b'Linux'.ljust(32, b'\0') + b'Mesen-S'.ljust(32, b'\0') + b'1'.ljust(32, b'\0') \
+                    + b'1.22.2'.ljust(32, b'\0') + b'Mario.sfc'.ljust(256, b'\0') + b'N/A'.ljust(256, b'\0')
+                host.sendto(pkt, addr)
+        threading.Thread(target=answer, daemon=True).start()
+        hosts = cmd('emud.sock', 'NETPLAY_HOSTS')
+        if hosts.startswith('ERR network') or not asked:
+            print('[SKIP] broadcasts do not come back on this machine: discovery not tested')
+        else:
+            check('host discovered', '\t55435\tbob\tMesen-S\tMario.sfc\t%s\tsnes\tmesen-s\t0\n' % game in hosts)
+        host.close()
 finally:
     for p in procs: p.terminate(); p.wait()
     ns.close()
+check('core option update runs once', 'opt_a = "disabled"\n' in open(radir + '/retroarch-core-options.cfg').read())
 if fails:
     print(open(t + '/emud.log').read())
 print('[PASS] emud game settings' if not fails else '[FAIL] %d checks' % fails)

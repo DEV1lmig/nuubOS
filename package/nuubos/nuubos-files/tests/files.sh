@@ -46,6 +46,29 @@ mkdir -p "$R"
 
 # Shares input validation (no mount on the host)
 SH() { NUUBOS_ROOT="$R" sh "$SRC/nuubos-sharesctl" "$@"; }
+# Mount errors, with a fake mount (busybox wording: "...failed: <errno text>").
+mkdir -p "$T/bin"
+cat > "$T/bin/mount" <<'FAKE'
+#!/bin/sh
+case "$3" in
+*/ok) exit 0 ;;
+*/denied) echo "mount: mounting $3 on $4 failed: Permission denied" >&2 ;;
+*/missing) echo "mount: mounting $3 on $4 failed: No such file or directory" >&2 ;;
+*) echo "mount: mounting $3 on $4 failed: Host is down" >&2 ;;
+esac
+exit 255
+FAKE
+chmod +x "$T/bin/mount"
+MS() { PATH="$T/bin:$PATH" NUUBOS_ROOT="$R" sh "$SRC/nuubos-sharesctl" "$@"; }
+for k in ok denied missing down; do echo "" | MS add "t$k" "//nas/$k" >/dev/null; done
+ck "mount ok" '[ "$(MS mount tok)" = OK ]'
+ck "mount auth error" '[ "$(MS mount tdenied)" = "ERR auth" ]'
+ck "mount missing share" '[ "$(MS mount tmissing)" = "ERR share" ]'
+ck "mount unreachable" '[ "$(MS mount tdown)" = "ERR unreachable" ]'
+ck "no forced SMB version" '! grep -q "vers=3.0" "$SRC/nuubos-sharesctl"'
+ck "shares refuses a bad host" '[ "$(SH shares "nas;reboot" </dev/null)" = "ERR host" ]'
+ck "shares refuses a bad user" '[ "$(SH shares nas "a,b" </dev/null)" = "ERR user" ]'
+
 ck "share add" 'printf "pw\n" | SH add nas //192.168.1.2/games bob | grep -q OK'
 ck "share creds root-only" '[ "$(stat -c %a "$R/state/shares/nas.conf")" = 600 ]'
 ck "share bad url" 'printf "pw\n" | SH add x "//host/a,b" | grep -q "ERR url"'

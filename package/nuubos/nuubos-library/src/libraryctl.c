@@ -26,7 +26,7 @@ static void usage(void)
 		"  watch                          print every snapshot change\n"
 		"  scan                           rescan ROM storage\n"
 		"  games SCOPE                    system:<id> | collection:<id> | recent\n"
-		"  search [k=v|k=v]               q, system, collection, year=A-B, genre, players, unplayed=1, random=1\n"
+		"  search [k=v|k=v]               q, system, collection, tag, year=A-B, genre, players, unplayed=1, random=1\n"
 		"  filters\n"
 		"  migrate-favorites NAME\n"
 		"  session-begin GAME             a game session started\n"
@@ -37,6 +37,8 @@ static void usage(void)
 		"  collection-delete ID\n"
 		"  collection-add ID GAME\n"
 		"  collection-remove ID GAME\n"
+		"  tag-set GAME TAG               backlog|playing|completed|mastered|dropped|broken\n"
+		"  tag-clear GAME TAG\n"
 		"  details GAME                   Game Details view\n"
 		"  stats-reset GAME|all           reset Last/Time Played and sessions\n"
 		"  delete GAME confirm            permanently delete the ROM (all users)\n");
@@ -169,6 +171,11 @@ int main(int argc, char **argv)
 		snprintf(command, sizeof(command), "%s\t%s\t%s",
 			 !strcmp(verb, "collection-add") ? "COLLECTION_ADD" : "COLLECTION_REMOVE",
 			 argv[2], argv[3]);
+		return run(command, false, false);
+	}
+	if ((!strcmp(verb, "tag-set") || !strcmp(verb, "tag-clear")) && argc == 4) {
+		snprintf(command, sizeof(command), "%s\t%s\t%s",
+			 !strcmp(verb, "tag-set") ? "TAG_SET" : "TAG_CLEAR", argv[2], argv[3]);
 		return run(command, false, false);
 	}
 	if (!strcmp(verb, "details") && argc == 3) {

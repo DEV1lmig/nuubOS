@@ -29,6 +29,8 @@ mk_root()
     printf 'NUUBOS_CONFIG_VERSION=6\nSETUP_COMPLETE=1\n' > "$R/state/config/nuubos.conf"
     echo psk > "$R/state/network/wpa_supplicant.conf"
     echo hostkey > "$R/state/ssh/dropbear/key"
+    echo "ssh-ed25519 AAAA dev" > "$R/state/ssh/root/authorized_keys"
+    echo clientkey > "$R/state/ssh/root/id_dropbear"
     echo rom > "$R/userdata/roms/snes/g.sfc"; echo bios > "$R/userdata/bios/b.bin"
     echo $U1 > "$R/run/nuubos/user/active"
 }
@@ -69,6 +71,7 @@ ck "nothing erased before reboot" '[ -f "$R/state/config/nuubos.conf" ]'
 ctl apply-pending state; ctl apply-pending userdata
 ck "settings scope wipes STATE config/users/network" '[ ! -e "$R/state/config" ] && [ ! -e "$R/state/users" ] && [ ! -e "$R/state/network" ]'
 ck "settings scope keeps SSH host key" '[ -f "$R/state/ssh/dropbear/key" ]'
+ck "factory reset removes authorized SSH keys" '[ ! -e "$R/state/ssh/root/authorized_keys" ] && [ -f "$R/state/ssh/root/id_dropbear" ]'
 ck "settings scope keeps USERDATA" '[ -f "$R/userdata/users/$U1/saves/game.srm" ] && [ -f "$R/userdata/roms/snes/g.sfc" ]'
 ck "pending flag consumed" '[ ! -e "$R/state/recovery/pending-reset" ]'
 mk_root

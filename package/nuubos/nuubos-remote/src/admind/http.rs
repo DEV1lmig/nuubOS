@@ -221,6 +221,7 @@ impl Response {
 pub fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -237,7 +238,11 @@ pub fn reason(status: u16) -> &'static str {
 }
 
 pub fn head(w: &mut impl Write, status: u16, ctype: &str, len: Option<u64>, extra: &[(String, String)]) -> io::Result<()> {
-    let mut h = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nCache-Control: no-store\r\nConnection: close\r\n", status, reason(status), ctype);
+    let mut h = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nConnection: close\r\n", status, reason(status), ctype);
+    /* Nothing is stored unless the reply says otherwise (images). */
+    if !extra.iter().any(|(k, _)| k.eq_ignore_ascii_case("cache-control")) {
+        h.push_str("Cache-Control: no-store\r\n");
+    }
     if let Some(n) = len {
         h.push_str(&format!("Content-Length: {n}\r\n"));
     }

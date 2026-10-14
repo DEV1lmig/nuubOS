@@ -17,6 +17,9 @@ define NUUBOS_LIBRARY_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
 		-std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror \
 		$(@D)/libraryctl.c -o $(@D)/nuubos-libraryctl
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
+		$(@D)/library-import.c -o $(@D)/nuubos-library-import
 endef
 
 define NUUBOS_LIBRARY_INSTALL_TARGET_CMDS
@@ -24,6 +27,10 @@ define NUUBOS_LIBRARY_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/sbin/nuubos-libraryd
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-libraryctl \
 		$(TARGET_DIR)/usr/bin/nuubos-libraryctl
+	$(INSTALL) -D -m 0755 $(@D)/nuubos-library-import \
+		$(TARGET_DIR)/usr/bin/nuubos-library-import
+	$(INSTALL) -D -m 0644 $(@D)/library-import.job \
+		$(TARGET_DIR)/usr/share/nuubos/jobs/library-import.job
 	$(INSTALL) -D -m 0755 $(@D)/S47nuubos-library \
 		$(TARGET_DIR)/etc/init.d/S47nuubos-library
 	$(INSTALL) -D -m 0644 $(@D)/systems.conf \

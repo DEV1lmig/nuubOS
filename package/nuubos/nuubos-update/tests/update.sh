@@ -18,7 +18,7 @@ echo 100 > "$R/usr/share/nuubos/build-serial"
 # Release: system image, payload (gzip of it) in its tag, signed manifest
 # in the channel release.
 head -c 3000000 /dev/urandom > "$T/system.img"
-mkdir -p "$W/v0.6-200" "$W/channel-alpha" "$W/channel-beta"
+mkdir -p "$W/v0.6-200" "$W/channel-nightly" "$W/channel-rc"
 gzip -c "$T/system.img" > "$W/v0.6-200/nuubos-system-0.6.img.gz"
 P="$W/v0.6-200/nuubos-system-0.6.img.gz"
 SHA="$(sha256sum < "$P" | cut -d' ' -f1)"; SIZE="$(wc -c < "$P")"
@@ -30,9 +30,9 @@ manifest() # CHANNEL SERIAL FILE
         "$1" "$2" "$SIZE" "$SHA" "$ISIZE" "$ISHA" > "$3"
     openssl pkeyutl -sign -inkey "$T/key.pem" -rawin -in "$3" -out "$3.sig"
 }
-manifest alpha 200 "$W/channel-alpha/nuubos-update.manifest"
-# A beta manifest served under the alpha channel must not be offered.
-manifest beta 300 "$W/channel-beta/nuubos-update.manifest"
+manifest nightly 200 "$W/channel-nightly/nuubos-update.manifest"
+# An rc manifest served under the nightly channel must not be offered.
+manifest rc 300 "$W/channel-rc/nuubos-update.manifest"
 PUB="$(openssl pkey -in "$T/key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')"
 PORT=$((20000 + $$ % 20000))
 (cd "$W" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1) & HTTP=$!
@@ -43,7 +43,7 @@ cc_updatectl() # OUTPUT [EXTRA...]
     gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
         -DUPDATE_URL="\"http://127.0.0.1:$PORT\"" -DUPDATE_DIR="\"$U\"" -DOS_RELEASE="\"$R/etc/os-release\"" \
         -DBUILD_ID_FILE="\"$R/usr/share/nuubos/build-id\"" -DBUILD_SERIAL_FILE="\"$R/usr/share/nuubos/build-serial\"" \
-        -DCHANNEL_FILE="\"$R/state/update/channel\"" -DAUTO_FILE="\"$R/state/update/auto-off\"" -DUPDATE_DEFAULT_CHANNEL='"alpha"' "$@" \
+        -DCHANNEL_FILE="\"$R/state/update/channel\"" -DAUTO_FILE="\"$R/state/update/auto-off\"" -DUPDATE_DEFAULT_CHANNEL='"nightly"' "$@" \
         "$SRC/updatectl.c" -o "$out" -lcurl -lsodium -lz
 }
 cc_updatectl "$T/updatectl" -DUPDATE_PUBKEY_HEX="\"$PUB\"" || exit 1
@@ -51,20 +51,25 @@ cc_updatectl "$T/updatectl-nokey" || exit 1
 C="$T/updatectl"
 
 ck "no key: unavailable" '"$T/updatectl-nokey" check | grep -q "ERR unavailable"'
-ck "default channel alpha" '[ "$($C channel)" = alpha ] && $C status | grep -q "channel=alpha"'
+ck "default channel nightly" '[ "$($C channel)" = nightly ] && $C status | grep -q "channel=nightly"'
 ck "check finds 0.6" '$C check | grep -q "OK available 0.6"'
 ck "status with escaped release notes" '$C status | grep -q "available=1" && $C status | grep -qxF "notes=- First item\\n- Second \\\\ item"'
 echo 300 > "$R/usr/share/nuubos/build-serial"
 ck "older serial never offered" '$C check | grep -q "OK current" && $C status | grep -q "available=0" && $C download | grep -q "ERR current"'
 echo 100 > "$R/usr/share/nuubos/build-serial"
-cp "$W/channel-beta/nuubos-update.manifest" "$W/channel-alpha/nuubos-update.manifest"
-cp "$W/channel-beta/nuubos-update.manifest.sig" "$W/channel-alpha/nuubos-update.manifest.sig"
+cp "$W/channel-rc/nuubos-update.manifest" "$W/channel-nightly/nuubos-update.manifest"
+cp "$W/channel-rc/nuubos-update.manifest.sig" "$W/channel-nightly/nuubos-update.manifest.sig"
 ck "other channel's manifest not offered" '$C check | grep -q "OK current"'
-manifest alpha 200 "$W/channel-alpha/nuubos-update.manifest"
-ck "invalid channel refused" '$C channel nightly | grep -q "ERR channel"'
-ck "channel switch" '[ "$($C channel beta)" = OK ] && [ "$($C channel)" = beta ] && $C check | grep -q "OK available 0.6"'
-ck "channel switch forgets the offer" '[ "$($C channel alpha)" = OK ] && $C status | grep -q "available=0"'
-ck "nothing published on the channel (404): OK none, not a network error" '[ "$($C channel stable)" = OK ] && [ "$($C check)" = "OK none" ] && $C status | grep -q "available=0" && [ "$($C channel alpha)" = OK ]'
+manifest nightly 200 "$W/channel-nightly/nuubos-update.manifest"
+ck "invalid channel refused" '$C channel beta | grep -q "ERR channel"'
+ck "channel switch" '[ "$($C channel rc)" = OK ] && [ "$($C channel)" = rc ] && $C check | grep -q "OK available 0.6"'
+ck "channel switch forgets the offer" '[ "$($C channel nightly)" = OK ] && $C status | grep -q "available=0"'
+ck "nothing published on the channel (404): OK none, not a network error" '[ "$($C channel stable)" = OK ] && [ "$($C check)" = "OK none" ] && $C status | grep -q "available=0" && [ "$($C channel nightly)" = OK ]'
+echo alpha > "$R/state/update/channel"
+ck "old name alpha reads as nightly" '[ "$($C channel)" = nightly ] && $C check | grep -q "OK available 0.6"'
+echo beta > "$R/state/update/channel"
+ck "old name beta reads as rc" '[ "$($C channel)" = rc ]'
+[ "$($C channel nightly)" = OK ] || echo "[FAIL] back to nightly"
 $C check >/dev/null
 
 # Resume: start with a correct prefix of the payload.
@@ -73,10 +78,10 @@ OUT="$(NUUBOS_JOB_ID=1 $C download)"
 ck "download (resumed) verified" 'echo "$OUT" | grep -q "@result downloaded" && cmp -s "$U/payload" "$P"'
 ck "verify" '[ "$($C verify)" = OK ]'
 # Tampered manifest is refused, the good one kept.
-cp "$W/channel-alpha/nuubos-update.manifest" "$T/good.manifest"
-sed -i 's/serial=200/serial=999/' "$W/channel-alpha/nuubos-update.manifest"
+cp "$W/channel-nightly/nuubos-update.manifest" "$T/good.manifest"
+sed -i 's/serial=200/serial=999/' "$W/channel-nightly/nuubos-update.manifest"
 ck "tampered manifest rejected" '$C check | grep -q "ERR signature" && grep -q "serial=200" "$U/manifest"'
-cp "$T/good.manifest" "$W/channel-alpha/nuubos-update.manifest"
+cp "$T/good.manifest" "$W/channel-nightly/nuubos-update.manifest"
 # Corrupt payload part is not kept.
 rm -f "$U/payload"; echo garbage > "$U/payload.part"
 cp "$P" "$T/real.gz"; echo corrupt >> "$P"

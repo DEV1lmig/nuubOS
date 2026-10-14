@@ -123,9 +123,9 @@ deep_lps="$(
 )"
 
 if [[ "$deep_lps" == "$WIFI_EXPECT_DISABLE_LPS_DEEP" ]]; then
-    pass "rtw88 Deep LPS disabled"
+    pass "rtw88 disable_lps_deep=$deep_lps as expected"
 else
-    fail "rtw88 disable_lps_deep=${deep_lps:-unavailable}"
+    fail "rtw88 disable_lps_deep=${deep_lps:-unavailable}, expected $WIFI_EXPECT_DISABLE_LPS_DEEP"
 fi
 
 deep_ps_failures="$(
@@ -212,6 +212,20 @@ if ((txr_timeouts == 0)); then
     pass "no firmware TX-report timeout messages"
 else
     warn "firmware TX-report timeout messages=$txr_timeouts"
+fi
+
+#
+# Low-latency sessions (nuubos-wifid, 2026-10-14): power save is on by
+# default and off while a file exists in /run/nuubos/low-latency (game
+# streaming, netplay). The latency checks below run as such a session.
+#
+
+remote 'mkdir -p /run/nuubos/low-latency && : > /run/nuubos/low-latency/h4-test' || true
+sleep 2
+if remote "iw dev '$WIFI_INTERFACE' get power_save 2>/dev/null" | grep -q "Power save: off"; then
+    pass "low-latency session turns Wi-Fi power save off"
+else
+    fail "low-latency session left Wi-Fi power save on"
 fi
 
 #
@@ -335,4 +349,12 @@ PY
 
         ping_check "$loaded_ping_log" "loaded"
     fi
+fi
+
+remote 'rm -f /run/nuubos/low-latency/h4-test' || true
+sleep 2
+if remote "iw dev '$WIFI_INTERFACE' get power_save 2>/dev/null" | grep -q "Power save: $WIFI_EXPECT_POWER_SAVE"; then
+    pass "Wi-Fi power save back to $WIFI_EXPECT_POWER_SAVE after the session"
+else
+    fail "Wi-Fi power save not restored to $WIFI_EXPECT_POWER_SAVE after the session"
 fi

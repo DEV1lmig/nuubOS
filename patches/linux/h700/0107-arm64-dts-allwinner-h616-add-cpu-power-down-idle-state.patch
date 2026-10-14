@@ -1,0 +1,71 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] arm64: dts: allwinner: h616: add the CPU power-down idle state
+
+TF-A (nuubOS patches 0001/0002) implements the H616 native PSCI
+CPU_SUSPEND power-down state 0x00010000 (cluster and system stay on),
+but no idle state was described, so idle cores only ran WFI. With it the
+cores of an idle H700 (RG CubeXX, Home, screen on) are powered down 78 %
+of the time (92 % with the screen off). Qualified on the CubeXX: deep
+sleep/resume, heavy emulation (God of War PSP, same fps), no kernel errors.
+local-timer-stop: the per-CPU timer is lost while powered down (the
+sun8i-a23 timer is the broadcast device).
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/arch/arm64/boot/dts/allwinner/sun50i-h616.dtsi
++++ b/arch/arm64/boot/dts/allwinner/sun50i-h616.dtsi
+@@ -23,6 +23,22 @@
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+ 
++		idle-states {
++			entry-method = "psci";
++
++			/* CPU power down (TF-A native PSCI CPU_SUSPEND, state
++			 * 0x00010000 as the vendor firmware): cluster and
++			 * system stay on. */
++			cpu_sleep: cpu-sleep-0 {
++				compatible = "arm,idle-state";
++				arm,psci-suspend-param = <0x00010000>;
++				local-timer-stop;
++				entry-latency-us = <100>;
++				exit-latency-us = <500>;
++				min-residency-us = <5000>;
++			};
++		};
++
+ 		cpu0: cpu@0 {
+ 			compatible = "arm,cortex-a53";
+ 			device_type = "cpu";
+@@ -37,6 +53,7 @@
+ 			d-cache-line-size = <64>;
+ 			d-cache-sets = <128>;
+ 			next-level-cache = <&l2_cache>;
++			cpu-idle-states = <&cpu_sleep>;
+ 		};
+ 
+ 		cpu1: cpu@1 {
+@@ -53,6 +70,7 @@
+ 			d-cache-line-size = <64>;
+ 			d-cache-sets = <128>;
+ 			next-level-cache = <&l2_cache>;
++			cpu-idle-states = <&cpu_sleep>;
+ 		};
+ 
+ 		cpu2: cpu@2 {
+@@ -69,6 +87,7 @@
+ 			d-cache-line-size = <64>;
+ 			d-cache-sets = <128>;
+ 			next-level-cache = <&l2_cache>;
++			cpu-idle-states = <&cpu_sleep>;
+ 		};
+ 
+ 		cpu3: cpu@3 {
+@@ -85,6 +104,7 @@
+ 			d-cache-line-size = <64>;
+ 			d-cache-sets = <128>;
+ 			next-level-cache = <&l2_cache>;
++			cpu-idle-states = <&cpu_sleep>;
+ 		};
+ 
+ 		l2_cache: l2-cache {

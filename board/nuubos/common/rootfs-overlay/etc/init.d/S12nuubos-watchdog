@@ -1,0 +1,44 @@
+#!/bin/sh
+
+# Hardware watchdog: a hang of the whole SoC (no CPU left to panic) resets
+# the console after 16 s (the sunxi maximum) instead of freezing it until a
+# forced power-off; a new A/B slot that hangs spends one of its tries. The
+# BusyBox daemon feeds it every 4 s at real-time priority, so heavy load
+# never starves it. sunxi_wdt has no suspend handling: nuubos-suspend stops
+# the daemon before sleeping (magic close, the timer stops) and starts it
+# again after the wake.
+
+PIDFILE=/run/nuubos-watchdog.pid
+DEVICE=/dev/watchdog
+
+running()
+{
+	[ -r "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+case "${1:-}" in
+	start|restart)
+		running && exit 0
+		[ -c "$DEVICE" ] || modprobe sunxi_wdt 2>/dev/null
+		[ -c "$DEVICE" ] || exit 0
+		start-stop-daemon -S -q -b -m -p "$PIDFILE" -x /usr/bin/chrt -- \
+			-f 50 /sbin/watchdog -F -t 4 -T 16 "$DEVICE"
+		;;
+	stop)
+		running || exit 0
+		pid="$(cat "$PIDFILE")"
+		kill "$pid" 2>/dev/null
+		# Wait for the magic close: a suspend must not start while the
+		# timer still runs.
+		n=0
+		while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 20 ]; do
+			sleep 0.1
+			n=$((n + 1))
+		done
+		rm -f "$PIDFILE"
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}" >&2
+		exit 1
+		;;
+esac

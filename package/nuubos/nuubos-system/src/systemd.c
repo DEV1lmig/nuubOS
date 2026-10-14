@@ -500,6 +500,11 @@ static void enter_sleep(struct runtime_state *st)
     snprintf(st->last_wake_reason,sizeof(st->last_wake_reason),
              suspend_rc != 0 ? "suspend-failed" : "user");
     lighting_wake();
+    /* Slept with the screen off (Media Screen Off): wake with it on. */
+    if (access("/run/nuubos/screen-off", F_OK) == 0) {
+        char *argv[]={"/usr/bin/nuubos-displayctl","screen","on",NULL};
+        (void)run_argv(argv);
+    }
     mark_activity(st);
     notify_subscribers();
 }
@@ -604,12 +609,17 @@ static long long timeout_ms(int minutes)
 
 /* nuubUI's full-screen operation (system update, SD2 restore: ui-context
  * "operation") must not be put to sleep (EPIC-048: critical OTA/storage
- * phases inhibit suspend). */
+ * phases inhibit suspend). Neither does playing media (nuubos-mediad keeps
+ * /run/nuubos/media-playing while something plays, not while paused):
+ * music with the screen off or a film has no input for a long time. */
 static bool operation_running(void)
 {
     char c[32] = "";
-    FILE *f = fopen("/run/nuubos/ui-context", "r");
+    FILE *f;
 
+    if (access("/run/nuubos/media-playing", F_OK) == 0)
+        return true;
+    f = fopen("/run/nuubos/ui-context", "r");
     if (f) {
         if (!fgets(c, sizeof(c), f))
             c[0] = '\0';

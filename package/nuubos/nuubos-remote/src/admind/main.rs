@@ -23,6 +23,7 @@ mod events;
 mod files;
 mod http;
 mod svc;
+mod thumbs;
 
 use http::{Request, Response};
 use serde_json::json;
@@ -121,7 +122,7 @@ fn route(req: &mut Request) -> Option<Response> {
 }
 
 /* PUT /api/upload, then what the destination needs: a Library scan for
- * games, the Mood installer for a .tar Mood package. */
+ * games, a BIOS check for BIOS files. */
 fn upload(req: &mut Request) -> Response {
     let after = req.q("after").to_owned();
     match files::upload(req) {
@@ -130,17 +131,6 @@ fn upload(req: &mut Request) -> Response {
             "scan" => {
                 let _ = svc::sock_ok("libraryd", "SCAN");
                 Response::json(200, json!({ "ok": true, "path": path }))
-            }
-            "mood" => {
-                let r = svc::tool_ok("nuubos-themectl", &["install", &path]);
-                let _ = std::fs::remove_file(&path);
-                match r {
-                    Ok(_) => {
-                        events::changed("themes");
-                        Response::ok()
-                    }
-                    Err(_) => Response::error(409, "mood"),
-                }
             }
             "bios" => {
                 events::changed("bios");

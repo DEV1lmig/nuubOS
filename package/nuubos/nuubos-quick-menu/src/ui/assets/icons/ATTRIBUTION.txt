@@ -9,3 +9,7 @@ The original icon geometry is preserved. nuubOS applies fixed colors for predict
 Slint rendering; the charging bolt is split into a fill (bolt.svg) and the same path as an outline
 underlay (bolt-outline.svg), both recoloured from the theme at runtime.
 See LICENSE.txt in the icon directory for the complete Font Awesome Free license.
+
+Font Awesome Free 6.7.2 solid icons added 2026-10-12 (Quick Menu MUSIC section): play, pause.
+
+Font Awesome Free 6.7.2 solid icon added 2026-10-13 (muted volume OSD): volume-xmark.

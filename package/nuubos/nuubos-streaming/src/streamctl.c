@@ -30,8 +30,10 @@ static void usage(void)
 		"  apps HOST                      load the host's applications\n"
 		"  launch HOST APP_NAME\n"
 		"  quit [close]                   end the stream (close: also the app)\n"
-		"  stats\n"
-		"  set resolution|fps|codec|bitrate VALUE\n"
+		"  stats | stats-watch            one sample | the overlay samples\n"
+		"  wake HOST                      Wake-on-LAN, then wait for the host\n"
+		"  button home|quick-access       press the Home button (+A) on the PC\n"
+		"  set resolution|fps|codec|bitrate|overlay VALUE\n"
 		"  steamlink check|install|cancel|remove|launch\n"
 		"  pre-power sleep|restart|poweroff\n");
 }
@@ -79,6 +81,13 @@ int main(int argc, char **argv)
 		snprintf(command, sizeof(command), "QUIT\tclose\n");
 	} else if (!strcmp(verb, "stats") && argc == 2) {
 		snprintf(command, sizeof(command), "STATS\n");
+	} else if (!strcmp(verb, "stats-watch") && argc == 2) {
+		snprintf(command, sizeof(command), "SUBSCRIBE_STATS\n");
+		watch = 1;
+	} else if (!strcmp(verb, "wake") && argc == 3) {
+		snprintf(command, sizeof(command), "WAKE\t%s\n", argv[2]);
+	} else if (!strcmp(verb, "button") && argc == 3) {
+		snprintf(command, sizeof(command), "BUTTON\t%s\n", argv[2]);
 	} else if (!strcmp(verb, "set") && argc == 4) {
 		snprintf(command, sizeof(command), "SET\t%s\t%s\n", argv[2], argv[3]);
 	} else if (!strcmp(verb, "steamlink") && argc == 3 &&

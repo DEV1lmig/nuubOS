@@ -1,0 +1,65 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] wifi: rtw88: leave LPS on light traffic, re-enter after quiet periods
+
+rtw88 keeps the radio out of LPS only while a 2 s watchdog period sees
+more than 50 unicast frames in one direction. In LPS the AP holds
+downlink frames until the next beacon, so a transfer that starts while
+the radio is in LPS slows down to a few frames per period and never
+crosses the threshold again: on the RTL8821CS (SDIO) an scp upload ran
+at ~6 KB/s with round trips up to 380 ms, and at full speed at once with
+power save off.
+
+Count both directions together, leave LPS from 8 frames per period
+(about 4 per second) and enter it again only after 3 quiet periods in a
+row (6 s), so a transfer does not flap in and out of LPS. An idle link
+carries almost no unicast data and still enters LPS.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/drivers/net/wireless/realtek/rtw88/ps.h
++++ b/drivers/net/wireless/realtek/rtw88/ps.h
+@@ -5,7 +5,14 @@
+ #ifndef __RTW_PS_H_
+ #define __RTW_PS_H_
+ 
+-#define RTW_LPS_THRESHOLD	50
++/* Unicast data frames (tx + rx) per watchdog period (2 s) that keep the
++ * radio out of LPS, and the quiet periods needed before entering it again.
++ * In LPS the AP holds downlink frames until the next beacon: a transfer
++ * slows down to a few frames per period, so a high threshold never lets
++ * it leave LPS again.
++ */
++#define RTW_LPS_TRAFFIC_MIN	8
++#define RTW_LPS_IDLE_PERIODS	3
+ 
+ #define POWER_MODE_ACK		BIT(6)
+ #define POWER_MODE_PG		BIT(4)
+--- a/drivers/net/wireless/realtek/rtw88/main.h
++++ b/drivers/net/wireless/realtek/rtw88/main.h
+@@ -2083,6 +2083,7 @@
+ 	/* watch dog every 2 sec */
+ 	struct delayed_work watch_dog_work;
+ 	u32 watch_dog_cnt;
++	u8 lps_idle_periods;
+ 
+ 	struct list_head rsvd_page_list;
+ 
+--- a/drivers/net/wireless/realtek/rtw88/main.c
++++ b/drivers/net/wireless/realtek/rtw88/main.c
+@@ -248,11 +248,11 @@
+ 	if (busy_traffic != test_bit(RTW_FLAG_BUSY_TRAFFIC, rtwdev->flags))
+ 		rtw_coex_wl_status_change_notify(rtwdev, 0);
+ 
+-	if (stats->tx_cnt > RTW_LPS_THRESHOLD ||
+-	    stats->rx_cnt > RTW_LPS_THRESHOLD)
+-		ps_active = true;
+-	else
+-		ps_active = false;
++	if (stats->tx_cnt + stats->rx_cnt >= RTW_LPS_TRAFFIC_MIN)
++		rtwdev->lps_idle_periods = 0;
++	else if (rtwdev->lps_idle_periods < RTW_LPS_IDLE_PERIODS)
++		rtwdev->lps_idle_periods++;
++	ps_active = rtwdev->lps_idle_periods < RTW_LPS_IDLE_PERIODS;
+ 
+ 	tx_unicast_mbps = stats->tx_unicast >> RTW_TP_SHIFT;
+ 	rx_unicast_mbps = stats->rx_unicast >> RTW_TP_SHIFT;

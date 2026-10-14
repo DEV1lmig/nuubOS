@@ -13,6 +13,13 @@ $(FFMPEG_TARGET_CONFIGURE): | udev
 # uses neither and FFmpeg has no libavformat here. meson keeps the last -D.
 PIPEWIRE_CONF_OPTS += -Dffmpeg=disabled -Dpw-cat-ffmpeg=disabled
 
+# libvpx (screen casting, VP8 encoder): Buildroot configures
+# --target=generic-gnu, i.e. plain C without NEON, several times slower on
+# the Cortex-A53. libvpx keeps the first --target it sees, but a preset
+# "toolchain" variable wins over it.
+LIBVPX_CONF_ENV += toolchain=arm64-linux-gcc
+LIBVPX_CONF_OPTS += --enable-realtime-only
+
 # libplacebo (mpv, EPIC-028): no Vulkan/GLSL compiler on H700; mpv presents
 # Cedrus frames through dmabuf-wayland and falls back to GLES.
 LIBPLACEBO_CONF_OPTS += -Dvulkan=disabled -Dd3d11=disabled -Dshaderc=disabled -Dglslang=disabled -Dlcms=disabled -Ddemos=false -Dtests=false -Dxxhash=disabled

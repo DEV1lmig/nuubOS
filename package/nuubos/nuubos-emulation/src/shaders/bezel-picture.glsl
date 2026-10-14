@@ -51,10 +51,11 @@ vec4 placement(vec2 screen)
     float wide = floor(screen.y * aspect + 0.5);
     if (OVERSCAN_X > 0.5 && wide > screen.x) {
         /* TV systems on a square screen (RetroArch patch 0006): the full
-         * height as far as at most 8 % of the width is cropped. */
+         * height as far as at most OVERSCAN_X % of the width is cropped. */
+        float keep = 1.0 - OVERSCAN_X / 100.0;
         size = vec2(wide, screen.y);
-        if (wide * 0.92 > screen.x) {
-            size.x = floor(screen.x / 0.92 + 0.5);
+        if (wide * keep > screen.x) {
+            size.x = floor(screen.x / keep + 0.5);
             size.y = floor(size.x / aspect + 0.5);
         }
     } else if (one.x > screen.x || one.y > screen.y) {

@@ -1,0 +1,30 @@
+#!/bin/sh
+
+# Compressed swap in RAM (zram, lz4). The H700 boards have 1 GiB and no
+# disk swap: zram gives the browser, PSP and streaming headroom without
+# touching the SD card. disksize is the uncompressed limit; RAM is only
+# used for pages actually swapped out (~1/3 of their size with lz4).
+
+ZRAM=/sys/block/zram0
+ZRAM_SIZE=384M
+
+case "${1:-}" in
+	start|restart)
+		[ -d "$ZRAM" ] || exit 0
+		grep -qs '^/dev/zram0 ' /proc/swaps && exit 0
+		echo lz4 > "$ZRAM/comp_algorithm" 2>/dev/null
+		echo "$ZRAM_SIZE" > "$ZRAM/disksize" || exit 1
+		mkswap /dev/zram0 >/dev/null || exit 1
+		swapon /dev/zram0 || exit 1
+		# zram swap is cheap: prefer it over dropping file cache, and
+		# read single pages back (no readahead on a RAM device).
+		echo 100 > /proc/sys/vm/swappiness
+		echo 0 > /proc/sys/vm/page-cluster
+		;;
+	stop)
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}" >&2
+		exit 1
+		;;
+esac

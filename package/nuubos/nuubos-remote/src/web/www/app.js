@@ -40,7 +40,8 @@ const icon = (name, cls = '') => h('i', { class: 'icon ' + cls, vars: { '--i': `
 const list = (x) => (Array.isArray(x) ? x : x === undefined || x === null || x === '' ? [] : [x]);
 /* Rows of a key=value reply: every entry as a field list. */
 const rows = (x) => list(x).map((r) => (Array.isArray(r) ? r : [r]));
-const img = (path) => (path ? '/api/img?' + new URLSearchParams({ p: path }) : '');
+/* An image of the console; with a width, a scaled copy (covers are large). */
+const img = (path, w) => (path ? '/api/img?' + new URLSearchParams(w ? { p: path, w } : { p: path }) : '');
 
 function fmt(s, args) {
   return String(s).replace(/\{(\d)\}/g, (_, i) => (args[i] !== undefined ? args[i] : ''));
@@ -185,7 +186,8 @@ async function act(op, args = {}, { quiet = false, topics = [] } = {}) {
 
 function reason(code) {
   const known = { network: T('offline'), space: C(493, 'Not enough free space'), exists: T('exists'),
-    'no-user': T('no_user'), busy: C(790, 'The metadata service is busy, try again later') };
+    'no-user': T('no_user'), busy: C(790, 'The metadata service is busy, try again later'),
+    'sshkey-key': T('sshkey_bad'), 'sshkey-type': T('sshkey_type'), 'sshkey-exists': T('sshkey_exists'), 'sshkey-full': T('sshkey_full') };
   return known[code] || '';
 }
 
@@ -354,7 +356,6 @@ function row(o) {
   const el = h(tag, {
     class: 'row' + (actionable ? ' act' : '') + (o.disabled ? ' off' : '') + (armed ? ' armed' : '') + (o.danger ? ' danger' : ''),
     type: tag === 'button' ? 'button' : null,
-    tabindex: tag === 'div' && o.slider ? null : null,
     data: { key: o.key || o.title || '' },
   });
   if (o.icon || o.image) {
@@ -555,8 +556,13 @@ function typing(el) {
   return el && (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el.tagName === 'INPUT' && !['range', 'checkbox', 'button'].includes(el.type)));
 }
 
+/* One highlight at a time: the keyboard's focus while the keys are used,
+ * the pointer's hover while the mouse moves. */
+document.addEventListener('pointermove', () => document.body.classList.remove('kbd'), { passive: true });
+
 document.addEventListener('keydown', (e) => {
   if (!session || e.altKey || e.ctrlKey || e.metaKey) return;
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Enter', 'Escape'].includes(e.key)) document.body.classList.add('kbd');
   const el = document.activeElement;
   const dirs = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
   if (modalClose) {
@@ -694,7 +700,7 @@ async function render(navigated) {
     out.back || path.length > 1 ? h('button', { class: 'back', type: 'button', 'aria-label': C(186, 'Back'), data: { key: '__back' }, on: { click: back } }, icon('chevron-down')) : null,
     h('div', { class: 'tw' }, out.kicker ? h('div', { class: 'kicker', text: out.kicker }) : null, h('h2', { text: out.title || page.title() })),
     out.tools || null);
-  $('#page').replaceChildren(titleRow, ...list(out.nodes));
+  $('#page').replaceChildren(titleRow, ...list(out.nodes).flat(Infinity).filter(Boolean));
   document.title = (out.title || page.title()) + ' · nuubOS';
   $$('.rail-item').forEach((r) => r.classList.toggle('active', r.dataset.route.split('/')[0] === id));
   document.body.classList.toggle('has-backdrop', !!out.backdrop);
@@ -833,13 +839,13 @@ $('#login-form').addEventListener('submit', async (e) => {
   }
 });
 
-async function enter() {
-  await loadLanguage();
+async function enter(language = loadLanguage(), mood = true) {
+  await language;
   session = true;
   $('#login').hidden = true;
   for (const id of ['top', 'app', 'hints']) $('#' + id).hidden = false;
   if (!location.hash) history.replaceState(null, '', '#/overview');
-  loadMood();
+  if (mood) loadMood();
   renderShell();
   startEvents();
   topBar();
@@ -847,19 +853,19 @@ async function enter() {
 }
 
 async function boot() {
-  /* Before sign-in: the console's Mood and language for the login page. */
-  try {
-    const p = await request('/api/public');
+  /* The console's Mood and language (also for the login page), the
+   * session and the console's strings, all at once. */
+  const pub = request('/api/public').catch(() => null);
+  const sess = request('/api/session').then(() => true, () => false);
+  const language = sess.then((ok) => (ok ? loadLanguage() : null));
+  const p = await pub;
+  if (p) {
     applyMood(p.mood);
     LANG = WEB[p.lang] ? p.lang : 'en';
     document.documentElement.lang = LANG;
-  } catch (e) { /* defaults */ }
-  try {
-    await request('/api/session');
-    await enter();
-  } catch (e) {
-    showLogin();
   }
+  if (await sess) await enter(language, !p);
+  else showLogin();
 }
 
 window.addEventListener('DOMContentLoaded', boot);

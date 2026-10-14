@@ -46,6 +46,17 @@
 #define NAV_REPEAT_INTERVAL_MS 90
 #define WEB_DEV_NAME "nuubOS Web Input"
 
+/* Analog stick poll rate (kernel patch 0106 lets /sys/.../poll go up to
+ * 100 ms): the device-tree 4 ms only while a game owns the controllers,
+ * 16 ms for menus (stick navigation), 100 ms with the screen off. At 4 ms
+ * the GPADC poller alone woke the CPU ~1800 times a second at idle. */
+#define STICK_NAME "adc-joystick"
+#define STICK_POLL_GAME_MS 4
+#define STICK_POLL_MENU_MS 16
+#define STICK_POLL_SCREEN_OFF_MS 100
+#define RUN_DIR "/run/nuubos"
+#define SCREEN_OFF_NAME "screen-off"
+
 #define BITS_PER_LONG (sizeof(unsigned long) * 8U)
 #define NBITS(n) (((n) + BITS_PER_LONG - 1U) / BITS_PER_LONG)
 
@@ -69,6 +80,15 @@ static const struct binding default_bindings[] = {
 	{ "face_west", 308 },
 	/* Find a Game on Home (Select). */
 	{ "select", 314 },
+	/* Previous/next section of a screen (L2/R2: Media Music | Video,
+	 * user request 2026-10-13). */
+	{ "tab_prev", BTN_TL2 },
+	{ "tab_next", BTN_TR2 },
+	/* Previous/next page or item (L1/R1): double L1/R1 = previous/next
+	 * track while music plays, also with the screen off (user request
+	 * 2026-10-14). */
+	{ "page_prev", BTN_TL },
+	{ "page_next", BTN_TR },
 	/*
 	 * Physical console power is a device-global semantic action.  It is
 	 * deliberately not owned by Settings or Quick Menu and is delivered to
@@ -173,6 +193,7 @@ static char raw_capture_controller[160];
 
 static void configure_input_mapping(struct input_dev *input);
 static void set_gamepads(bool enabled);
+static void apply_stick_poll(void);
 static bool gamepads_forwarding(void);
 static bool input_is_pad(const struct input_dev *input);
 
@@ -1081,6 +1102,7 @@ static void rescan_inputs(void)
 	closedir(dir);
 
 	log_message("rescan complete inputs=%zu", input_count);
+	apply_stick_poll();
 
 	reconcile_start_wake_guard();
 
@@ -1119,7 +1141,11 @@ static bool action_is_navigation(const char *action)
 	       strcmp(action, "menu_back") == 0 ||
 	       strcmp(action, "face_north") == 0 ||
 	       strcmp(action, "face_west") == 0 ||
-	       strcmp(action, "select") == 0;
+	       strcmp(action, "select") == 0 ||
+	       strcmp(action, "tab_prev") == 0 ||
+	       strcmp(action, "tab_next") == 0 ||
+	       strcmp(action, "page_prev") == 0 ||
+	       strcmp(action, "page_next") == 0;
 }
 
 static bool client_wants_action(const struct client *client,
@@ -1390,6 +1416,16 @@ static size_t padmap_next_count;
 static bool padmap_receiving;
 static struct vpad vpads[MAX_VPADS];
 static bool gamepads_on;
+/* GAMEPADS ON guide (Steam Link): the pads also have BTN_MODE, which
+ * Valve's app sends to the PC as the Steam button. Games never get it: it
+ * would renumber L3/R3 in RetroArch's and SDL's button order. */
+static bool vpad_guide;
+/* PADPRESS: buttons the owner holds on player 1 on top of the controller
+ * (Steam button sequences sent by nuubos-streamd). */
+#define PADPRESS_MODE 0x1
+#define PADPRESS_SOUTH 0x2
+#define PADPRESS_NORTH 0x4
+static unsigned int pad_inject;
 /*
  * Game hotkeys (CLAUDE §18.2): the Quick Menu button is a modifier while a
  * game runs. Held with a chord control it triggers an Emulation Service
@@ -1502,6 +1538,8 @@ static int vpad_create(int player)
 	(void)ioctl(fd, UI_SET_EVBIT, EV_ABS);
 	for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
 		(void)ioctl(fd, UI_SET_KEYBIT, keys[i]);
+	if (vpad_guide)
+		(void)ioctl(fd, UI_SET_KEYBIT, BTN_MODE);
 
 	memset(&abs, 0, sizeof(abs));
 	abs.absinfo.minimum = -PAD_AXIS_MAX;
@@ -1563,6 +1601,15 @@ static void vpad_release(struct vpad *pad)
 	if (pad->hat_y) {
 		pad->hat_y = 0;
 		vpad_write(pad, EV_ABS, ABS_HAT0Y, 0);
+	}
+	if (pad->player == 1 && pad_inject) {
+		if ((pad_inject & PADPRESS_MODE) && vpad_guide)
+			vpad_write(pad, EV_KEY, BTN_MODE, 0);
+		if (pad_inject & PADPRESS_SOUTH)
+			vpad_write(pad, EV_KEY, BTN_SOUTH, 0);
+		if (pad_inject & PADPRESS_NORTH)
+			vpad_write(pad, EV_KEY, BTN_NORTH, 0);
+		pad_inject = 0;
 	}
 	vpad_sync(pad);
 }
@@ -1628,11 +1675,54 @@ static void sync_vpads(void)
 	}
 }
 
+static bool screen_off;
+
+/* Writes the analog sticks' poll interval for the current state; only
+ * when it differs (sysfs write restarts the poller). */
+static void apply_stick_poll(void)
+{
+	int ms = gamepads_on ? STICK_POLL_GAME_MS :
+		 screen_off ? STICK_POLL_SCREEN_OFF_MS : STICK_POLL_MENU_MS;
+	size_t i;
+
+	for (i = 0; i < input_count; i++) {
+		const char *event = strrchr(inputs[i].path, '/');
+		char attr[256], value[32] = "";
+		FILE *fp;
+
+		if (!event || strcmp(inputs[i].name, STICK_NAME) != 0)
+			continue;
+		snprintf(attr, sizeof(attr), "/sys/class/input%s/device/poll", event);
+		fp = fopen(attr, "r");
+		if (!fp)
+			continue;
+		if (!fgets(value, sizeof(value), fp))
+			value[0] = '\0';
+		fclose(fp);
+		if (atoi(value) == ms)
+			continue;
+		fp = fopen(attr, "w");
+		if (!fp)
+			continue;
+		fprintf(fp, "%d\n", ms);
+		if (fclose(fp) == 0)
+			log_message("stick poll %s %d ms", event + 1, ms);
+	}
+}
+
+/* /run/nuubos/screen-off exists while the screen is off (displayctl). */
+static void refresh_screen_off(void)
+{
+	screen_off = access(RUN_DIR "/" SCREEN_OFF_NAME, F_OK) == 0;
+	apply_stick_poll();
+}
+
 static void set_gamepads(bool enabled)
 {
 	if (gamepads_on == enabled)
 		return;
 	gamepads_on = enabled;
+	pad_inject = 0;
 	hotkey_held = false;
 	hotkey_used = false;
 	log_message("gamepads %s", enabled ? "on" : "off");
@@ -1641,6 +1731,7 @@ static void set_gamepads(bool enabled)
 	else
 		destroy_vpads();
 	sync_input_grab();
+	apply_stick_poll();
 }
 
 /* -32767..32767 around the device centre, from its EVIOCGABS range. */
@@ -1679,6 +1770,28 @@ static int apply_deadzone(int value, int percent)
 	return (int)(value < 0 ? -magnitude : magnitude);
 }
 
+/* Held by PADPRESS on player 1 (only the buttons it can hold). */
+static bool vpad_injected(const struct vpad *pad, size_t c)
+{
+	int code = pad_controls[c].code;
+
+	if (pad->player != 1 || c >= PAD_AXIS_FIRST)
+		return false;
+	return (code == BTN_SOUTH && (pad_inject & PADPRESS_SOUTH)) ||
+	       (code == BTN_NORTH && (pad_inject & PADPRESS_NORTH));
+}
+
+/* Whether the controller itself holds the button emitted as `code`. */
+static bool vpad_held(const struct vpad *pad, int code)
+{
+	size_t c;
+
+	for (c = 0; c < PAD_AXIS_FIRST; c++)
+		if (pad_controls[c].code == code && pad->pressed[c])
+			return true;
+	return false;
+}
+
 static void vpad_set_button(struct vpad *pad, size_t c, bool pressed)
 {
 	if (pad->pressed[c] == pressed)
@@ -1700,7 +1813,29 @@ static void vpad_set_button(struct vpad *pad, size_t c, bool pressed)
 		return;
 	}
 	if (pad_controls[c].code >= 0)
-		vpad_write(pad, EV_KEY, pad_controls[c].code, pressed ? 1 : 0);
+		vpad_write(pad, EV_KEY, pad_controls[c].code,
+			   pressed || vpad_injected(pad, c) ? 1 : 0);
+}
+
+/* PADPRESS <hex>: the buttons player 1 holds from now on, on top of the
+ * controller; 0 releases them (each one only if not physically held). */
+static void set_pad_inject(unsigned int mask)
+{
+	struct vpad *pad = vpad_for_player(1);
+	unsigned int changed = mask ^ pad_inject;
+
+	pad_inject = mask;
+	if (!pad || !changed)
+		return;
+	if ((changed & PADPRESS_MODE) && vpad_guide)
+		vpad_write(pad, EV_KEY, BTN_MODE, (mask & PADPRESS_MODE) ? 1 : 0);
+	if (changed & PADPRESS_SOUTH)
+		vpad_write(pad, EV_KEY, BTN_SOUTH,
+			   vpad_held(pad, BTN_SOUTH) || (mask & PADPRESS_SOUTH) ? 1 : 0);
+	if (changed & PADPRESS_NORTH)
+		vpad_write(pad, EV_KEY, BTN_NORTH,
+			   vpad_held(pad, BTN_NORTH) || (mask & PADPRESS_NORTH) ? 1 : 0);
+	vpad_sync(pad);
 }
 
 static void emit_action_state(const char *action, const char *state);
@@ -2364,8 +2499,11 @@ static void handle_command(struct client *client, const char *line)
 
 	/* Emulation Service: game gamepads for the lifetime of this
 	 * connection (a crashed session never leaves controllers grabbed). */
-	if (strcmp(line, "GAMEPADS ON") == 0) {
+	if (strcmp(line, "GAMEPADS ON") == 0 ||
+	    strcmp(line, "GAMEPADS ON guide") == 0) {
 		client->owns_gamepads = true;
+		if (!gamepads_on)
+			vpad_guide = line[11] != '\0';
 		set_gamepads(true);
 		(void)write_all(client->fd, "OK\n");
 		return;
@@ -2373,6 +2511,13 @@ static void handle_command(struct client *client, const char *line)
 
 	if (strncmp(line, "HOTKEYS ", 8) == 0 && client->owns_gamepads) {
 		set_game_hotkeys(line + 8);
+		(void)write_all(client->fd, "OK\n");
+		return;
+	}
+
+	if (strncmp(line, "PADPRESS ", 9) == 0 && client->owns_gamepads) {
+		set_pad_inject((unsigned int)strtoul(line + 9, NULL, 16) &
+			       (PADPRESS_MODE | PADPRESS_SOUTH | PADPRESS_NORTH));
 		(void)write_all(client->fd, "OK\n");
 		return;
 	}
@@ -3028,6 +3173,7 @@ int main(int argc, char **argv)
 {
 	int server_fd = -1;
 	int inotify_fd = -1;
+	int run_watch_fd = -1;
 	int watch_fd = -1;
 	size_t i;
 	bool handoff = false;
@@ -3109,6 +3255,11 @@ int main(int argc, char **argv)
 		cleanup_runtime(server_fd, inotify_fd, watch_fd);
 		return 1;
 	}
+	/* The screen-off mark (stick poll rate); best effort. */
+	run_watch_fd = inotify_add_watch(inotify_fd, RUN_DIR,
+					 IN_CREATE | IN_DELETE |
+					 IN_MOVED_FROM | IN_MOVED_TO);
+	refresh_screen_off();
 
 	while (!stop_requested) {
 		struct pollfd pfds[2 + MAX_INPUTS + MAX_CLIENTS];
@@ -3183,14 +3334,33 @@ int main(int argc, char **argv)
 				accept_client(server_fd);
 				break;
 			case 1: {
-				char buffer[512];
+				char buffer[4096]
+					__attribute__((aligned(__alignof__(struct inotify_event))));
+				bool rescan = false, screen = false;
+				ssize_t len;
 
-				while (read(inotify_fd,
-					    buffer,
-					    sizeof(buffer)) > 0)
-					;
+				while ((len = read(inotify_fd, buffer,
+						   sizeof(buffer))) > 0) {
+					char *p = buffer;
 
-				rescan_inputs();
+					while (p < buffer + len) {
+						const struct inotify_event *ev =
+							(const struct inotify_event *)p;
+
+						if (ev->wd == run_watch_fd) {
+							if (ev->len && !strcmp(ev->name, SCREEN_OFF_NAME))
+								screen = true;
+						} else {
+							rescan = true;
+						}
+						p += sizeof(*ev) + ev->len;
+					}
+				}
+
+				if (rescan)
+					rescan_inputs();
+				if (screen)
+					refresh_screen_off();
 				break;
 			}
 			case 2:

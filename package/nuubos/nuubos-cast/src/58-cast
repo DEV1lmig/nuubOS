@@ -1,0 +1,6 @@
+#!/bin/sh
+# nuubOS lifecycle pre-power hook (CLAUDE §20): a screen cast cannot survive
+# Sleep (Wi-Fi goes down) nor Restart/Power Off; the receiver is released
+# first so the TV does not keep a frozen picture. Returns at once when no
+# cast runs.
+exec /usr/bin/nuubos-castctl pre-power "$1" >/dev/null

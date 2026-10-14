@@ -1,3 +1,3 @@
-# Password login for root with the device credential (nuubos-remotectl);
-# public-key login is not built (board/nuubos/common/dropbear-localoptions.h).
+# Login for root with the device credential (nuubos-remotectl) or with a
+# public key from /root/.ssh/authorized_keys (nuubos-remotectl keys).
 DROPBEAR_ARGS=""

@@ -5,7 +5,7 @@
  *
  * Usage: uinput-nav [pattern] [interval_ms] [repeat]
  *   pattern: R L U D (D-pad), A (south), B (east), M (mode: Quick Menu),
- *            + - (volume up/down), any other char = pause; default "RRRRLLLLDUDU"
+ *            + - (volume up/down), [ ] (L1/R1), any other char = pause; default "RRRRLLLLDUDU"
  */
 #include <fcntl.h>
 #include <linux/uinput.h>
@@ -53,7 +53,7 @@ int main(int argc, char **argv)
 	int repeat = argc > 3 ? atoi(argv[3]) : 1;
 	static const int keys[] = { BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT,
 				    BTN_DPAD_RIGHT, BTN_SOUTH, BTN_EAST, BTN_MODE,
-				    KEY_VOLUMEUP, KEY_VOLUMEDOWN };
+				    KEY_VOLUMEUP, KEY_VOLUMEDOWN, BTN_TL, BTN_TR };
 	struct uinput_setup setup;
 	size_t i;
 
@@ -85,7 +85,8 @@ int main(int argc, char **argv)
 				   *p == 'U' ? BTN_DPAD_UP : *p == 'D' ? BTN_DPAD_DOWN :
 				   *p == 'A' ? BTN_SOUTH : *p == 'B' ? BTN_EAST :
 				   *p == 'M' ? BTN_MODE : *p == '+' ? KEY_VOLUMEUP :
-				   *p == '-' ? KEY_VOLUMEDOWN : -1;
+				   *p == '-' ? KEY_VOLUMEDOWN : *p == '[' ? BTN_TL :
+				   *p == ']' ? BTN_TR : -1;
 			if (code >= 0)
 				press(code);
 			msleep(interval);

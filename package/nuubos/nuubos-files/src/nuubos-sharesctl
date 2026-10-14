@@ -4,7 +4,13 @@
 #   list                              share=<name>\t<url>\t<user>\t<mounted> ... end=1
 #   add NAME //HOST/SHARE [USER]      password on stdin (empty line = guest)
 #   mount NAME | umount NAME | remove NAME
+#   discover                          server=<name>\t<address> ... end=1 (~3 s)
+#   shares HOST [USER]                password on stdin (none = anonymous,
+#                                     then guest): share=<name>\t<comment>
+#                                     ... end=1 | ERR auth|unreachable|failed
 #
+# discover and shares are nuubos-smb-browse (mDNS, NetBIOS, WS-Discovery;
+# libsmb2 NetShareEnumAll) for Add Network Location.
 # Shares are mounted at /run/nuubos/shares/<name> for the File Manager and
 # media; they are never a ROM location (the Game Library reads USERDATA
 # only). Credentials stay in STATE, root only (/state/shares). Mounting is
@@ -66,12 +72,23 @@ mount)
     mkdir -p "$MOUNT_ROOT/$name"
     user="$(value "$name" USER)"; pass="$(value "$name" PASSWORD)"
     if [ -n "$user" ]; then opts="username=$user,password=$pass"; else opts="guest"; fi
-    if bounded "$MOUNT_TIMEOUT" mount -t cifs "$(value "$name" URL)" "$MOUNT_ROOT/$name" \
-        -o "$opts,vers=3.0,soft,noperm,nodev,nosuid,noexec,iocharset=utf8,echo_interval=10" 2>/dev/null; then
+    # No forced SMB version: the kernel negotiates the newest both sides
+    # speak (older NAS only had SMB 2.x). The error says what went wrong:
+    # auth (user/password), share (no such shared folder), unreachable.
+    err="$MOUNT_ROOT/.$name.err"
+    if bounded "$MOUNT_TIMEOUT" sh -c 'exec mount -t cifs "$1" "$2" -o "$3" 2>"$4"' sh "$(value "$name" URL)" "$MOUNT_ROOT/$name" \
+        "$opts,soft,noperm,nodev,nosuid,noexec,iocharset=utf8,echo_interval=10" "$err"; then
+        rm -f "$err"
         echo OK
     else
+        msg="$(cat "$err" 2>/dev/null)"
+        rm -f "$err"
         rmdir "$MOUNT_ROOT/$name" 2>/dev/null
-        echo "ERR unreachable"
+        case "$msg" in
+            *"Permission denied"*|*"Operation not permitted"*|*"Key has been rejected"*) echo "ERR auth" ;;
+            *"No such file or directory"*) echo "ERR share" ;;
+            *) echo "ERR unreachable" ;;
+        esac
         exit 1
     fi
     ;;
@@ -90,8 +107,17 @@ remove)
     rm -f "${CONF_DIR:?}/$name.conf"
     echo OK
     ;;
+discover)
+    exec /usr/libexec/nuubos-smb-browse discover
+    ;;
+shares)
+    host="${2:-}"; user="${3:-}"
+    printf '%s' "$host" | grep -Eq '^[A-Za-z0-9._-]+$' || { echo "ERR host"; exit 1; }
+    printf '%s' "$user" | grep -q '[,=[:space:]]' && { echo "ERR user"; exit 1; }
+    exec /usr/libexec/nuubos-smb-browse shares "$host" "$user"
+    ;;
 *)
-    echo "Usage: nuubos-sharesctl list | add NAME //HOST/SHARE [USER] | mount|umount|remove NAME" >&2
+    echo "Usage: nuubos-sharesctl list | add NAME //HOST/SHARE [USER] | mount|umount|remove NAME | discover | shares HOST [USER]" >&2
     exit 2
     ;;
 esac

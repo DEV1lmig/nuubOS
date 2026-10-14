@@ -4,7 +4,7 @@
  *
  *   status        provider=, channel=, auto=, current=, build=, available=,
  *                 version=, notes= (release notes, escaped), downloaded=
- *   channel [NAME] show or choose the release channel (stable|beta|alpha)
+ *   channel [NAME] show or choose the release channel (stable|rc|nightly)
  *   auto [on|off] show or set the daily automatic check (default on;
  *                 run by nuubos-update-auto)
  *   check         fetch and verify the release manifest of the channel:
@@ -84,7 +84,9 @@
 /* notes= : the release notes, one line ("\n" = new line, "\\" = \). */
 #define NOTES_MAX 4096
 
-static const char *const channels[] = { "stable", "beta", "alpha" };
+static const char *const channels[] = { "stable", "rc", "nightly" };
+/* Names before 2026-10-14, still found in CHANNEL_FILE: old -> new. */
+static const char *const renamed_channels[][2] = { { "beta", "rc" }, { "alpha", "nightly" } };
 
 static volatile sig_atomic_t cancelled;
 static bool as_job;
@@ -186,6 +188,9 @@ static void current_channel(char *out, size_t size)
 			trim(out);
 		fclose(fp);
 	}
+	for (size_t i = 0; i < sizeof(renamed_channels) / sizeof(renamed_channels[0]); i++)
+		if (!strcmp(out, renamed_channels[i][0]))
+			snprintf(out, size, "%s", renamed_channels[i][1]);
 	if (!valid_channel(out))
 		snprintf(out, size, "%s", UPDATE_DEFAULT_CHANNEL);
 }
@@ -760,7 +765,7 @@ int main(int argc, char **argv)
 	else if (argc == 3 && !strcmp(argv[1], "write"))
 		rc = cmd_write(argv[2]);
 	else
-		fprintf(stderr, "Usage: nuubos-updatectl status | channel [stable|beta|alpha] | auto [on|off] | check | download | verify | write DEVICE\n");
+		fprintf(stderr, "Usage: nuubos-updatectl status | channel [stable|rc|nightly] | auto [on|off] | check | download | verify | write DEVICE\n");
 	curl_global_cleanup();
 	return rc;
 }

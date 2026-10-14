@@ -31,6 +31,18 @@
  * nuubos-storagectl when the games card is pulled out): a game whose ROM
  * was on it is saved in the automatic state and closed, with a notice.
  *
+ * LAUNCH takes a third argument for netplay on the local network: "host",
+ * or "connect:<address>:<port>:<core>" (a host found by NETPLAY_HOSTS, the
+ * LAN discovery of RetroArch hosts, with the host's emulator). Over a
+ * running game NETPLAY_HOST restarts it as a host from its saved progress,
+ * NETPLAY_STOP ends netplay (the game goes on); the snapshot follows
+ * RetroArch's netplay events (netplay=off|starting|host|client,
+ * netplay_peers=, netplay_peer=). CHEATS lists the running game's cheat
+ * lists and cheats, CHEAT_SET <k> <0|1> and CHEAT_FILE <path> change them
+ * (kept per user and game, applied at once; never in hardcore mode or with
+ * netplay). Cores the user downloaded for a system (its libretro databases,
+ * libretro.conf) are emulators of that system like the cores.conf ones.
+ *
  * Per-game configuration (EPIC-018): GAME_SETTINGS <game> <system> lists the
  * effective values and the user's explicit overrides; GAME_SET <game>
  * <system> <key> <value> (empty value = inherit) and GAME_RESET <game>
@@ -56,15 +68,18 @@
  * quit is pending.
  */
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,8 +118,11 @@
 #define SHARE_DIR "/usr/share/nuubos/emulation"
 #endif
 #define CORES_CONF SHARE_DIR "/cores.conf"
+/* nuubOS systems in the libretro databases (core-info "database"). */
+#define LIBRETRO_CONF SHARE_DIR "/libretro.conf"
 #define DEFAULT_RA_CFG SHARE_DIR "/retroarch.cfg"
 #define DEFAULT_CORE_OPTIONS SHARE_DIR "/retroarch-core-options.cfg"
+#define CORE_OPTION_UPDATES SHARE_DIR "/core-option-updates.conf"
 #define DEFAULT_SHADER_PRESET SHARE_DIR "/shaders/global.glslp"
 #define SHADER_DIR SHARE_DIR "/shaders"
 /* Performance overlay font (RetroArch patch 0004 draws with the OSD font). */
@@ -136,7 +154,9 @@
 #ifndef BUNDLED_CORES
 #define BUNDLED_CORES "/usr/lib/libretro"
 #endif
+#ifndef CORE_INFO_DIR
 #define CORE_INFO_DIR "/usr/share/libretro/info"
+#endif
 #define RA_ASSETS_DIR "/usr/share/retroarch/assets"
 #define RA_AUTOCONFIG_DIR "/usr/share/retroarch/autoconfig"
 
@@ -146,6 +166,13 @@
 #define DOWNLOADED_CORES USERDATA "/retroarch/cores"
 #define BIOS_DIR USERDATA "/bios"
 #define CHEATS_DIR USERDATA "/cheats"
+/* The libretro cheat collection (nuubos-libretroctl cheats update): an
+ * archive with an index of its files; the files of a game played are
+ * extracted into one folder per database. */
+#define CHEATS_LIBRETRO CHEATS_DIR "/libretro"
+#define CHEATS_ARCHIVE CHEATS_LIBRETRO "/cheats.zip"
+#define CHEATS_INDEX CHEATS_LIBRETRO "/index.txt"
+#define SESSION_CHEATS SESSION_DIR "/session.cht"
 #define CACHE_DIR USERDATA "/cache/retroarch"
 #define USERS_DIR USERDATA "/users"
 #ifndef STATE_USERS
@@ -154,6 +181,7 @@
 #define GAME_SETTINGS_SUBDIR "appdata/nuubos-emulation/games"
 #define EMU_SETTINGS_FILE "appdata/nuubos-emulation/settings.conf"
 #define ACHIEVEMENTS_FILE "secrets/retroachievements.conf"
+#define PROFILE_FILE "profile.conf"
 
 #define MAX_CLIENTS 16
 #define MAX_LINE 1024
@@ -173,6 +201,12 @@
 #define MAX_RESTORE_KEYS 48
 /* Performance overlay: RetroArch frame rate sampled once a second. */
 #define OVERLAY_TICK_MS 1000
+/* Netplay (RetroArch's protocol): TCP game port and LAN discovery port,
+ * how long a discovery listens for hosts. */
+#define NETPLAY_PORT 55435
+#define DISCOVERY_MS 1500
+/* Cheat lists offered for a game (its own files, the collection's). */
+#define MAX_CHEAT_LISTS 12
 
 enum session_state {
 	SESSION_IDLE = 0,
@@ -246,6 +280,13 @@ struct client {
 	size_t used;
 };
 
+/* Netplay of the session, from RetroArch's events (patch 0008). */
+enum netplay_mode {
+	NET_OFF = 0,
+	NET_HOST,
+	NET_CLIENT,
+};
+
 struct session {
 	enum session_state state;
 	pid_t pid;
@@ -307,19 +348,54 @@ struct session {
 	/* Performance overlay: last RetroArch frame rate, next sample. */
 	double fps;
 	long long overlay_tick_ms;
+	/* Cheats turned on in the session (0 = none loaded). */
+	int cheats_on;
+	/* Netplay: what the launch asked for ("host", "connect"), the state
+	 * RetroArch reports, the players connected to this host, the other
+	 * side's nickname; host again once the game has closed (Host Game
+	 * over a running game restarts it as a host from its saved
+	 * progress). */
+	char net_launch[16];
+	enum netplay_mode netplay;
+	int net_peers;
+	char net_peer[40];
+	bool relaunch_host;
 };
 
-/* Explicit per-game overrides; empty = inherited. */
+/* LAN discovery of netplay hosts (NETPLAY_HOSTS): one at a time, every
+ * client asking meanwhile gets the same answer. */
+struct discovery {
+	int fd;
+	long long deadline_ms;
+	bool waiting[MAX_CLIENTS];
+	int count;
+	struct {
+		char address[INET_ADDRSTRLEN];
+		int port;
+		bool password;
+		char nick[32];
+		char core[32];
+		char content[256];
+	} hosts[16];
+};
+
+/* Explicit per-game overrides; empty = inherited. The cheats are the
+ * user's choice for the game: the list (a .cht file) and the indices of
+ * the cheats turned on in it ("0,4,7"). */
 struct game_overrides {
 	char core[64];
 	char aspect[16];
 	char filter[16];
+	char cheat_file[PATH_MAX];
+	char cheats[512];
 };
+
 
 static volatile sig_atomic_t stop_requested;
 static int sigchld_pipe[2] = { -1, -1 };
 static struct client clients[MAX_CLIENTS];
 static struct session session;
+static struct discovery discovery = { .fd = -1 };
 
 static long long monotonic_ms(void)
 {
@@ -493,6 +569,87 @@ static void merge_missing_keys(const char *src, const char *dst)
 	fclose(in);
 }
 
+/* Sets key to new_value in the core options file at path when it holds
+ * old_value; true when the file was readable. */
+static bool update_core_option(const char *path, const char *key,
+			       const char *old_value, const char *new_value)
+{
+	char tmp[PATH_MAX + 8];
+	char line[1024];
+	bool changed = false;
+	FILE *in = fopen(path, "r");
+	FILE *out;
+
+	if (!in)
+		return false;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	out = fopen(tmp, "w");
+	if (!out) {
+		fclose(in);
+		return false;
+	}
+	while (fgets(line, sizeof(line), in)) {
+		char k[128], v[256];
+
+		if (sscanf(line, " %127[^ =#] = \"%255[^\"]\"", k, v) == 2 &&
+		    !strcmp(k, key) && !strcmp(v, old_value)) {
+			fprintf(out, "%s = \"%s\"\n", key, new_value);
+			changed = true;
+		} else {
+			fputs(line, out);
+		}
+	}
+	fclose(in);
+	if (fclose(out) != 0 || (changed && rename(tmp, path) != 0)) {
+		unlink(tmp);
+		return false;
+	}
+	if (!changed)
+		unlink(tmp);
+	else
+		log_msg("emud: core option %s %s -> %s", key, old_value, new_value);
+	return true;
+}
+
+/* One-time updates of core option defaults (core-option-updates.conf: id|
+ * key|old|new): a key still holding the old default gets the new one, a
+ * value the user chose is kept; applied ids are listed in done_path so each
+ * runs once per user. */
+static void apply_core_option_updates(const char *path, const char *done_path)
+{
+	char line[512];
+	FILE *in = fopen(CORE_OPTION_UPDATES, "r");
+
+	if (!in)
+		return;
+	while (fgets(line, sizeof(line), in)) {
+		char id[96], key[128], old_value[128], new_value[128];
+		char done[128];
+		bool applied = false;
+		FILE *fp;
+
+		if (line[0] == '#' ||
+		    sscanf(line, "%95[^|\n]|%127[^|\n]|%127[^|\n]|%127[^|\n]",
+			   id, key, old_value, new_value) != 4)
+			continue;
+		fp = fopen(done_path, "r");
+		while (fp && !applied && fgets(done, sizeof(done), fp)) {
+			trim(done);
+			applied = !strcmp(done, id);
+		}
+		if (fp)
+			fclose(fp);
+		if (applied || !update_core_option(path, key, old_value, new_value))
+			continue;
+		fp = fopen(done_path, "a");
+		if (fp) {
+			fprintf(fp, "%s\n", id);
+			fclose(fp);
+		}
+	}
+	fclose(in);
+}
+
 /* Copies every file of src missing in dst (recursively). Existing files are
  * the user's and are never replaced. */
 static void seed_tree(const char *src, const char *dst)
@@ -627,6 +784,10 @@ static size_t build_status(char *out, size_t size)
 			 "overlay_items=%s\n"
 			 "fps=%.1f\n"
 			 "hardcore=%d\n"
+			 "cheats_on=%d\n"
+			 "netplay=%s\n"
+			 "netplay_peers=%d\n"
+			 "netplay_peer=%s\n"
 			 "end=1\n",
 			 state_name(),
 			 session.state == SESSION_IDLE ? "" : session.game,
@@ -640,7 +801,13 @@ static size_t build_status(char *out, size_t size)
 			 session.state != SESSION_IDLE && session.settings.overlay ? 1 : 0,
 			 session.state == SESSION_IDLE ? "" : session.settings.overlay_items,
 			 session.fps,
-			 session.state != SESSION_IDLE && session.hardcore ? 1 : 0);
+			 session.state != SESSION_IDLE && session.hardcore ? 1 : 0,
+			 session.cheats_on,
+			 session.state == SESSION_IDLE ? "off"
+			 : session.netplay == NET_HOST ? "host"
+			 : session.netplay == NET_CLIENT ? "client"
+			 : session.net_launch[0] ? "starting" : "off",
+			 session.net_peers, session.net_peer);
 
 	return n < 0 ? 0 : (size_t)n < size ? (size_t)n : size - 1;
 }
@@ -654,6 +821,7 @@ static void close_client(struct client *c)
 	c->used = 0;
 	if (session.power_client >= 0 && &clients[session.power_client] == c)
 		session.power_client = -1;
+	discovery.waiting[c - clients] = false;
 }
 
 static void reply(struct client *c, const char *text)
@@ -662,9 +830,36 @@ static void reply(struct client *c, const char *text)
 		close_client(c);
 }
 
+/* Low-latency Wi-Fi (radio power save off) while a netplay session runs:
+ * nuubos-wifid watches this directory (battery audit 2026-10-14). */
+#define LOW_LATENCY_MARK RUN_ROOT "/low-latency/emud"
+
+static void sync_low_latency(void)
+{
+	static int marked = -1;
+	int want = session.state != SESSION_IDLE &&
+		   (session.net_launch[0] || session.netplay != NET_OFF);
+
+	if (want == marked)
+		return;
+	if (want) {
+		int fd;
+
+		(void)mkdir(RUN_ROOT "/low-latency", 0755);
+		fd = open(LOW_LATENCY_MARK, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+		if (fd >= 0)
+			close(fd);
+	} else {
+		(void)unlink(LOW_LATENCY_MARK);
+	}
+	marked = want;
+}
+
 static void notify_subscribers(void)
 {
-	char status[512];
+	char status[768];
+
+	sync_low_latency();
 	size_t len = build_status(status, sizeof(status));
 	int i;
 
@@ -826,6 +1021,138 @@ static int retroarch_language(const char *user)
  * bundled core uses a core the user downloaded from RetroArch.
  */
 static void content_base_name(const char *content, char *out, size_t size);
+static bool list_has(const char *list, const char *name);
+
+/* A field ("key = "value"") of a core's libretro core-info file; "" when
+ * the file or the field is missing. */
+static void core_info_value(const char *core, const char *key, char *out, size_t size)
+{
+	char path[PATH_MAX];
+	char line[1024];
+	size_t klen = strlen(key);
+	FILE *fp;
+
+	out[0] = '\0';
+	snprintf(path, sizeof(path), CORE_INFO_DIR "/%s_libretro.info", core);
+	fp = fopen(path, "r");
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp)) {
+		char *p = line;
+		char *end;
+
+		if (strncmp(p, key, klen))
+			continue;
+		p += klen;
+		while (*p == ' ')
+			p++;
+		if (*p++ != '=')
+			continue;
+		while (*p == ' ')
+			p++;
+		if (*p == '"')
+			p++;
+		trim(p);
+		if ((end = strrchr(p, '"')))
+			*end = '\0';
+		copy_text(out, size, p);
+		break;
+	}
+	fclose(fp);
+}
+
+/* libretro.conf: the libretro databases of a system, "|" separated ("" =
+ * none). */
+static void system_databases(const char *system, char *out, size_t size)
+{
+	char line[1024];
+	FILE *fp = fopen(LIBRETRO_CONF, "r");
+	size_t len = strlen(system);
+
+	out[0] = '\0';
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp)) {
+		trim(line);
+		if (line[0] == '#' || strncmp(line, system, len) || line[len] != '|')
+			continue;
+		copy_text(out, size, line + len + 1);
+		break;
+	}
+	fclose(fp);
+}
+
+/* "a|b|c" has name. */
+static bool pipe_list_has(const char *list, const char *name)
+{
+	size_t len = strlen(name);
+
+	for (const char *p = list; *p;) {
+		const char *bar = strchr(p, '|');
+		size_t n = bar ? (size_t)(bar - p) : strlen(p);
+
+		if (n == len && !strncmp(p, name, len))
+			return true;
+		if (!bar)
+			break;
+		p = bar + 1;
+	}
+	return false;
+}
+
+/* The core's core-info names one of the databases dbs ("a|b"). */
+static bool core_for_databases(const char *core, const char *dbs)
+{
+	char info[1024];
+	char *save = NULL;
+
+	if (!dbs[0])
+		return false;
+	core_info_value(core, "database", info, sizeof(info));
+	for (char *db = strtok_r(info, "|", &save); db; db = strtok_r(NULL, "|", &save))
+		if (pipe_list_has(dbs, db))
+			return true;
+	return false;
+}
+
+static int core_file_filter(const struct dirent *e)
+{
+	size_t len = strlen(e->d_name);
+
+	return e->d_name[0] != '.' && len > 12 && !strcmp(e->d_name + len - 12, "_libretro.so");
+}
+
+/* Cores the user downloaded for the system beyond cores.conf (Get More
+ * Emulators, or RetroArch's own Online Updater): a core in
+ * /userdata/retroarch/cores whose core-info names one of the system's
+ * libretro databases, appended to out ("a,b") in name order. */
+static void downloaded_cores(const char *system, char *out, size_t size)
+{
+	struct dirent **names = NULL;
+	char dbs[512];
+	int n;
+
+	system_databases(system, dbs, sizeof(dbs));
+	if (!dbs[0])
+		return;
+	n = scandir(DOWNLOADED_CORES, &names, core_file_filter, alphasort);
+	for (int i = 0; i < n; i++) {
+		char core[NAME_MAX + 1];
+		char bundled[PATH_MAX];
+
+		copy_text(core, sizeof(core), names[i]->d_name);
+		core[strlen(core) - 12] = '\0';
+		snprintf(bundled, sizeof(bundled), BUNDLED_CORES "/%s_libretro.so", core);
+		if (!list_has(out, core) && !file_exists(bundled) &&
+		    core_for_databases(core, dbs) && strlen(out) + strlen(core) + 2 < size) {
+			if (out[0])
+				strcat(out, ",");
+			strcat(out, core);
+		}
+		free(names[i]);
+	}
+	free(names);
+}
 
 /* MAME machine and media switches of a system ("apple2e",
  * "dsk:-flop1,woz:-flop1"), from the optional cores.conf fields 3-4. */
@@ -885,6 +1212,22 @@ static bool resolve_core(const char *system, char *core, size_t core_size,
 		}
 	}
 	fclose(fp);
+	/* No core of cores.conf: one the user downloaded for the system. */
+	if (!found) {
+		char extra[512] = "";
+		char *comma;
+
+		downloaded_cores(system, extra, sizeof(extra));
+		if ((comma = strchr(extra, ',')))
+			*comma = '\0';
+		if (extra[0]) {
+			copy_text(core, core_size, extra);
+			snprintf(path, path_size, DOWNLOADED_CORES "/%s_libretro.so", extra);
+			resolved_machine[0] = '\0';
+			resolved_media[0] = '\0';
+			found = true;
+		}
+	}
 	return found;
 }
 
@@ -912,7 +1255,7 @@ static void overrides_path(const char *user, const char *game, char *out, size_t
 static void load_overrides(const char *user, const char *game, struct game_overrides *o)
 {
 	char path[PATH_MAX];
-	char line[256];
+	char line[PATH_MAX + 32];
 	FILE *fp;
 
 	memset(o, 0, sizeof(*o));
@@ -933,6 +1276,10 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 			copy_text(o->aspect, sizeof(o->aspect), eq);
 		else if (!strcmp(line, "filter"))
 			copy_text(o->filter, sizeof(o->filter), eq);
+		else if (!strcmp(line, "cheat_file"))
+			copy_text(o->cheat_file, sizeof(o->cheat_file), eq);
+		else if (!strcmp(line, "cheats"))
+			copy_text(o->cheats, sizeof(o->cheats), eq);
 	}
 	fclose(fp);
 }
@@ -947,7 +1294,7 @@ static int save_overrides(const char *user, const char *game, const struct game_
 
 	overrides_path(user, game, path, sizeof(path));
 	/* Nothing overridden: no file, the game inherits everything. */
-	if (!o->core[0] && !o->aspect[0] && !o->filter[0])
+	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->cheat_file[0] && !o->cheats[0])
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
 	if (mkdir_p(dir) != 0)
@@ -962,6 +1309,10 @@ static int save_overrides(const char *user, const char *game, const struct game_
 		fprintf(fp, "aspect=%s\n", o->aspect);
 	if (o->filter[0])
 		fprintf(fp, "filter=%s\n", o->filter);
+	if (o->cheat_file[0])
+		fprintf(fp, "cheat_file=%s\n", o->cheat_file);
+	if (o->cheats[0])
+		fprintf(fp, "cheats=%s\n", o->cheats);
 	if (ferror(fp))
 		rc = -1;
 	if (fclose(fp) != 0)
@@ -985,7 +1336,8 @@ static bool valid_filter(const char *v)
 }
 
 /* Cores of a system that can be loaded (bundled or downloaded), in
- * cores.conf preference order, as "a,b,c". */
+ * cores.conf preference order, then the other cores the user downloaded
+ * for it, as "a,b,c". */
 static void available_cores(const char *system, char *out, size_t size)
 {
 	static const char *const roots[] = { BUNDLED_CORES, DOWNLOADED_CORES };
@@ -1023,6 +1375,7 @@ static void available_cores(const char *system, char *out, size_t size)
 		break;
 	}
 	fclose(fp);
+	downloaded_cores(system, out, size);
 }
 
 static bool list_has(const char *list, const char *name)
@@ -1337,22 +1690,32 @@ static bool square_panel(void)
 }
 
 /* A TV system's picture fills a square handheld screen's height as far as
- * at most 12 % of its width (6 % a side, a TV's overscan) is cropped
- * (RetroArch patch 0006, NUUBOS_RA_OVERSCAN_X; bezel.glsl OVERSCAN_X): a
- * 4:3 game on the 720x720 RG CubeXX is 783x587, not an integer 2x with
- * large margins (user decisions 2026-10-11: square screens only, never
- * HDMI or 4:3/3:2 panels; integer 3x cropped PS1 too much). Only with the
- * default presentation (or the per-game Integer Scaling). */
-static bool tv_overscan(const char *system, const struct game_overrides *o)
+ * at most a share of its width (a TV's overscan) is cropped (RetroArch patch
+ * 0006, NUUBOS_RA_OVERSCAN_X; bezel.glsl OVERSCAN_X): with the default 8 %
+ * (4 % a side) a 4:3 game on the 720x720 RG CubeXX is 783x587, not an
+ * integer 2x with large margins (user decisions 2026-10-11: square screens
+ * only, never HDMI or 4:3/3:2 panels; integer 3x cropped PS1 too much).
+ * display.conf field 4 sets the share per system (PS1 5 %, user request
+ * 2026-10-14: 8 % cut its borders a little too much). Only with the default
+ * presentation (or the per-game Integer Scaling). Returns the percentage of
+ * the width that may be cropped, 0 = off. */
+#define TV_OVERSCAN_DEFAULT_PCT 8
+
+static int tv_overscan(const char *system, const struct game_overrides *o)
 {
-	char screen[16];
+	char screen[16], pct[16];
+	int value;
 
 	if (o->aspect[0] && strcmp(o->aspect, "integer"))
-		return false;
+		return 0;
 	if (!square_panel()) /* HDMI turns the panel off */
-		return false;
+		return 0;
 	system_screen(system, screen, sizeof(screen));
-	return !strcmp(screen, "crt");
+	if (strcmp(screen, "crt"))
+		return 0;
+	display_field(system, 3, pct, sizeof(pct));
+	value = atoi(pct);
+	return value > 0 && value < 50 ? value : TV_OVERSCAN_DEFAULT_PCT;
 }
 
 /* systems.conf colour (field 6, #rrggbb) as 0..1 components. */
@@ -1751,7 +2114,7 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 			 "MOOD_TEXT_R = \"%.3f\"\nMOOD_TEXT_G = \"%.3f\"\nMOOD_TEXT_B = \"%.3f\"\n"
 			 "MOOD_ACCENT_R = \"%.3f\"\nMOOD_ACCENT_G = \"%.3f\"\nMOOD_ACCENT_B = \"%.3f\"\n",
 			 icon, rgb[0], rgb[1], rgb[2], !strcmp(screen, "lcd") ? 1 : 0,
-			 has_icon ? 1 : 0, crt ? 1 : 0, tv_overscan(session.system, o) ? 1 : 0,
+			 has_icon ? 1 : 0, crt ? 1 : 0, tv_overscan(session.system, o),
 			 mood.background[0], mood.background[1], mood.background[2],
 			 mood.text[0], mood.text[1], mood.text[2],
 			 mood.accent[0], mood.accent[1], mood.accent[2]);
@@ -1791,6 +2154,55 @@ static void write_session_overrides(FILE *fp, const struct achievements *a)
 			    "cheevos_token = \"\"\n"
 			    "cheevos_password = \"\"\n");
 	}
+}
+
+/* Netplay: the user's nuubOS name, the local network only (no public
+ * lobby, relay or UPnP), the default port, everyone plays. */
+static void write_session_netplay(FILE *fp)
+{
+	static const char *const keys[] = {
+		"netplay_nickname", "netplay_public_announce", "netplay_use_mitm_server",
+		"netplay_nat_traversal", "netplay_start_as_spectator", "netplay_password",
+		"netplay_spectate_password", "netplay_ip_port", NULL,
+	};
+	char path[PATH_MAX];
+	char line[256];
+	char nick[32] = "nuubOS";
+	FILE *profile;
+
+	snprintf(path, sizeof(path), STATE_USERS "/%s/" PROFILE_FILE, session.user);
+	if ((profile = fopen(path, "r"))) {
+		while (fgets(line, sizeof(line), profile)) {
+			trim(line);
+			if (strncmp(line, "USER_NAME=", 10) || !line[10] || !cfg_value_safe(line + 10))
+				continue;
+			copy_text(nick, sizeof(nick), line + 10);
+			/* A name cut to RetroArch's 31 bytes never ends in half a
+			 * UTF-8 character. */
+			if (strlen(line + 10) >= sizeof(nick)) {
+				size_t n = strlen(nick);
+
+				while (n > 0 && ((unsigned char)nick[n - 1] & 0xc0) == 0x80)
+					n--;
+				if (n > 0 && ((unsigned char)nick[n - 1] & 0xc0) == 0xc0)
+					n--;
+				nick[n] = '\0';
+			}
+		}
+		fclose(profile);
+	}
+	for (int i = 0; keys[i]; i++)
+		remember_key(keys[i]);
+	fprintf(fp,
+		"netplay_nickname = \"%s\"\n"
+		"netplay_public_announce = \"false\"\n"
+		"netplay_use_mitm_server = \"false\"\n"
+		"netplay_nat_traversal = \"false\"\n"
+		"netplay_start_as_spectator = \"false\"\n"
+		"netplay_password = \"\"\n"
+		"netplay_spectate_password = \"\"\n"
+		"netplay_ip_port = \"%d\"\n",
+		nick, NETPLAY_PORT);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1994,6 +2406,42 @@ static void handle_ra_reply(char *line)
 			finish_pending(strcmp(result, "OK") == 0);
 		return;
 	}
+	if (!strcmp(line, "CHEATS_LOAD FAILED") || !strcmp(line, "NETPLAY_STOP FAILED")) {
+		log_msg("emud: retroarch refused %s", line);
+		return;
+	}
+	if (!strncmp(line, "NETPLAY ", 8)) {
+		/* Netplay state (RetroArch patch 0008). */
+		const char *ev = line + 8;
+		const char *nick = strchr(ev, ' ');
+
+		nick = nick ? nick + 1 : "";
+		if (!strcmp(ev, "hosting")) {
+			session.netplay = NET_HOST;
+			session.net_peers = 0;
+			session.net_peer[0] = '\0';
+		} else if (!strncmp(ev, "joined", 6)) {
+			session.net_peers++;
+			copy_text(session.net_peer, sizeof(session.net_peer), nick);
+		} else if (!strncmp(ev, "left", 4)) {
+			if (session.net_peers > 0)
+				session.net_peers--;
+		} else if (!strncmp(ev, "connected", 9)) {
+			session.netplay = NET_CLIENT;
+			session.net_peers = 1;
+			copy_text(session.net_peer, sizeof(session.net_peer), nick);
+		} else if (!strcmp(ev, "disconnected") && session.netplay == NET_CLIENT) {
+			session.netplay = NET_OFF;
+			session.net_launch[0] = '\0';
+		} else if (!strcmp(ev, "off") || !strcmp(ev, "failed")) {
+			session.netplay = NET_OFF;
+			session.net_launch[0] = '\0';
+			session.net_peers = 0;
+		}
+		log_msg("emud: netplay %s", ev);
+		notify_subscribers();
+		return;
+	}
 	if (!strncmp(line, "GET_FPS ", 8)) {
 		session.fps = atof(line + 8);
 		notify_subscribers();
@@ -2051,6 +2499,338 @@ static void process_watch(void)
 	}
 	if (done && session.pending == PENDING_SAVE)
 		finish_pending(true);
+}
+
+/* ------------------------------------------------------------------ */
+/* Cheats                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A game's cheats are a .cht file of the user's (/userdata/cheats) or of
+ * the libretro cheat collection (nuubos-libretroctl: an archive and its
+ * index; the game's files are extracted when its cheats are listed into
+ * /userdata/cheats/libretro/<database>). The user picks the list and turns cheats on per
+ * game (game overrides cheat_file/cheats); the session gets a copy of the
+ * list with those cheats on (session.cht) through RetroArch's CHEATS_LOAD
+ * (patch 0008), at launch and at every change. No cheats in hardcore mode
+ * or with netplay (RetroArch refuses them there).
+ */
+struct cheat_list {
+	char path[PATH_MAX];
+	char name[NAME_MAX + 1];
+	int rank;
+};
+
+/* A file name's title for matching: letters and digits in lower case,
+ * without its (...) [...] {...} tags. */
+static void title_key(const char *name, char *out, size_t size)
+{
+	int depth = 0;
+	size_t n = 0;
+
+	for (const char *p = name; *p && n + 1 < size; p++) {
+		if (*p == '(' || *p == '[' || *p == '{')
+			depth++;
+		else if ((*p == ')' || *p == ']' || *p == '}') && depth)
+			depth--;
+		else if (!depth && isalnum((unsigned char)*p))
+			out[n++] = (char)tolower((unsigned char)*p);
+	}
+	out[n] = '\0';
+}
+
+/* First word of a name's first (...) tag: the region ("USA"). */
+static void region_tag(const char *name, char *out, size_t size)
+{
+	const char *open = strchr(name, '(');
+	size_t n = 0;
+
+	out[0] = '\0';
+	if (!open)
+		return;
+	for (const char *p = open + 1; *p && *p != ')' && *p != ',' && n + 1 < size; p++)
+		out[n++] = *p;
+	out[n] = '\0';
+}
+
+/* Inserts a list by rank, then name, keeping at most MAX_CHEAT_LISTS. */
+static void add_cheat_list(struct cheat_list *lists, int *count, const char *path,
+			   const char *name, int rank)
+{
+	int at = *count;
+
+	for (int i = 0; i < *count; i++)
+		if (!strcmp(lists[i].path, path))
+			return;
+	while (at > 0 && (lists[at - 1].rank > rank ||
+			  (lists[at - 1].rank == rank && strcasecmp(lists[at - 1].name, name) > 0)))
+		at--;
+	if (at >= MAX_CHEAT_LISTS)
+		return;
+	if (*count < MAX_CHEAT_LISTS)
+		(*count)++;
+	memmove(&lists[at + 1], &lists[at], (size_t)(*count - 1 - at) * sizeof(*lists));
+	copy_text(lists[at].path, sizeof(lists[at].path), path);
+	copy_text(lists[at].name, sizeof(lists[at].name), name);
+	lists[at].rank = rank;
+}
+
+/* Rank of a list for the ROM: the one named exactly like the ROM first,
+ * then those of its region, then the others (Game Genie, Action
+ * Replay...); -1 when its title is another. */
+static int cheat_rank(const char *name, const char *stem, const char *key, const char *region)
+{
+	char other[NAME_MAX + 1];
+
+	title_key(name, other, sizeof(other));
+	if (strcmp(other, key))
+		return -1;
+	return !strcasecmp(name, stem) ? 0 : region[0] && strstr(name, region) ? 1 : 2;
+}
+
+/* The collection's files of the ROM's title in the system's databases
+ * (index.txt lines "<database>/<name>.cht"). */
+static void scan_cheat_index(const char *dbs, const char *stem, const char *key,
+			     const char *region, int base, struct cheat_list *lists, int *count)
+{
+	char line[PATH_MAX];
+	FILE *fp = fopen(CHEATS_INDEX, "r");
+
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp)) {
+		char name[NAME_MAX + 1];
+		char path[PATH_MAX];
+		char *slash;
+		size_t len;
+		int rank;
+
+		trim(line);
+		len = strlen(line);
+		if (!(slash = strchr(line, '/')) || len < 5 || strcasecmp(line + len - 4, ".cht"))
+			continue;
+		*slash = '\0';
+		if (!pipe_list_has(dbs, line))
+			continue;
+		copy_text(name, sizeof(name), slash + 1);
+		name[strlen(name) - 4] = '\0';
+		if ((rank = cheat_rank(name, stem, key, region)) < 0)
+			continue;
+		snprintf(path, sizeof(path), CHEATS_LIBRETRO "/%s/%s", line, slash + 1);
+		add_cheat_list(lists, count, path, name, base + rank);
+	}
+	fclose(fp);
+}
+
+/* Extracts collection files (paths under CHEATS_LIBRETRO) from the
+ * archive, all in one run of unzip; its names are patterns there. */
+static void extract_cheats(const char *const *paths, int n)
+{
+	char names[MAX_CHEAT_LISTS][PATH_MAX];
+	char *argv[8 + MAX_CHEAT_LISTS];
+	int argc = 0;
+	int status;
+	pid_t pid;
+
+	argv[argc++] = (char *)"unzip";
+	argv[argc++] = (char *)"-o";
+	argv[argc++] = (char *)"-q";
+	argv[argc++] = (char *)CHEATS_ARCHIVE;
+	for (int i = 0; i < n && i < MAX_CHEAT_LISTS; i++) {
+		const char *entry = paths[i] + strlen(CHEATS_LIBRETRO "/");
+		size_t len = 0;
+
+		for (const char *p = entry; *p && len + 2 < sizeof(names[i]); p++) {
+			if (strchr("[]*?\\", *p))
+				names[i][len++] = '\\';
+			names[i][len++] = *p;
+		}
+		names[i][len] = '\0';
+		argv[argc++] = names[i];
+	}
+	argv[argc++] = (char *)"-d";
+	argv[argc++] = (char *)CHEATS_LIBRETRO;
+	argv[argc] = NULL;
+	if (argc == 6 || !file_exists(CHEATS_ARCHIVE))
+		return;
+	pid = fork();
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+		if (null >= 0) {
+			dup2(null, STDIN_FILENO);
+			dup2(null, STDOUT_FILENO);
+			dup2(null, STDERR_FILENO);
+		}
+		execvp("unzip", argv);
+		_exit(127);
+	}
+	/* A few small files: waited for here (the main loop's reaper never
+	 * sees this child first). */
+	while (pid > 0 && waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+}
+
+/* The .cht files of a folder with the ROM's title. */
+static void scan_cheat_dir(const char *dir, const char *stem, const char *key,
+			   const char *region, int base, struct cheat_list *lists, int *count)
+{
+	DIR *d = opendir(dir);
+	struct dirent *e;
+
+	if (!d)
+		return;
+	while ((e = readdir(d)) != NULL) {
+		char name[NAME_MAX + 1];
+		char path[PATH_MAX];
+		size_t len = strlen(e->d_name);
+		int rank;
+
+		if (e->d_name[0] == '.' || len < 5 || strcasecmp(e->d_name + len - 4, ".cht"))
+			continue;
+		copy_text(name, sizeof(name), e->d_name);
+		name[len - 4] = '\0';
+		if ((rank = cheat_rank(name, stem, key, region)) < 0)
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		add_cheat_list(lists, count, path, name, base + rank);
+	}
+	closedir(d);
+}
+
+/* The cheat lists for a game, best first: the user's own files
+ * (/userdata/cheats/<system>/<rom>.cht, /userdata/cheats/<rom>.cht, then
+ * files of the same title in /userdata/cheats/<system>), then the libretro
+ * collection's files of the same title in the system's databases. */
+static int cheat_lists(const char *system, const char *rom, struct cheat_list *lists)
+{
+	char stem[NAME_MAX + 1];
+	char key[NAME_MAX + 1];
+	char region[32];
+	char dbs[512];
+	char path[PATH_MAX];
+	int count = 0;
+
+	const char *missing[MAX_CHEAT_LISTS];
+	int n = 0;
+
+	content_base_name(rom, stem, sizeof(stem));
+	title_key(stem, key, sizeof(key));
+	region_tag(stem, region, sizeof(region));
+	snprintf(path, sizeof(path), CHEATS_DIR "/%s/%s.cht", system, stem);
+	if (file_exists(path))
+		add_cheat_list(lists, &count, path, stem, 0);
+	snprintf(path, sizeof(path), CHEATS_DIR "/%s.cht", stem);
+	if (file_exists(path))
+		add_cheat_list(lists, &count, path, stem, 0);
+	if (!key[0])
+		return count;
+	snprintf(path, sizeof(path), CHEATS_DIR "/%s", system);
+	scan_cheat_dir(path, stem, key, region, 1, lists, &count);
+	system_databases(system, dbs, sizeof(dbs));
+	if (dbs[0])
+		scan_cheat_index(dbs, stem, key, region, 10, lists, &count);
+	/* The collection's lists are extracted the first time they are
+	 * offered; one that could not be is left out. */
+	for (int i = 0; i < count; i++)
+		if (!file_exists(lists[i].path))
+			missing[n++] = lists[i].path;
+	if (n)
+		extract_cheats(missing, n);
+	for (int i = 0; i < count;) {
+		if (file_exists(lists[i].path)) {
+			i++;
+			continue;
+		}
+		memmove(&lists[i], &lists[i + 1], (size_t)(count - i - 1) * sizeof(*lists));
+		count--;
+	}
+	return count;
+}
+
+/* The game's list: the user's choice while it exists, else the best one
+ * ("" when there is none). */
+static void current_cheat_file(const struct game_overrides *o, const struct cheat_list *lists,
+			       int count, char *out, size_t size)
+{
+	if (o->cheat_file[0] && !file_exists(o->cheat_file) &&
+	    !strncmp(o->cheat_file, CHEATS_LIBRETRO "/", strlen(CHEATS_LIBRETRO "/"))) {
+		/* A new collection replaced the extracted files. */
+		const char *path = o->cheat_file;
+
+		extract_cheats(&path, 1);
+	}
+	if (o->cheat_file[0] && file_exists(o->cheat_file))
+		copy_text(out, size, o->cheat_file);
+	else
+		copy_text(out, size, count > 0 ? lists[0].path : "");
+}
+
+/* Cheat k of a .cht line "cheat<k>_<field> = ...": the field, NULL when
+ * the line is something else. */
+static char *cheat_line(char *line, int *k)
+{
+	char *p = line;
+	char *end;
+	long n;
+
+	while (*p == ' ')
+		p++;
+	if (strncmp(p, "cheat", 5) || !isdigit((unsigned char)p[5]))
+		return NULL;
+	n = strtol(p + 5, &end, 10);
+	if (*end != '_' || n < 0 || n > 100000)
+		return NULL;
+	*k = (int)n;
+	return end + 1;
+}
+
+/* The session's copy of the list with the user's cheats on, loaded by
+ * RetroArch; nothing on clears the session's cheats. */
+static void apply_session_cheats(const struct game_overrides *o, const char *file)
+{
+	char tmp[] = SESSION_CHEATS ".tmp";
+	char line[2048];
+	char list[sizeof(o->cheats)];
+	char *save = NULL;
+	FILE *in;
+	FILE *out;
+	int on = 0;
+
+	if (!file[0] || !o->cheats[0] || mkdir_p(SESSION_DIR) != 0 || !(in = fopen(file, "r"))) {
+		ra_command("CHEATS_LOAD");
+		session.cheats_on = 0;
+		notify_subscribers();
+		return;
+	}
+	out = fopen(tmp, "w");
+	if (!out) {
+		fclose(in);
+		return;
+	}
+	while (fgets(line, sizeof(line), in)) {
+		int k;
+		char *field = cheat_line(line, &k);
+
+		/* Every cheat off, then the user's on. */
+		if (field && !strncmp(field, "enable", 6) && (field[6] == ' ' || field[6] == '='))
+			continue;
+		fputs(line, out);
+	}
+	fclose(in);
+	copy_text(list, sizeof(list), o->cheats);
+	fputc('\n', out);
+	for (char *k = strtok_r(list, ",", &save); k; k = strtok_r(NULL, ",", &save)) {
+		fprintf(out, "cheat%d_enable = \"true\"\n", atoi(k));
+		on++;
+	}
+	if (fclose(out) != 0 || rename(tmp, SESSION_CHEATS) != 0) {
+		unlink(tmp);
+		return;
+	}
+	ra_command("CHEATS_LOAD %s", SESSION_CHEATS);
+	session.cheats_on = on;
+	notify_subscribers();
 }
 
 /* Writes the settings nuubOS enforces at every launch; RetroArch appends
@@ -2161,6 +2941,7 @@ static int write_session_cfg(const char *ra_dir, const char *saves,
 	fprintf(fp, "savestate_auto_save = \"%s\"\nsavestate_auto_load = \"%s\"\n",
 		auto_save ? "true" : "false", auto_load ? "true" : "false");
 	write_session_overrides(fp, a);
+	write_session_netplay(fp);
 	rc = ferror(fp) ? -1 : 0;
 	if (fclose(fp) != 0)
 		rc = -1;
@@ -2249,8 +3030,13 @@ static void reset_session(void)
  * mode: "resume" (default) starts from the most recent state (a slot or the
  * automatic state written when the game last closed), "new" from the
  * beginning, "slot:N" from slot N ("slot:-1" = the automatic state).
+ * net: "" alone, "host" hosts a netplay game on the local network,
+ * "connect:<address>:<port>:<core>" joins one (from the beginning: the
+ * host sends its game; with the host's emulator, NETPLAY_HOSTS).
  */
-static const char *launch(const char *game, const char *mode)
+static const char *cheats_blocked(void);
+
+static const char *launch(const char *game, const char *mode, const char *net)
 {
 	char answer[PATH_MAX + 128];
 	char command[64];
@@ -2272,10 +3058,34 @@ static const char *launch(const char *game, const char *mode)
 	int manual = 0;
 	int start = NO_STATE;
 	int render_height;
-	bool overscan;
+	int overscan;
+	char net_address[INET_ADDRSTRLEN] = "";
+	char net_port[8] = "";
+	char net_core[64] = "";
 
 	if (session.state != SESSION_IDLE)
 		return "busy";
+	if (!net)
+		net = "";
+	if (!strncmp(net, "connect:", 8)) {
+		struct in_addr ip;
+		char *p;
+		char *q;
+		long port;
+
+		copy_text(net_address, sizeof(net_address), net + 8);
+		if (!(p = strchr(net_address, ':')))
+			return "net";
+		*p = '\0';
+		port = strtol(strchr(net + 8, ':') + 1, &q, 10);
+		if (inet_pton(AF_INET, net_address, &ip) != 1 || *q != ':' || port < 1 || port > 65535)
+			return "net";
+		snprintf(net_port, sizeof(net_port), "%ld", port);
+		copy_text(net_core, sizeof(net_core), q + 1);
+		mode = "new";
+	} else if (net[0] && strcmp(net, "host")) {
+		return "net";
+	}
 	if (!mode || !mode[0])
 		mode = "resume";
 	if (strcmp(mode, "resume") && strcmp(mode, "new") && strncmp(mode, "slot:", 5))
@@ -2310,6 +3120,17 @@ static const char *launch(const char *game, const char *mode)
 	load_achievements(session.user, &achievements);
 	session.hardcore = achievements.enabled && achievements.hardcore;
 	if (session.hardcore && !strncmp(mode, "slot:", 5))
+		return "hardcore";
+	/* Joining: the host's emulator, whatever the game's choice. */
+	if (net_core[0]) {
+		char cores[512];
+
+		available_cores(session.system, cores, sizeof(cores));
+		if (!list_has(cores, net_core))
+			return "no-core";
+		copy_text(overrides.core, sizeof(overrides.core), net_core);
+	}
+	if (net[0] && session.hardcore)
 		return "hardcore";
 	if (overrides.core[0] && strcmp(overrides.core, session.core)) {
 		char cores[512];
@@ -2362,8 +3183,13 @@ static const char *launch(const char *game, const char *mode)
 	copy_text(session.ra_cfg, sizeof(session.ra_cfg), path);
 	copy_text(session.screenshots_dir, sizeof(session.screenshots_dir), screenshots);
 	snprintf(path, sizeof(path), "%s/retroarch-core-options.cfg", ra_dir);
-	if (seed_file(DEFAULT_CORE_OPTIONS, path) == 0)
+	if (seed_file(DEFAULT_CORE_OPTIONS, path) == 0) {
+		char done[PATH_MAX];
+
 		merge_missing_keys(DEFAULT_CORE_OPTIONS, path);
+		snprintf(done, sizeof(done), "%s/core-option-updates", ra_dir);
+		apply_core_option_updates(path, done);
+	}
 	apply_boot_options(path, session.settings.boot_screens);
 	snprintf(path, sizeof(path), "%s/config/global.glslp", ra_dir);
 	(void)seed_file(DEFAULT_SHADER_PRESET, path);
@@ -2418,7 +3244,7 @@ static const char *launch(const char *game, const char *mode)
 	}
 	if (pid == 0) {
 		char cfg[PATH_MAX];
-		char *argv[16] = {
+		char *argv[24] = {
 			(char *)RETROARCH_BIN, (char *)"--config", cfg,
 			(char *)"--appendconfig", (char *)SESSION_CFG,
 			/* "" disables RetroArch's automatic shader presets. */
@@ -2429,6 +3255,14 @@ static const char *launch(const char *game, const char *mode)
 		if (entry_arg[0]) {
 			argv[argc++] = (char *)"--entryslot";
 			argv[argc++] = entry_arg;
+		}
+		if (!strcmp(net, "host")) {
+			argv[argc++] = (char *)"--host";
+		} else if (net_address[0]) {
+			argv[argc++] = (char *)"--connect";
+			argv[argc++] = net_address;
+			argv[argc++] = (char *)"--port";
+			argv[argc++] = net_port;
 		}
 		argv[argc++] = (char *)"-L";
 		argv[argc++] = core_path;
@@ -2459,8 +3293,12 @@ static const char *launch(const char *game, const char *mode)
 		setenv("WAYLAND_DISPLAY", "wayland-0", 1);
 		setenv("PIPEWIRE_RUNTIME_DIR", PIPEWIRE_RUNTIME, 1);
 		setenv("LANG", "C.UTF-8", 1);
-		if (overscan)
-			setenv("NUUBOS_RA_OVERSCAN_X", "1", 1);
+		if (overscan > 0) {
+			char pct[16];
+
+			snprintf(pct, sizeof(pct), "%d", overscan);
+			setenv("NUUBOS_RA_OVERSCAN_X", pct, 1);
+		}
 		if (render_height > 0) {
 			char lines[16];
 
@@ -2487,10 +3325,20 @@ static const char *launch(const char *game, const char *mode)
 	session.overlay_tick_ms = monotonic_ms() + OVERLAY_TICK_MS;
 	session.fast_forward = false;
 	session.started_ms = monotonic_ms();
-	log_msg("emud: launch game=%s system=%s core=%s pid=%d user=%s start=%d shader=%s render=%d hardcore=%d",
+	copy_text(session.net_launch, sizeof(session.net_launch), net_address[0] ? "connect" : net);
+	/* The user's cheats for the game (never with netplay or hardcore). */
+	if (!cheats_blocked() && overrides.cheats[0]) {
+		struct cheat_list lists[MAX_CHEAT_LISTS];
+		int count = cheat_lists(session.system, session.rom, lists);
+		char file[PATH_MAX];
+
+		current_cheat_file(&overrides, lists, count, file, sizeof(file));
+		apply_session_cheats(&overrides, file);
+	}
+	log_msg("emud: launch game=%s system=%s core=%s pid=%d user=%s start=%d shader=%s render=%d hardcore=%d net=%s cheats=%d",
 		session.game, session.system, session.core, (int)pid,
 		session.user, start, shader[0] ? shader : "none", render_height,
-		session.hardcore ? 1 : 0);
+		session.hardcore ? 1 : 0, net[0] ? net : "-", session.cheats_on);
 	library_session("SESSION_BEGIN", session.game);
 	notify_subscribers();
 	return NULL;
@@ -2567,6 +3415,10 @@ static void child_exited(int status)
 	bool failed = (WIFEXITED(status) && WEXITSTATUS(status) != 0) ||
 		      WIFSIGNALED(status);
 	int power_client = session.power_client;
+	/* Host Game: the same game again, from the progress its quit just
+	 * saved, as a netplay host. */
+	bool relaunch = session.relaunch_host && !failed && power_client < 0;
+	char game[sizeof(session.game)];
 
 	log_msg("emud: retroarch exited pid=%d status=%d after %lld ms",
 		(int)session.pid, status, ran);
@@ -2579,7 +3431,17 @@ static void child_exited(int status)
 	if (session.shot_fd > 0)
 		notify_screenshot(false);
 	restore_user_keys();
+	copy_text(game, sizeof(game), session.game);
 	reset_session();
+	if (relaunch) {
+		const char *error = launch(game, "resume", "host");
+
+		if (!error)
+			return;
+		log_msg("emud: host relaunch of %s refused: %s", game, error);
+		reset_session();
+		notify_failed("start");
+	}
 	notify_subscribers();
 	if (power_client >= 0 && clients[power_client].fd >= 0)
 		reply(&clients[power_client], "OK\n");
@@ -2613,6 +3475,8 @@ static int session_timeout_ms(void)
 		deadline = session.quit_deadline_ms;
 	if (session.shot_fd > 0 && (deadline < 0 || session.shot_deadline_ms < deadline))
 		deadline = session.shot_deadline_ms;
+	if (discovery.fd >= 0 && (deadline < 0 || discovery.deadline_ms < deadline))
+		deadline = discovery.deadline_ms;
 	if (session.state == SESSION_RUNNING && session.settings.overlay &&
 	    (deadline < 0 || session.overlay_tick_ms < deadline))
 		deadline = session.overlay_tick_ms;
@@ -2623,12 +3487,16 @@ static int session_timeout_ms(void)
 	return deadline - now > INT_MAX ? INT_MAX : (int)(deadline - now);
 }
 
+static void finish_discovery(void);
+
 static void session_timers(void)
 {
 	long long now = monotonic_ms();
 
 	if (session.shot_fd > 0 && now >= session.shot_deadline_ms)
 		finish_screenshot(false);
+	if (discovery.fd >= 0 && now >= discovery.deadline_ms)
+		finish_discovery();
 	/* Performance overlay: ask RetroArch for its frame rate; the reply
 	 * updates the snapshot the Quick Menu draws from. Not while paused
 	 * (the Quick Menu hides the overlay then). */
@@ -2877,6 +3745,189 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 	reply(c, save_overrides(user, fields[0], &o) == 0 ? "OK\n" : "ERR storage\n");
 }
 
+/* Cheats are refused in hardcore mode and with netplay. */
+static const char *cheats_blocked(void)
+{
+	if (session.hardcore)
+		return "hardcore";
+	if (session.net_launch[0] || session.netplay != NET_OFF)
+		return "netplay";
+	return NULL;
+}
+
+/* CHEATS: the running game's cheat lists and the cheats of the current
+ * one: "available=0|1", "reason=" (hardcore|netplay), "file=<path>",
+ * "list=<path>\t<name>" per list, "cheat=<k>\t<0|1>\t<description>" per
+ * cheat, "end=1". */
+static void handle_cheats(struct client *c)
+{
+	struct cheat_list lists[MAX_CHEAT_LISTS];
+	struct game_overrides o;
+	char file[PATH_MAX];
+	char line[2048];
+	const char *blocked = cheats_blocked();
+	int count;
+	int total = 0;
+	bool *seen = NULL;
+	FILE *fp;
+
+	if (!running(c))
+		return;
+	count = cheat_lists(session.system, session.rom, lists);
+	load_overrides(session.user, session.game, &o);
+	current_cheat_file(&o, lists, count, file, sizeof(file));
+	snprintf(line, sizeof(line), "available=%d\nreason=%s\nfile=%s\n", blocked ? 0 : 1,
+		 blocked ? blocked : "", file);
+	if (write_all(c->fd, line, strlen(line)) != 0)
+		goto gone;
+	for (int i = 0; i < count; i++) {
+		snprintf(line, sizeof(line), "list=%s\t%s\n", lists[i].path, lists[i].name);
+		if (write_all(c->fd, line, strlen(line)) != 0)
+			goto gone;
+	}
+	if (file[0] && (fp = fopen(file, "r"))) {
+		char buf[1024];
+
+		while (fgets(buf, sizeof(buf), fp))
+			if (sscanf(buf, " cheats = %d", &total) == 1 || sscanf(buf, " cheats = \"%d\"", &total) == 1)
+				break;
+		/* A list of at most 1000 cheats is shown. */
+		if (total > 1000)
+			total = 1000;
+		if (total > 0)
+			seen = calloc((size_t)total, sizeof(*seen));
+		rewind(fp);
+		while (seen && fgets(buf, sizeof(buf), fp)) {
+			int k;
+			char *field = cheat_line(buf, &k);
+			char *desc;
+			char *end;
+			char key[16];
+
+			if (!field || strncmp(field, "desc", 4) || k >= total || seen[k] ||
+			    !(desc = strchr(field, '"')))
+				continue;
+			desc++;
+			trim(desc);
+			if ((end = strrchr(desc, '"')))
+				*end = '\0';
+			for (char *q = desc; *q; q++)
+				if (*q == '\t' || (unsigned char)*q < 0x20)
+					*q = ' ';
+			if (strlen(desc) > 120)
+				desc[120] = '\0';
+			seen[k] = true;
+			snprintf(key, sizeof(key), "%d", k);
+			snprintf(line, sizeof(line), "cheat=%d\t%d\t%s\n", k, list_has(o.cheats, key) ? 1 : 0, desc);
+			if (write_all(c->fd, line, strlen(line)) != 0) {
+				fclose(fp);
+				free(seen);
+				goto gone;
+			}
+		}
+		fclose(fp);
+		/* Cheats without a description still count. */
+		for (int k = 0; seen && k < total; k++) {
+			char key[16];
+
+			if (seen[k])
+				continue;
+			snprintf(key, sizeof(key), "%d", k);
+			snprintf(line, sizeof(line), "cheat=%d\t%d\t\n", k, list_has(o.cheats, key) ? 1 : 0);
+			if (write_all(c->fd, line, strlen(line)) != 0) {
+				free(seen);
+				goto gone;
+			}
+		}
+		free(seen);
+	}
+	if (write_all(c->fd, "end=1\n", 6) == 0)
+		return;
+gone:
+	close_client(c);
+}
+
+/* CHEAT_SET <k> <0|1>: turns cheat k of the current list on or off for
+ * the running game (kept for the user and the game), applied at once.
+ * CHEAT_FILE <path>: picks another of the game's lists (its cheats start
+ * off). */
+static void handle_cheat_change(struct client *c, const char *verb, char *arg)
+{
+	struct cheat_list lists[MAX_CHEAT_LISTS];
+	struct game_overrides o;
+	char file[PATH_MAX];
+	const char *blocked;
+	int count;
+
+	if (!running(c))
+		return;
+	if ((blocked = cheats_blocked())) {
+		char text[32];
+
+		snprintf(text, sizeof(text), "ERR %s\n", blocked);
+		reply(c, text);
+		return;
+	}
+	count = cheat_lists(session.system, session.rom, lists);
+	load_overrides(session.user, session.game, &o);
+	if (!strcmp(verb, "CHEAT_FILE")) {
+		bool known = false;
+
+		for (int i = 0; i < count && !known; i++)
+			known = !strcmp(lists[i].path, arg);
+		if (!known) {
+			reply(c, "ERR list\n");
+			return;
+		}
+		copy_text(o.cheat_file, sizeof(o.cheat_file), arg);
+		o.cheats[0] = '\0';
+	} else {
+		char *value = strchr(arg, '\t');
+		char *end;
+		long k = strtol(arg, &end, 10);
+		char list[sizeof(o.cheats)];
+		char *save = NULL;
+		char key[16];
+		size_t len = 0;
+
+		if (value)
+			*value++ = '\0';
+		current_cheat_file(&o, lists, count, file, sizeof(file));
+		if (*end || k < 0 || k >= 1000 || !value || (strcmp(value, "0") && strcmp(value, "1"))) {
+			reply(c, "ERR args\n");
+			return;
+		}
+		if (!file[0]) {
+			reply(c, "ERR none\n");
+			return;
+		}
+		/* The list the cheats belong to is kept with them. */
+		copy_text(o.cheat_file, sizeof(o.cheat_file), file);
+		snprintf(key, sizeof(key), "%ld", k);
+		copy_text(list, sizeof(list), o.cheats);
+		o.cheats[0] = '\0';
+		for (char *w = strtok_r(list, ",", &save); w; w = strtok_r(NULL, ",", &save)) {
+			if (!strcmp(w, key))
+				continue;
+			len += (size_t)snprintf(o.cheats + len, sizeof(o.cheats) - len, "%s%s", len ? "," : "", w);
+		}
+		if (!strcmp(value, "1")) {
+			if (len + strlen(key) + 2 >= sizeof(o.cheats)) {
+				reply(c, "ERR full\n");
+				return;
+			}
+			snprintf(o.cheats + len, sizeof(o.cheats) - len, "%s%s", len ? "," : "", key);
+		}
+	}
+	if (save_overrides(session.user, session.game, &o) != 0) {
+		reply(c, "ERR storage\n");
+		return;
+	}
+	current_cheat_file(&o, lists, count, file, sizeof(file));
+	apply_session_cheats(&o, file);
+	reply(c, "OK\n");
+}
+
 /* SETTINGS (key, value NULL) lists the active user's settings; SET key
  * value changes one. Hotkeys and the overlay follow at once in a running
  * game of that user; the rest applies at the next launch. */
@@ -2992,10 +4043,167 @@ static void handle_states(struct client *c, const char *game)
 		close_client(c);
 }
 
+/* ------------------------------------------------------------------ */
+/* Netplay hosts on the local network                                  */
+/* ------------------------------------------------------------------ */
+
+/* RetroArch's LAN discovery: a "RANQ" broadcast to the netplay port, each
+ * host answers with this packet (network/netplay/netplay_frontend.c). */
+#define DISCOVERY_QUERY 0x52414E51u
+#define DISCOVERY_RESPONSE 0x52414E53u
+struct ad_packet {
+	uint32_t header;
+	int32_t content_crc;
+	int32_t port;
+	uint32_t has_password;
+	char nick[32];
+	char frontend[32];
+	char core[32];
+	char core_version[32];
+	char retroarch_version[32];
+	char content[256];
+	char subsystem_name[256];
+};
+
+static void start_discovery(struct client *c)
+{
+	if (discovery.fd < 0) {
+		struct sockaddr_in to;
+		uint32_t query = htonl(DISCOVERY_QUERY);
+		int on = 1;
+		int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+
+		memset(&to, 0, sizeof(to));
+		to.sin_family = AF_INET;
+		to.sin_port = htons(NETPLAY_PORT);
+		to.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+		if (fd < 0 || setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)) != 0 ||
+		    sendto(fd, &query, sizeof(query), 0, (struct sockaddr *)&to, sizeof(to)) !=
+			    (ssize_t)sizeof(query)) {
+			if (fd >= 0)
+				close(fd);
+			reply(c, "ERR network\n");
+			return;
+		}
+		memset(discovery.waiting, 0, sizeof(discovery.waiting));
+		discovery.fd = fd;
+		discovery.count = 0;
+		discovery.deadline_ms = monotonic_ms() + DISCOVERY_MS;
+	}
+	discovery.waiting[c - clients] = true;
+}
+
+static void process_discovery(void)
+{
+	struct ad_packet ad;
+	struct sockaddr_in from;
+	socklen_t len = sizeof(from);
+	ssize_t n;
+
+	while ((n = recvfrom(discovery.fd, &ad, sizeof(ad), 0, (struct sockaddr *)&from, &len)) >= 0) {
+		char address[INET_ADDRSTRLEN];
+		int port = (int)ntohl((uint32_t)ad.port);
+		bool known = false;
+
+		len = sizeof(from);
+		if (n != (ssize_t)sizeof(ad) || ntohl(ad.header) != DISCOVERY_RESPONSE ||
+		    from.sin_family != AF_INET || port < 1 || port > 65535 ||
+		    !inet_ntop(AF_INET, &from.sin_addr, address, sizeof(address)))
+			continue;
+		for (int i = 0; i < discovery.count && !known; i++)
+			known = !strcmp(discovery.hosts[i].address, address) && discovery.hosts[i].port == port;
+		if (known || discovery.count >= (int)(sizeof(discovery.hosts) / sizeof(discovery.hosts[0])))
+			continue;
+		ad.nick[sizeof(ad.nick) - 1] = '\0';
+		ad.core[sizeof(ad.core) - 1] = '\0';
+		ad.content[sizeof(ad.content) - 1] = '\0';
+		copy_text(discovery.hosts[discovery.count].address, INET_ADDRSTRLEN, address);
+		discovery.hosts[discovery.count].port = port;
+		discovery.hosts[discovery.count].password = ntohl(ad.has_password) & 1;
+		copy_text(discovery.hosts[discovery.count].nick, 32, ad.nick);
+		copy_text(discovery.hosts[discovery.count].core, 32, ad.core);
+		copy_text(discovery.hosts[discovery.count].content, 256, ad.content);
+		discovery.count++;
+	}
+}
+
+/* Text safe for one tab separated field. */
+static void field_safe(char *text)
+{
+	for (char *p = text; *p; p++)
+		if (*p == '\t' || (unsigned char)*p < 0x20)
+			*p = ' ';
+}
+
+/* NETPLAY_HOSTS answer, once the hosts had DISCOVERY_MS to reply:
+ * "host=<address>\t<port>\t<nick>\t<emulator name>\t<content file>\t
+ * <game id>\t<system>\t<our core>\t<password 0|1>" per host ("" game: not
+ * in this library; "" core: the host's emulator is not on this console),
+ * then "end=1". */
+static void finish_discovery(void)
+{
+	char out[8192];
+	size_t len = 0;
+
+	if (discovery.fd >= 0)
+		process_discovery();
+	for (int i = 0; i < discovery.count; i++) {
+		char command[300];
+		char answer[256] = "";
+		char game[32] = "";
+		char system[64] = "";
+		char core[64] = "";
+		char *tab;
+
+		field_safe(discovery.hosts[i].nick);
+		field_safe(discovery.hosts[i].core);
+		field_safe(discovery.hosts[i].content);
+		snprintf(command, sizeof(command), "MATCH\t%s", discovery.hosts[i].content);
+		if (library_request(command, answer, sizeof(answer)) == 0 &&
+		    !strncmp(answer, "OK ", 3) && (tab = strchr(answer + 3, '\t'))) {
+			char cores[512];
+			char *save = NULL;
+
+			*tab = '\0';
+			copy_text(game, sizeof(game), answer + 3);
+			copy_text(system, sizeof(system), tab + 1);
+			/* Netplay needs the host's emulator (its core name). */
+			available_cores(system, cores, sizeof(cores));
+			for (char *name = strtok_r(cores, ",", &save); name && !core[0];
+			     name = strtok_r(NULL, ",", &save)) {
+				char corename[64];
+
+				core_info_value(name, "corename", corename, sizeof(corename));
+				if (corename[0] && !strcasecmp(corename, discovery.hosts[i].core))
+					copy_text(core, sizeof(core), name);
+			}
+		}
+		len += (size_t)snprintf(out + len, sizeof(out) - len,
+					"host=%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
+					discovery.hosts[i].address, discovery.hosts[i].port,
+					discovery.hosts[i].nick, discovery.hosts[i].core,
+					discovery.hosts[i].content, game, system, core,
+					discovery.hosts[i].password ? 1 : 0);
+		if (len >= sizeof(out) - 16)
+			break;
+	}
+	len += (size_t)snprintf(out + len, sizeof(out) - len, "end=1\n");
+	if (discovery.fd >= 0)
+		close(discovery.fd);
+	discovery.fd = -1;
+	for (int i = 0; i < MAX_CLIENTS; i++) {
+		if (!discovery.waiting[i])
+			continue;
+		discovery.waiting[i] = false;
+		if (clients[i].fd >= 0 && write_all(clients[i].fd, out, len) != 0)
+			close_client(&clients[i]);
+	}
+}
+
 static void handle_command(struct client *c, char *line)
 {
 	char *arg = strchr(line, '\t');
-	char status[512];
+	char status[768];
 
 	trim(line);
 	if (arg)
@@ -3014,11 +4222,15 @@ static void handle_command(struct client *c, char *line)
 			close_client(c);
 	} else if (!strcmp(line, "LAUNCH") && arg) {
 		char *mode = strchr(arg, '\t');
+		char *net = NULL;
 		const char *error;
 
-		if (mode)
+		if (mode) {
 			*mode++ = '\0';
-		error = launch(arg, mode);
+			if ((net = strchr(mode, '\t')))
+				*net++ = '\0';
+		}
+		error = launch(arg, mode, net);
 
 		if (error) {
 			char text[64];
@@ -3108,6 +4320,40 @@ static void handle_command(struct client *c, char *line)
 			return;
 		request_quit();
 		reply(c, "OK\n");
+	} else if (!strcmp(line, "CHEATS")) {
+		handle_cheats(c);
+	} else if ((!strcmp(line, "CHEAT_SET") || !strcmp(line, "CHEAT_FILE")) && arg) {
+		handle_cheat_change(c, line, arg);
+	} else if (!strcmp(line, "NETPLAY_HOST")) {
+		/* Host Game over a running game: it closes (its progress saved
+		 * like at every quit) and starts again from there as a host. */
+		if (!running(c))
+			return;
+		if (session.hardcore) {
+			notify_hardcore();
+			reply(c, "ERR hardcore\n");
+			return;
+		}
+		if (session.net_launch[0] || session.netplay != NET_OFF) {
+			reply(c, "ERR busy\n");
+			return;
+		}
+		session.relaunch_host = true;
+		request_quit();
+		reply(c, "OK\n");
+	} else if (!strcmp(line, "NETPLAY_STOP")) {
+		/* Stop hosting or leave the host; the game goes on alone. */
+		if (!running(c))
+			return;
+		if (!session.net_launch[0] && session.netplay == NET_OFF) {
+			reply(c, "ERR netplay\n");
+			return;
+		}
+		ra_command("SET_PAUSED 0");
+		ra_command("NETPLAY_STOP");
+		reply(c, "OK\n");
+	} else if (!strcmp(line, "NETPLAY_HOSTS")) {
+		start_discovery(c);
 	} else if (!strcmp(line, "SCREENSHOT")) {
 		if (!running(c))
 			return;
@@ -3278,10 +4524,11 @@ int main(void)
 		fclose(pid_fp);
 	}
 	log_msg("emud: started pid=%ld", (long)getpid());
+	sync_low_latency(); /* a mark left by a crashed emud */
 
 	while (!stop_requested) {
-		struct pollfd pfd[6 + MAX_CLIENTS];
-		int who[6 + MAX_CLIENTS];
+		struct pollfd pfd[7 + MAX_CLIENTS];
+		int who[7 + MAX_CLIENTS];
 		nfds_t count = 0;
 		int rc;
 
@@ -3304,6 +4551,10 @@ int main(void)
 		if (session.shot_fd > 0) {
 			pfd[count] = (struct pollfd){ session.shot_fd, POLLIN, 0 };
 			who[count++] = -6;
+		}
+		if (discovery.fd >= 0) {
+			pfd[count] = (struct pollfd){ discovery.fd, POLLIN, 0 };
+			who[count++] = -7;
 		}
 		for (int i = 0; i < MAX_CLIENTS; i++) {
 			if (clients[i].fd < 0)
@@ -3344,6 +4595,10 @@ int main(void)
 			case -6:
 				if (session.shot_fd > 0)
 					process_shot_watch();
+				break;
+			case -7:
+				if (discovery.fd >= 0)
+					process_discovery();
 				break;
 			default:
 				if (clients[who[i]].fd >= 0)

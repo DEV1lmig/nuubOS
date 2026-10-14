@@ -43,6 +43,8 @@ struct Host {
     paired: bool,
     online: String,
     probing: bool,
+    wol: bool,
+    waking: bool,
 }
 
 /* nuubos-streamd snapshot (Moonlight and Steam Link). */
@@ -132,6 +134,8 @@ fn parse(text: &str) -> Snapshot {
                         paired: f[3] == "1",
                         online: f[4].into(),
                         probing: f[6] == "1",
+                        wol: f.get(7) == Some(&"1"),
+                        waking: f.get(8) == Some(&"1"),
                     });
                 }
             }
@@ -154,14 +158,25 @@ fn host_entry(h: &Host) -> MoonlightHostEntry {
         paired: h.paired,
         online: h.online.clone().into(),
         probing: h.probing,
+        wol: h.wol,
+        waking: h.waking,
     }
+}
+
+/* PC page (41): Wake PC is the first action while a PC that can be woken
+ * is off (and while it wakes). */
+pub(crate) fn wake_shown(host: &MoonlightHostEntry) -> bool {
+    host.wol && (host.waking || host.online == "offline")
 }
 
 fn row_count(ui: &HomeWindow) -> i32 {
     match ui.get_settings_view() {
         40 => ui.get_moonlight_hosts().row_count() as i32 + 3,
-        41 if ui.get_moonlight_host().paired => ui.get_moonlight_apps().row_count() as i32 + 1,
-        41 => 2,
+        41 => {
+            let host = ui.get_moonlight_host();
+            let wake = wake_shown(&host) as i32;
+            if host.paired { ui.get_moonlight_apps().row_count() as i32 + 1 + wake } else { 2 + wake }
+        }
         42 => SETTINGS_ROWS,
         _ => 0,
     }
@@ -223,10 +238,16 @@ fn apply(ui: &HomeWindow, s: &Snapshot) {
     if !selected.is_empty() {
         match s.hosts.iter().find(|h| h.id == selected) {
             Some(h) => {
-                let was_paired = ui.get_moonlight_host().paired;
+                let before = ui.get_moonlight_host();
                 ui.set_moonlight_host(host_entry(h));
-                if ui.get_settings_view() == 41 && h.paired && !was_paired {
+                if ui.get_settings_view() == 41 && h.paired && !before.paired {
                     /* Just paired: show its applications. */
+                    ui.set_moonlight_index(0);
+                    send(format!("APPS\t{}", h.id));
+                } else if ui.get_settings_view() == 41 && h.paired && h.online == "online"
+                    && before.online != "online" && s.apps.is_empty()
+                {
+                    /* Just woken (or back on the network): its applications. */
                     ui.set_moonlight_index(0);
                     send(format!("APPS\t{}", h.id));
                 }
@@ -548,6 +569,16 @@ pub fn handle_action(ui: &HomeWindow, action: &str, settings_active: &Arc<Atomic
         }
         41 => {
             let host = ui.get_moonlight_host();
+            let wake = wake_shown(&host) as i32;
+            let first_action = if host.paired { ui.get_moonlight_apps().row_count() as i32 } else { 0 };
+            if wake == 1 && index == first_action {
+                if !host.waking {
+                    send(format!("WAKE\t{}", host.id));
+                }
+                return;
+            }
+            /* The rows after Wake PC as without it. */
+            let index = if index > first_action { index - wake } else { index };
             let remove_row = if host.paired { ui.get_moonlight_apps().row_count() as i32 } else { 1 };
             if index == remove_row {
                 if ui.get_moonlight_remove_confirm() {

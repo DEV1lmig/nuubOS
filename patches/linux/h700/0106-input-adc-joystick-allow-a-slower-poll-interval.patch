@@ -1,0 +1,27 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] input: adc-joystick: allow a slower poll interval
+
+The input poller caps /sys/class/input/inputN/poll at the interval set
+by the driver, so the 4 ms of the H700 device trees could not be raised
+while a menu is shown: 250 polls/s, each a GPADC conversion and a
+wakeup, kept the CPU switching between OPPs at idle (CubeXX: 500 GPADC
+IRQs and ~1300 kworker wakeups per second). Allow up to 100 ms; the
+device-tree value stays the default and 0 still stops polling.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/drivers/input/joystick/adc-joystick.c
++++ b/drivers/input/joystick/adc-joystick.c
+@@ -281,6 +281,12 @@
+ 	if (poll_interval != 0) {
+ 		input_setup_polling(input, adc_joystick_poll);
+ 		input_set_poll_interval(input, poll_interval);
++		/*
++		 * Let userspace slow the poller down (or stop it with 0) while
++		 * nothing needs the device-tree rate, e.g. menus instead of
++		 * games: by default the maximum equals the device-tree value.
++		 */
++		input_set_max_poll_interval(input, max(poll_interval, 100U));
+ 	} else {
+ 		input->open = adc_joystick_open;
+ 		input->close = adc_joystick_close;

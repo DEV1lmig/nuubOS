@@ -1,0 +1,201 @@
+From: nuubOS <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS CHEATS_LOAD and NETPLAY_STOP commands, netplay events
+
+nuubOS manages cheats and netplay with its own controller-first UI
+through nuubos-emud, which drives RetroArch on the stdin command
+interface.
+
+- CHEATS_LOAD <file>: replaces the session's cheats with the ones of a
+  .cht file written by the session manager (the user's choice per game)
+  and applies them; an empty argument clears them. Replies
+  "CHEATS_LOAD OK|FAILED". Refused while netplay runs and in hardcore
+  mode.
+- NETPLAY_STOP: stops hosting or leaves the host (the netplay host
+  toggle hotkey is an input bit that a paused game may never see).
+  Replies "NETPLAY_STOP OK|FAILED".
+- Netplay state changes are written as unsolicited lines on the command
+  interface's output: "NETPLAY hosting", "NETPLAY joined <nick>",
+  "NETPLAY left <nick>", "NETPLAY connected <host nick>",
+  "NETPLAY disconnected", "NETPLAY failed", "NETPLAY off".
+
+Upstream-Status: Inappropriate [nuubOS session manager integration]
+---
+--- a/command.c
++++ b/command.c
+@@ -20,6 +20,7 @@
+ #include <stdlib.h>
+ #include <stddef.h>
+ #include <locale.h>
++#include <stdarg.h>
+ #ifdef HAVE_NETWORKING
+ #include <net/net_compat.h>
+ #include <net/net_socket.h>
+@@ -837,6 +838,85 @@
+    return true;
+ }
+ 
++/* nuubOS: the session's cheats are a file the session manager writes
++ * (the user's choice per game, cheatN_enable). Replaces every cheat of
++ * the session with the file's and applies them; an empty argument clears
++ * them. Refused while netplay runs (RetroArch never allows cheats then)
++ * and in hardcore mode (applying would leave it). */
++bool command_cheats_load(command_t *cmd, const char *arg)
++{
++   char reply[64];
++   size_t _len;
++   bool ret = true;
++
++#ifdef HAVE_CHEATS
++#ifdef HAVE_NETWORKING
++   if (netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_DATA_INITED, NULL))
++      ret = false;
++#endif
++#ifdef HAVE_CHEEVOS
++   if (rcheevos_hardcore_active())
++      ret = false;
++#endif
++   if (ret)
++   {
++      cheat_manager_state_free();
++      cheat_manager_alloc_if_empty();
++      if (!string_is_empty(arg))
++         ret = cheat_manager_load(arg, true);
++      /* Also clears the core's cheats when none is left. */
++      cheat_manager_apply_cheats(false);
++   }
++#else
++   ret = false;
++#endif
++   _len = snprintf(reply, sizeof(reply), "CHEATS_LOAD %s\n",
++         ret ? "OK" : "FAILED");
++   cmd->replier(cmd, reply, _len);
++   return ret;
++}
++
++/* nuubOS: ends the session's netplay (stops hosting, or leaves the host);
++ * the game goes on alone. Replies "NETPLAY_STOP OK|FAILED". */
++bool command_netplay_stop(command_t *cmd, const char *arg)
++{
++   char reply[64];
++   size_t _len;
++   bool ret = false;
++
++#ifdef HAVE_NETWORKING
++   if (netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_ENABLED, NULL))
++      ret = command_event(CMD_EVENT_NETPLAY_DISCONNECT, NULL);
++#endif
++   _len = snprintf(reply, sizeof(reply), "NETPLAY_STOP %s\n",
++         ret ? "OK" : "FAILED");
++   cmd->replier(cmd, reply, _len);
++   return ret;
++}
++
++/* nuubOS: an unsolicited line for the session manager on the stdin
++ * command interface's output ("NETPLAY joined <nick>"...). */
++void command_nuubos_event(const char *fmt, ...)
++{
++   char line[256];
++   va_list ap;
++   int n;
++   settings_t *settings = config_get_ptr();
++
++   if (!settings || !settings->bools.stdin_cmd_enable)
++      return;
++   va_start(ap, fmt);
++   n = vsnprintf(line, sizeof(line) - 1, fmt, ap);
++   va_end(ap);
++   if (n <= 0)
++      return;
++   if ((size_t)n > sizeof(line) - 2)
++      n = (int)sizeof(line) - 2;
++   line[n++] = '\n';
++   fwrite(line, 1, (size_t)n, stdout);
++   fflush(stdout);
++}
++
+ bool command_play_replay_slot(command_t *cmd, const char *arg)
+ {
+ #ifdef HAVE_BSV_MOVIE
+--- a/command.h
++++ b/command.h
+@@ -403,6 +403,9 @@
+       bool show_hidden_files
+       );
+ 
++/* nuubOS: unsolicited line on the stdin command interface's output. */
++void command_nuubos_event(const char *fmt, ...);
++
+ #if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+ bool command_set_shader(command_t *cmd, const char *arg);
+ #endif
+@@ -431,6 +434,8 @@
+ bool command_set_paused(command_t *cmd, const char* arg);
+ bool command_get_fps(command_t *cmd, const char* arg);
+ bool command_osd_text(command_t *cmd, const char* arg);
++bool command_cheats_load(command_t *cmd, const char* arg);
++bool command_netplay_stop(command_t *cmd, const char* arg);
+ bool command_play_replay_slot(command_t *cmd, const char* arg);
+ bool command_seek_replay(command_t *cmd, const char *arg);
+ bool command_save_savefiles(command_t *cmd, const char* arg);
+@@ -465,6 +470,8 @@
+    { "SET_PAUSED",     command_set_paused,      "<0|1>"},
+    { "GET_FPS",        command_get_fps,         "No argument"},
+    { "OSD_TEXT",       command_osd_text,        "<text>"},
++   { "CHEATS_LOAD",    command_cheats_load,     "<cheat file>"},
++   { "NETPLAY_STOP",   command_netplay_stop,    "No argument"},
+    { "PLAY_REPLAY_SLOT",command_play_replay_slot, "<slot number>"},
+    { "SEEK_REPLAY",command_seek_replay, "<frame number>"},
+ 
+--- a/network/netplay/netplay_frontend.c
++++ b/network/netplay/netplay_frontend.c
+@@ -1170,9 +1170,11 @@
+ 
+       /* Send them the savestate */
+       netplay->force_send_savestate = true;
++      command_nuubos_event("NETPLAY joined %s", connection->nick);
+    }
+    else
+    {
++      command_nuubos_event("NETPLAY connected %s", connection->nick);
+       _len  = strlcpy(msg, msg_hash_to_str(MSG_CONNECTED_TO),
+             sizeof(msg));
+       _len += snprintf(msg + _len, sizeof(msg) - _len, ": \"%s\"",
+@@ -4194,6 +4196,12 @@
+    was_playing = connection->mode == NETPLAY_CONNECTION_PLAYING ||
+       connection->mode == NETPLAY_CONNECTION_SLAVE;
+ 
++   /* nuubOS: the session manager follows the peers. */
++   if (netplay->is_server)
++      command_nuubos_event("NETPLAY left %s", connection->nick);
++   else
++      command_nuubos_event("NETPLAY disconnected");
++
+    /* Report this disconnection */
+    if (netplay->is_server)
+    {
+@@ -9199,6 +9207,7 @@
+          netplay->next_announce =
+             cpu_features_get_time_usec() + NETPLAY_ANNOUNCE_AFTER;
+ 
++      command_nuubos_event("NETPLAY hosting");
+       _msg = msg_hash_to_str(MSG_WAITING_FOR_CLIENT);
+       runloop_msg_queue_push(_msg, strlen(_msg), 0, 180, false, NULL,
+          MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+@@ -9232,6 +9241,7 @@
+                     | NET_DRIVER_ST_FLAG_NETPLAY_CLIENT_DEFERRED);
+    deinit_netplay();
+ 
++   command_nuubos_event("NETPLAY failed");
+    {
+       const char *_msg = msg_hash_to_str(MSG_NETPLAY_FAILED);
+       RARCH_ERR("[Netplay] %s\n", _msg);
+--- a/retroarch.c
++++ b/retroarch.c
+@@ -5002,6 +5002,7 @@
+ 
+             netplay_driver_ctl(RARCH_NETPLAY_CTL_DISCONNECT, NULL);
+             netplay_driver_ctl(RARCH_NETPLAY_CTL_DISABLE, NULL);
++            command_nuubos_event("NETPLAY off");
+ 
+ #ifdef HAVE_REWIND
+             /* Re-enable rewind if it was enabled

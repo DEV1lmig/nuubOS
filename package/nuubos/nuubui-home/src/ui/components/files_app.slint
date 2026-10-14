@@ -1,0 +1,280 @@
+import { Theme, Shape } from "../theme.slint";
+import { MarqueeText } from "marquee.slint";
+
+/* Files application (EPIC-031/036), redesigned 2026-10-12 on user request
+ * as a two-pane commander: a dense tool, nothing like Media. Each pane
+ * shows the places (storage, USB drives, network shares) or a folder;
+ * copy/move go from the active pane to the other one. filesui.rs owns the
+ * state and every operation goes through nuubos-filesctl. */
+
+/* icon: 0 folder, 1 file, 2 image, 3 audio, 4 video, 5 archive, 6 drive,
+ * 7 sd card, 8 usb, 9 network share, 10 add, 11 up (parent), 12 rom,
+ * 13 text. */
+export struct FileRow {
+    name: string,
+    detail: string,
+    icon: int,
+    marked: bool,
+    /* Not reachable right now (a share that is not connected). */
+    dim: bool,
+    /* Places: used fraction of the volume, below 0 = no bar. */
+    usage: float,
+}
+
+export struct FilePane {
+    title: string,
+    path: string,
+    rows: [FileRow],
+    index: int,
+    places: bool,
+    loading: bool,
+}
+
+component FileGlyph inherits Image {
+    in property <int> icon;
+    in property <color> ink;
+    source: root.icon == 0 ? @image-url("../assets/icons/folder.svg")
+        : root.icon == 2 ? @image-url("../assets/icons/image.svg")
+        : root.icon == 3 ? @image-url("../assets/icons/music.svg")
+        : root.icon == 4 ? @image-url("../assets/icons/film.svg")
+        : root.icon == 5 ? @image-url("../assets/icons/box-archive.svg")
+        : root.icon == 6 ? @image-url("../assets/icons/hard-drive.svg")
+        : root.icon == 7 ? @image-url("../assets/icons/sd-card.svg")
+        : root.icon == 8 ? @image-url("../assets/icons/usb.svg")
+        : root.icon == 9 ? @image-url("../assets/icons/network-wired.svg")
+        : root.icon == 10 ? @image-url("../assets/icons/plus.svg")
+        : root.icon == 11 ? @image-url("../assets/icons/arrow-turn-up.svg")
+        : root.icon == 12 ? @image-url("../assets/icons/gamepad.svg")
+        : root.icon == 14 ? @image-url("../assets/icons/square-check.svg")
+        : @image-url("../assets/icons/file.svg");
+    colorize: root.ink;
+    image-fit: contain;
+}
+
+component FileRowView inherits Rectangle {
+    in property <FileRow> item;
+    in property <bool> focused;
+    in property <bool> active;
+    in property <bool> places;
+    in property <float> s: 1.0;
+
+    property <color> ink: root.focused && root.active ? Theme.on-primary-container
+        : root.item.dim ? Theme.text-disabled : root.item.marked ? Theme.accent-text : Theme.text;
+    property <color> glyph-ink: root.item.marked ? Theme.accent-light
+        : root.item.icon == 0 ? Theme.warning.mix(Theme.text, 0.8)
+        : root.item.icon >= 6 && root.item.icon <= 9 ? Theme.accent-light
+        : Theme.text-dim;
+
+    border-radius: 4px * root.s;
+    background: root.focused && root.active ? Theme.primary-container
+        : root.item.marked ? Theme.accent.mix(Theme.background, 0.2).transparentize(0.6)
+        : #00000000;
+    /* The inactive pane keeps its cursor as an outline. */
+    Rectangle {
+        width: parent.width; height: parent.height;
+        border-radius: parent.border-radius;
+        border-width: root.focused && !root.active ? 1px : 0px;
+        border-color: Theme.outline;
+    }
+    FileGlyph {
+        x: 7px * root.s; y: (parent.height - self.height) / 2;
+        width: (root.places ? 20px : 16px) * root.s; height: self.width;
+        icon: root.item.marked ? 14 : root.item.icon;
+        ink: root.focused && root.active ? Theme.on-primary-container : root.glyph-ink;
+    }
+    MarqueeText {
+        x: (root.places ? 40px : 32px) * root.s;
+        y: root.places && root.item.detail != "" ? 4px * root.s : 0px;
+        width: parent.width - self.x - (root.places ? 8px * root.s : detail.preferred-width + 14px * root.s);
+        height: root.places && root.item.detail != "" ? 24px * root.s : parent.height;
+        label: root.item.name;
+        text-color: root.ink;
+        text-size: 15px * root.s;
+        text-weight: root.item.icon == 0 || root.places ? 600 : 400;
+        active: root.focused && root.active;
+    }
+    detail := Text {
+        x: root.places ? 40px * root.s : parent.width - self.preferred-width - 8px * root.s;
+        y: root.places ? 27px * root.s : 0px;
+        height: root.places ? 18px * root.s : parent.height;
+        text: root.item.detail;
+        color: root.focused && root.active ? Theme.on-primary-container.transparentize(0.2) : Theme.text-secondary;
+        font-size: 13px * root.s;
+        vertical-alignment: center;
+    }
+    if root.places && root.item.usage >= 0: Rectangle {
+        x: parent.width * 0.62; y: 34px * root.s;
+        width: parent.width * 0.38 - 10px * root.s; height: 5px * root.s;
+        border-radius: self.height / 2;
+        background: Theme.surface-container-highest;
+        Rectangle {
+            x: 0; y: 0; height: parent.height; border-radius: parent.border-radius;
+            width: parent.width * max(0.02, min(1, root.item.usage));
+            background: root.item.usage > 0.9 ? Theme.error : Theme.accent-light;
+        }
+    }
+}
+
+component FilePaneView inherits Rectangle {
+    in property <FilePane> pane;
+    in property <bool> active;
+    in property <float> s: 1.0;
+    in property <string> empty-text;
+    in property <string> loading-text;
+
+    property <length> head-h: 54px * root.s;
+    property <length> row-h: (root.pane.places ? 52px : 32px) * root.s;
+    property <length> list-h: root.height - root.head-h - 4px * root.s;
+    property <length> scroll: max(0px, min(root.pane.index * root.row-h - (root.list-h - root.row-h) / 2,
+        root.pane.rows.length * root.row-h - root.list-h));
+
+    border-radius: 6px * root.s;
+    background: Theme.surface-container-low;
+    clip: true;
+
+    /* Header: where this pane is. */
+    Rectangle {
+        x: 0; y: 0; width: parent.width; height: root.head-h;
+        background: root.active ? Theme.accent.mix(Theme.background, 0.34) : Theme.surface-container;
+        Text {
+            x: 12px * root.s; y: 6px * root.s; width: parent.width - 24px * root.s; height: 22px * root.s;
+            text: root.pane.title;
+            color: root.active ? Theme.accent-text : Theme.text-secondary;
+            font-size: 16px * root.s;
+            font-weight: 700;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        MarqueeText {
+            x: 12px * root.s; y: 29px * root.s; width: parent.width - 24px * root.s; height: 20px * root.s;
+            label: root.pane.path;
+            text-color: root.active ? Theme.accent-text.transparentize(0.25) : Theme.text-secondary;
+            text-size: 13px * root.s;
+            active: root.active;
+        }
+    }
+    Rectangle {
+        y: root.head-h + 2px * root.s; width: parent.width; height: root.list-h;
+        clip: true;
+        Rectangle {
+            y: -root.scroll; width: parent.width; height: root.pane.rows.length * root.row-h;
+            animate y { duration: 120ms; easing: ease-out; }
+            for row[i] in root.pane.rows: Rectangle {
+                x: 3px * root.s; y: i * root.row-h; width: parent.width - 6px * root.s; height: root.row-h - 1px;
+                /* Only rows near the cursor exist: folders can be huge. */
+                if abs(i - root.pane.index) <= ceil(root.list-h / root.row-h) + 1: FileRowView {
+                    width: parent.width; height: parent.height;
+                    item: row;
+                    focused: i == root.pane.index;
+                    active: root.active;
+                    places: root.pane.places;
+                    s: root.s;
+                }
+            }
+        }
+        if root.pane.rows.length == 0: Text {
+            x: 10px * root.s; y: 8px * root.s; width: parent.width - 20px * root.s;
+            text: root.pane.loading ? root.loading-text : root.empty-text;
+            color: Theme.text-secondary;
+            font-size: 14px * root.s;
+            wrap: word-wrap;
+        }
+    }
+    /* Scroll position. */
+    if root.pane.rows.length * root.row-h > root.list-h: Rectangle {
+        x: parent.width - 3px * root.s;
+        y: root.head-h + 2px * root.s + root.list-h * root.scroll / (root.pane.rows.length * root.row-h);
+        width: 2px * root.s;
+        height: max(12px * root.s, root.list-h * root.list-h / (root.pane.rows.length * root.row-h));
+        border-radius: 1px;
+        background: root.active ? Theme.accent-light.transparentize(0.3) : Theme.outline;
+    }
+}
+
+export component FilesApp inherits Rectangle {
+    in property <float> s: 1.0;
+    in property <FilePane> left;
+    in property <FilePane> right;
+    in property <int> active: 0;
+    in property <string> kicker;
+    /* Bottom status: the focused item, the selection, the free space. */
+    in property <string> status;
+    in property <string> status-right;
+    /* A running copy/move: 0..1 (below 0 = none). */
+    in property <float> progress: -1;
+    in property <string> progress-label;
+    in property <string> notice;
+    in property <string> empty-text;
+    in property <string> loading-text;
+    in property <string> sort-label;
+
+    property <length> pad: 10px * root.s;
+    property <length> title-h: 30px * root.s;
+    property <length> status-h: 32px * root.s;
+    property <length> pane-w: (root.width - 2 * root.pad - 6px * root.s) / 2;
+    property <length> pane-h: root.height - root.title-h - root.status-h - root.pad;
+
+    background: Theme.background;
+
+    Text {
+        x: root.pad + 2px * root.s; height: root.title-h;
+        text: root.kicker;
+        color: Theme.accent-light;
+        font-size: 13px * root.s;
+        font-weight: 800;
+        letter-spacing: 1.5px * root.s;
+        vertical-alignment: center;
+    }
+    Text {
+        x: root.width - root.pad - self.preferred-width - 2px * root.s; height: root.title-h;
+        text: root.sort-label;
+        color: Theme.text-secondary;
+        font-size: 13px * root.s;
+        vertical-alignment: center;
+    }
+    FilePaneView {
+        x: root.pad; y: root.title-h; width: root.pane-w; height: root.pane-h;
+        pane: root.left;
+        active: root.active == 0;
+        s: root.s;
+        empty-text: root.empty-text;
+        loading-text: root.loading-text;
+    }
+    FilePaneView {
+        x: root.pad + root.pane-w + 6px * root.s; y: root.title-h; width: root.pane-w; height: root.pane-h;
+        pane: root.right;
+        active: root.active == 1;
+        s: root.s;
+        empty-text: root.empty-text;
+        loading-text: root.loading-text;
+    }
+    /* Status bar; a running copy turns it into a progress bar. */
+    Rectangle {
+        x: root.pad; y: root.height - root.status-h - 2px * root.s;
+        width: root.width - 2 * root.pad; height: root.status-h;
+        border-radius: 4px * root.s;
+        background: Theme.surface-container;
+        clip: true;
+        if root.progress >= 0: Rectangle {
+            x: 0; height: parent.height;
+            width: parent.width * max(0.01, min(1, root.progress));
+            background: Theme.accent.mix(Theme.background, 0.45);
+            animate width { duration: 300ms; easing: ease-out; }
+        }
+        MarqueeText {
+            x: 10px * root.s; width: parent.width - self.x - right-text.preferred-width - 20px * root.s;
+            height: parent.height;
+            label: root.notice != "" ? root.notice : root.progress >= 0 ? root.progress-label : root.status;
+            text-color: root.notice != "" ? Theme.warning : Theme.text-secondary;
+            text-size: 14px * root.s;
+            active: true;
+        }
+        right-text := Text {
+            x: parent.width - self.preferred-width - 10px * root.s; height: parent.height;
+            text: root.status-right;
+            color: Theme.text-secondary;
+            font-size: 14px * root.s;
+            vertical-alignment: center;
+        }
+    }
+}

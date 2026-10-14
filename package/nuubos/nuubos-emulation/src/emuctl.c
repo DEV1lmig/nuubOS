@@ -5,6 +5,7 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +24,8 @@ static void usage(void)
 	fprintf(stderr,
 		"Usage: nuubos-emuctl COMMAND\n"
 		"  status | watch\n"
-		"  launch GAME_ID [resume|new|slot:N]   (slot:-1 = automatic state)\n"
+		"  launch GAME_ID [resume|new|slot:N [host|connect:ADDRESS:PORT:CORE]]\n"
+		"                                 (slot:-1 = automatic state; netplay)\n"
 		"  pause | resume | save | load | reset | fast-forward\n"
 		"  slot N|+1|-1\n"
 		"  advanced                       open RetroArch's own menu\n"
@@ -35,6 +37,10 @@ static void usage(void)
 		"  states [GAME_ID]               save states (running game or GAME_ID)\n"
 		"  settings                       emulation settings of the active user\n"
 		"  set KEY VALUE\n"
+		"  cheats                         cheat lists and cheats of the game\n"
+		"  cheat K 0|1 | cheat-file PATH\n"
+		"  netplay-host | netplay-stop    host the running game, end netplay\n"
+		"  netplay-hosts                  netplay games on the local network\n"
 		"  pre-power sleep|restart|poweroff\n"
 		"  storage-lost MOUNT_POINT       the games card went away\n");
 }
@@ -43,7 +49,7 @@ int main(int argc, char **argv)
 {
 	struct sockaddr_un addr;
 	struct timeval tv = { REPLY_TIMEOUT_S, 0 };
-	char command[256];
+	char command[PATH_MAX + 64];
 	char buf[1024];
 	const char *verb = argc > 1 ? argv[1] : "";
 	int multi = 0;
@@ -57,9 +63,17 @@ int main(int argc, char **argv)
 	} else if (!strcmp(verb, "watch") && argc == 2) {
 		snprintf(command, sizeof(command), "SUBSCRIBE\n");
 		watch = 1;
-	} else if (!strcmp(verb, "launch") && (argc == 3 || argc == 4)) {
-		snprintf(command, sizeof(command), "LAUNCH\t%s%s%s\n", argv[2],
-			 argc == 4 ? "\t" : "", argc == 4 ? argv[3] : "");
+	} else if (!strcmp(verb, "launch") && argc >= 3 && argc <= 5) {
+		snprintf(command, sizeof(command), "LAUNCH\t%s%s%s%s%s\n", argv[2],
+			 argc >= 4 ? "\t" : "", argc >= 4 ? argv[3] : "",
+			 argc == 5 ? "\t" : "", argc == 5 ? argv[4] : "");
+	} else if ((!strcmp(verb, "cheats") || !strcmp(verb, "netplay-hosts")) && argc == 2) {
+		snprintf(command, sizeof(command), "%s\n", verb[0] == 'c' ? "CHEATS" : "NETPLAY_HOSTS");
+		multi = 1;
+	} else if (!strcmp(verb, "cheat") && argc == 4) {
+		snprintf(command, sizeof(command), "CHEAT_SET\t%s\t%s\n", argv[2], argv[3]);
+	} else if (!strcmp(verb, "cheat-file") && argc == 3) {
+		snprintf(command, sizeof(command), "CHEAT_FILE\t%s\n", argv[2]);
 	} else if (!strcmp(verb, "states") && (argc == 2 || argc == 3)) {
 		snprintf(command, sizeof(command), "STATES%s%s\n",
 			 argc == 3 ? "\t" : "", argc == 3 ? argv[2] : "");
@@ -90,6 +104,7 @@ int main(int argc, char **argv)
 			{ "reset", "RESET" }, { "fast-forward", "FAST_FORWARD" },
 			{ "advanced", "ADVANCED" }, { "quit", "QUIT" },
 			{ "screenshot", "SCREENSHOT" },
+			{ "netplay-host", "NETPLAY_HOST" }, { "netplay-stop", "NETPLAY_STOP" },
 		};
 		size_t i;
 

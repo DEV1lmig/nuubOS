@@ -2,6 +2,7 @@ config BR2_PACKAGE_NUUBOS_FILES
 	bool "nuubos-files"
 	depends on BR2_USE_MMU
 	select BR2_PACKAGE_NUUBOS_JOBS
+	select BR2_PACKAGE_LIBSMB2
 	help
 	  EPIC-031/032/035/036 and USB storage (EPIC-024): File Manager
 	  operations (nuubos-filesctl), removable media mount/eject

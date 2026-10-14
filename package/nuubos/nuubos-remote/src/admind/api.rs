@@ -150,13 +150,16 @@ pub fn topic(t: &str, q: &dyn Fn(&str) -> String) -> R {
                 .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
                 .filter_map(|l| {
                     let f: Vec<&str> = l.split('|').collect();
-                    (f.len() >= 6).then(|| json!({ "id": f[0], "name": f[1], "folder": f[2], "extensions": f[3], "color": f[5] }))
+                    (f.len() >= 6).then(|| json!({ "id": f[0], "name": f[1], "folder": f[2], "extensions": f[3], "color": f[5],
+                        "aliases": f.get(6).copied().unwrap_or("") }))
                 })
                 .collect();
             json!({ "systems": list })
         }
         "remote" => kv(&tool_ok("nuubos-remotectl", &["status"])?),
         "password" => json!({ "password": tool_ok("nuubos-remotectl", &["credential", "show"])?.trim() }),
+        /* SSH public keys (EPIC-039): key = fingerprint, type, comment. */
+        "ssh_keys" => kv(&tool_ok("nuubos-remotectl", &["keys", "list"])?),
         "sync" => kv(&sock("syncd", "STATUS")?),
         "scraper" => kv(&tool_ok("nuubos-scraper", &["account", "status"])?),
         "bios" => kv(&tool_ok("nuubos-biosctl", &["status"])?),
@@ -360,7 +363,6 @@ pub fn action(b: &Value) -> R {
 
         /* Moods (nuubos-themectl announces the choice to nuubUI). */
         "mood.select" => { tool_ok("nuubos-themectl", &["select", &user()?, &token(&a("id"))?])?; done("themes") }
-        "mood.install" => { tool_ok("nuubos-themectl", &["install", &files::user_path(&a("path")).ok_or("path")?]).map_err(|_| "mood".to_owned())?; done("themes") }
         "mood.remove" => { tool_ok("nuubos-themectl", &["remove", &token(&a("id"))?])?; done("themes") }
 
         /* Remote services and the device credential. */
@@ -375,6 +377,16 @@ pub fn action(b: &Value) -> R {
             done("remote")
         }
         "remote.regenerate" => { tool_ok("nuubos-remotectl", &["credential", "regenerate"])?; done("remote") }
+        /* The key line goes on stdin; nuubos-remotectl checks it. */
+        "ssh.key.add" => {
+            let key = plain(a("key").trim(), 8192)?;
+            tool(&svc::bin("nuubos-remotectl"), &["keys", "add"], Some(&format!("{key}\n"))).map_err(|e| format!("sshkey-{e}"))?;
+            done("ssh_keys")
+        }
+        "ssh.key.remove" => {
+            tool_ok("nuubos-remotectl", &["keys", "remove", &token(&a("id"))?]).map_err(|e| format!("sshkey-{e}"))?;
+            done("ssh_keys")
+        }
 
         /* Syncthing (per user). */
         "sync.enable" => { sock_ok("syncd", if flag(&a("v"))? == "1" { "ENABLE" } else { "DISABLE" })?; done("sync") }
@@ -508,7 +520,7 @@ pub fn action(b: &Value) -> R {
         /* Software update and recovery. */
         "update.check" => { tool_ok("nuubos-updatectl", &["check"])?; done("update") }
         "update.download" => job("update-download", &[]),
-        "update.channel" => { tool_ok("nuubos-updatectl", &["channel", &one_of(&a("v"), &["stable", "beta", "alpha"])?])?; done("update") }
+        "update.channel" => { tool_ok("nuubos-updatectl", &["channel", &one_of(&a("v"), &["stable", "rc", "nightly"])?])?; done("update") }
         "update.auto" => { tool_ok("nuubos-updatectl", &["auto", if one_of(&a("v"), &["0", "1"])? == "1" { "on" } else { "off" }])?; done("update") }
         "update.install" => job("update-install", &[]),
         "rec.repair" => { tool_ok("nuubos-recoveryctl", &["repair"])?; ok() }

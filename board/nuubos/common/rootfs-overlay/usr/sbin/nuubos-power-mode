@@ -4,7 +4,7 @@
 
 usage()
 {
-	echo "Usage: nuubos-power-mode {auto|battery-saver|apply|apply-effective <auto|battery-saver>|status}" >&2
+	echo "Usage: nuubos-power-mode {auto|battery-saver|apply|apply-effective <auto|battery-saver>|refresh|status}" >&2
 }
 
 show_status()
@@ -81,6 +81,15 @@ case "${1:-}" in
 			*) usage; exit 2 ;;
 		esac
 		apply_power_mode "$MODE"
+		;;
+	refresh)
+		# Limits of the effective profile again (screen on/off): the
+		# effective profile is the one nuubos-systemd last applied.
+		if [ -e /run/nuubos/battery-saver ]; then
+			apply_limits BATTERY_SAVER
+		else
+			apply_limits AUTO
+		fi
 		;;
 	status)
 		show_status

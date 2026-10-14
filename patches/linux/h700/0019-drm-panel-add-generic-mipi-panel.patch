@@ -259,7 +259,7 @@ new file mode 100644
 index 00000000000..a4da1fd2e1e
 --- /dev/null
 +++ b/drivers/gpu/drm/panel/panel-mipi.c
-@@ -0,0 +1,1163 @@
+@@ -0,0 +1,1166 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * Generic MIPI-DSI/DPI(+SPI) Panel Driver
@@ -1309,6 +1309,9 @@ index 00000000000..a4da1fd2e1e
 +		break;
 +	case MIPI_DSI_FMT_RGB565:
 +		mipi->bus_format = MEDIA_BUS_FMT_RGB565_1X16;
++		break;
++	case MIPI_DSI_FMT_RGB101010:
++		mipi->bus_format = MEDIA_BUS_FMT_RGB101010_1X30;
 +		break;
 +	}
 +

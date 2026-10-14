@@ -3,7 +3,7 @@
  *
  * Find is a Home view (find-view in home.slint, user request 2026-10-10):
  * a search bar (title words, system keyboard over Home), filter chips
- * (system, decade, genre, players, never played, clear), the results as a
+ * (system, tag, decade, genre, players, never played, clear), the results as a
  * live strip of covers (A plays, North opens Game Details, the last card
  * opens them all in the library grid) and two Surprise Me buttons (random
  * game, random unplayed game → its Game Details). Choices open in the Home
@@ -39,6 +39,8 @@ struct Filters {
     /* Collection id and name (Select on a collection page). */
     collection: String,
     collection_name: String,
+    /* libraryd tag name (the user's game tags). */
+    tag: String,
     decade: i32,
     genre: String,
     players: i32,
@@ -53,6 +55,8 @@ struct State {
     /* FILTERS reply: decades (first year, count), genres (name, count). */
     decades: Vec<(i32, usize)>,
     genres: Vec<(String, usize)>,
+    /* Games per tag in use. */
+    tags: Vec<(String, usize)>,
     most_players: i32,
     /* Keyboard flows started from Home return to Home. */
     from_home: bool,
@@ -81,6 +85,9 @@ fn spec(f: &Filters) -> String {
     }
     if !f.collection.is_empty() {
         parts.push(format!("collection={}", f.collection));
+    }
+    if !f.tag.is_empty() {
+        parts.push(format!("tag={}", f.tag));
     }
     if f.decade > 0 {
         parts.push(format!("year={}-{}", f.decade, f.decade + 9));
@@ -135,12 +142,12 @@ const ZONE_RESULTS: i32 = 2;
 const ZONE_SURPRISE: i32 = 3;
 
 fn any_filter(f: &Filters) -> bool {
-    !f.system.is_empty() || !f.collection.is_empty() || f.decade > 0 || !f.genre.is_empty() || f.players > 1 || f.unplayed
+    !f.system.is_empty() || !f.collection.is_empty() || !f.tag.is_empty() || f.decade > 0 || !f.genre.is_empty() || f.players > 1 || f.unplayed
 }
 
 /* Chip keys in order (the labels follow). */
 fn chip_keys(f: &Filters) -> Vec<&'static str> {
-    let mut keys = vec!["system", "decade", "genre", "players", "unplayed"];
+    let mut keys = vec!["system", "tag", "decade", "genre", "players", "unplayed"];
     if !f.collection.is_empty() {
         keys.insert(0, "collection");
     }
@@ -161,6 +168,8 @@ fn render_find(ui: &HomeWindow) {
                     "collection" => (f.collection_name.clone(), true),
                     "system" if !f.system.is_empty() => (system_name(&f.system), true),
                     "system" => (tr(ui, 8, "System"), false),
+                    "tag" if !f.tag.is_empty() => (crate::library::tag_label(ui, &f.tag), true),
+                    "tag" => (tr(ui, 1230, "Tags"), false),
                     "decade" if f.decade > 0 => (format!("{}–{}", f.decade, f.decade + 9), true),
                     "decade" => (tr(ui, 832, "Decade"), false),
                     "genre" if !f.genre.is_empty() => (f.genre.clone(), true),
@@ -233,6 +242,7 @@ fn load_filters(ui: &HomeWindow) {
         let reply = crate::library::library_request("FILTERS");
         let mut decades = Vec::new();
         let mut genres = Vec::new();
+        let mut tags = Vec::new();
         let mut most = 0;
         for line in reply.lines() {
             if let Some(v) = line.strip_prefix("decade=") {
@@ -241,6 +251,9 @@ fn load_filters(ui: &HomeWindow) {
             } else if let Some(v) = line.strip_prefix("genre=") {
                 let (g, n) = v.split_once('\t').unwrap_or((v, "0"));
                 genres.push((g.to_owned(), n.parse().unwrap_or(0)));
+            } else if let Some(v) = line.strip_prefix("tag=") {
+                let (t, n) = v.split_once('\t').unwrap_or((v, "0"));
+                tags.push((t.to_owned(), n.parse().unwrap_or(0)));
             } else if let Some(v) = line.strip_prefix("players=") {
                 most = v.parse().unwrap_or(0);
             }
@@ -251,6 +264,7 @@ fn load_filters(ui: &HomeWindow) {
                 let mut st = st.borrow_mut();
                 st.decades = decades;
                 st.genres = genres;
+                st.tags = tags;
                 st.most_players = most;
             });
             if ui.get_find_open() {
@@ -369,6 +383,18 @@ fn chip_confirm(ui: &HomeWindow) {
                 let mut o = vec![(String::new(), any.clone())];
                 o.extend(crate::library::system_names());
                 (o, st.filters.system.clone(), tr(ui, 8, "System"))
+            }
+            /* Every tag, with its count when in use. */
+            "tag" => {
+                let mut o = vec![(String::new(), any.clone())];
+                o.extend(crate::library::TAGS.iter().map(|t| {
+                    let label = crate::library::tag_label(ui, t);
+                    match st.tags.iter().find(|(n, _)| n == t) {
+                        Some((_, n)) => (t.to_string(), format!("{label} • {n}")),
+                        None => (t.to_string(), label),
+                    }
+                }));
+                (o, st.filters.tag.clone(), tr(ui, 1230, "Tags"))
             }
             "decade" => {
                 let mut o = vec![("0".to_owned(), any.clone())];
@@ -557,6 +583,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         let mut st = st.borrow_mut();
         match context {
             "find-system" => st.filters.system = value,
+            "find-tag" => st.filters.tag = value,
             "find-decade" => st.filters.decade = value.parse().unwrap_or(0),
             "find-genre" => st.filters.genre = value,
             "find-players" => st.filters.players = value.parse().unwrap_or(0),

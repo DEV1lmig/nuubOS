@@ -1,0 +1,6 @@
+# Add to Library (source file or folder, answers of the plan)
+COMMAND=/usr/bin/nuubos-library-import run
+SCOPE=device
+CANCEL=1
+RETRY=1
+ARGS=2

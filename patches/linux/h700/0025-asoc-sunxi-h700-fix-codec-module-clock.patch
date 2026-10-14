@@ -74,7 +74,7 @@ index f6c2cd9..7ff8e92 100644
 +
  	scodec->regmap = devm_regmap_init_mmio(&pdev->dev, base,
  					       quirks->regmap_config);
- 	if (IS_ERR(scodec->regmap)) {
+ 	if (IS_ERR(scodec->regmap))
 diff --git a/arch/arm64/boot/dts/allwinner/sun50i-h700.dtsi b/arch/arm64/boot/dts/allwinner/sun50i-h700.dtsi
 index a309fc8..26098fd 100644
 --- a/arch/arm64/boot/dts/allwinner/sun50i-h700.dtsi

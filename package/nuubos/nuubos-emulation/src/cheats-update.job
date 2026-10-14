@@ -1,0 +1,6 @@
+# Cheats: download the libretro cheat collection (no argument).
+COMMAND=/usr/bin/nuubos-libretroctl cheats update
+SCOPE=device
+CANCEL=1
+RETRY=1
+ARGS=0

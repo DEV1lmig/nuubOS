@@ -1,0 +1,62 @@
+/* Shared marquee (ui.md §12): relevant/active overflowing text scrolls
+ * horizontally, fitting text stays static. Used by home.slint and the
+ * Files and Media applications. */
+export component MarqueeText inherits Rectangle {
+    in property <string> label: "";
+    in property <color> text-color: #ffffff;
+    in property <length> text-size: 16px;
+    in property <int> text-weight: 400;
+    in property <bool> active: true;
+    in property <bool> align-right: false;
+    in property <bool> align-center: false;
+    /* Forward/back passes; a notification scrolls once and holds the end. */
+    in property <int> passes: 2;
+    out property <length> content-width: marquee-label.preferred-width;
+    /* Constant reading speed (~60 px/s): long text scrolls longer, never
+     * faster. Short overflows keep the minimum duration. */
+    property <length> overflow: max(0px, marquee-label.preferred-width - root.width);
+    out property <duration> scroll-duration: max(1250ms, root.overflow / 1px * 16ms);
+    /* Time until the end of the text has been shown (0 when it fits). */
+    out property <duration> scroll-time: root.overflow > 0px ? 320ms + root.scroll-duration * root.passes : 0ms;
+    /* Reading this evaluates the animated position (used to restart). */
+    out property <length> offset: marquee-label.x;
+    /* Armed shortly after creation: a marquee created with its text already
+     * set (the info bar of a just opened grid) would otherwise start at its
+     * end position with nothing changing, so it never scrolled until the
+     * text changed (user report 2026-10-09). The timer stops once armed. */
+    property <bool> armed: false;
+    arm-timer := Timer {
+        interval: 60ms;
+        running: !root.armed;
+        triggered => { root.armed = true; }
+    }
+
+    background: #00000000;
+    clip: true;
+
+    marquee-label := Text {
+        text: root.label;
+        color: root.text-color;
+        font-size: root.text-size;
+        font-weight: root.text-weight;
+        width: self.preferred-width;
+        height: parent.height;
+        vertical-alignment: center;
+        x: root.active && root.armed && self.preferred-width > parent.width
+            ? parent.width - self.preferred-width
+            /* Overflowing text at rest shows its beginning, whatever the
+             * alignment of text that fits. */
+            : self.preferred-width > parent.width ? 0px
+            : root.align-right ? parent.width - self.preferred-width
+            : root.align-center ? (parent.width - self.preferred-width) / 2
+            : 0px;
+        animate x {
+            delay: 320ms;
+            duration: root.scroll-duration;
+            iteration-count: root.passes;
+            direction: alternate;
+            easing: linear;
+            enabled: root.active && root.armed && self.preferred-width > parent.width;
+        }
+    }
+}

@@ -5,11 +5,17 @@ POWER_CONFIG=/state/config/nuubos.conf
 CPU_POLICY=/sys/devices/system/cpu/cpufreq/policy0
 GPU_DEVFREQ=/sys/class/devfreq/1800000.gpu
 
-AUTO_CPU_MAX=1512000
+AUTO_CPU_MAX=1416000
 AUTO_GPU_MAX=600000000
 
 BATTERY_SAVER_CPU_MAX=1200000
 BATTERY_SAVER_GPU_MAX=504000000
+# With the screen off the CPU stays at or below 1032 MHz, the OPP at the
+# idle voltage (900 mV): background music needs no more, and the
+# schedutil 1032 <-> 1416 MHz ping-pong of an idle system (each step a
+# vdd-cpu change over I2C, ~30/s on the CubeXX) stops (battery audit
+# 2026-10-14).
+SCREEN_OFF_CPU_MAX=1032000
 
 power_log()
 {
@@ -88,6 +94,10 @@ apply_limits()
 			;;
 	esac
 
+	if [ -e /run/nuubos/screen-off ] && [ "$CPU_MAX" -gt "$SCREEN_OFF_CPU_MAX" ]; then
+		CPU_MAX="$SCREEN_OFF_CPU_MAX"
+	fi
+
 	echo "$CPU_MAX" > "$CPU_POLICY/scaling_max_freq" || return 1
 	echo "$GPU_MAX" > "$GPU_DEVFREQ/max_freq" || return 1
 
@@ -100,6 +110,15 @@ apply_power_mode()
 
 	apply_thermal_policy || return 1
 	apply_limits "$MODE" || return 1
+
+	# Runtime mark for the services that save power too (lightingd: dimmer,
+	# slower RGB; audiod: analog path suspended when idle).
+	mkdir -p /run/nuubos
+	if [ "$MODE" = BATTERY_SAVER ]; then
+		: > /run/nuubos/battery-saver
+	else
+		rm -f /run/nuubos/battery-saver
+	fi
 
 	power_log "mode applied: $MODE"
 	return 0

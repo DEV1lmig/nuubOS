@@ -303,12 +303,19 @@ if [[ -n "$analog_event" ]]; then
     check_abs_set "$analog_event"
 
     poll="$(remote "cat '/sys/class/input/$analog_event/device/poll' 2>/dev/null" || true)"
+    poll_max="$(remote "cat '/sys/class/input/$analog_event/device/max' 2>/dev/null" || true)"
 
-    if [[ "$poll" == "$INPUT_ANALOG_POLL_MS" ]]; then
+    # nuubos-inputd sets the rate: INPUT_ANALOG_POLL_MS (device tree) in
+    # games, 16 ms in menus, 100 ms with the screen off; kernel 0106 lets it
+    # go up to 100 ms.
+    if [[ "$poll" == "$INPUT_ANALOG_POLL_MS" || "$poll" == 16 || "$poll" == 100 ]]; then
         pass "analog poll interval ${poll}ms"
     else
-        fail "analog poll interval ${poll:-missing}ms expected ${INPUT_ANALOG_POLL_MS}ms"
+        fail "analog poll interval ${poll:-missing}ms expected ${INPUT_ANALOG_POLL_MS}/16/100ms"
     fi
+    [[ "$poll_max" == 100 ]] \
+        && pass "analog poll interval adjustable up to 100ms" \
+        || fail "analog poll max ${poll_max:-missing}ms expected 100ms (kernel 0106)"
 fi
 
 # ---------------------------------------------------------------------------

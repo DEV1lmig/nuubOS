@@ -3,7 +3,9 @@
  * generic rows of home.slint (GenRow):
  *
  *   50 Game Details (EPIC-016)      nuubos-libraryd DETAILS + nuubos-emud
- *   51 Game Settings (EPIC-018)     nuubos-emud GAME_SETTINGS / GAME_SET
+ *   51 Game Settings (EPIC-018)     nuubos-emud GAME_SETTINGS / GAME_SET,
+ *                                   Get More Emulators (nuubos-libretroctl
+ *                                   cores, job core-install)
  *   52/53 BIOS Files (EPIC-033)     nuubos-biosctl
  *   54 RetroAchievements (EPIC-017) nuubos-achievementsctl
  *   55 Game Hotkeys, 56 Performance Overlay   nuubos-emud SETTINGS / SET
@@ -13,7 +15,8 @@
  *
  * Settings → Gaming (68) itself is built here too (gaming-rows): the
  * RetroAchievements account, the ScreenScraper account and bulk scraping
- * (EPIC-015, nuubos-scraper, nuubos-jobd) and BIOS Files.
+ * (EPIC-015, nuubos-scraper, nuubos-jobd), BIOS Files and the libretro
+ * cheat collection (job cheats-update).
  *
  * The optional network services (Remote Services EPIC-037/039 through
  * nuubos-remotectl) are also rows of Settings → Connectivity,
@@ -80,6 +83,8 @@ struct Details {
     sessions: i64,
     path: String,
     members: Vec<Member>,
+    /* The user's tags of the game (libraryd field 13). */
+    tags: Vec<String>,
     meta: Vec<(String, String)>,
     /* nuubos-emud */
     core: String,
@@ -160,6 +165,17 @@ struct State {
     busy: bool,
     /* Where Back goes from pages 52-54, 63 and 66. */
     back: i32,
+    /* Get More Emulators: the buildbot list is being fetched; the core
+     * being downloaded (job core-install) and its progress. */
+    cores_loading: bool,
+    core_job: String,
+    core_progress: i32,
+    /* The libretro cheat collection (nuubos-libretroctl cheats status):
+     * downloaded, when; its update job runs, its progress. */
+    cheats_present: bool,
+    cheats_updated: i64,
+    cheats_job: bool,
+    cheats_progress: i32,
 }
 
 thread_local! {
@@ -240,6 +256,8 @@ fn parse_details(reply: &str, d: &mut Details) {
                     d.last = f[5].parse().unwrap_or(0);
                     d.time = f[6].parse().unwrap_or(0);
                     d.available = f[7] == "1";
+                    d.tags = f.get(12).map(|t| t.split(',').filter(|t| !t.is_empty()).map(String::from).collect())
+                        .unwrap_or_default();
                 }
             }
             "system_name" => d.system_name = value.into(),
@@ -451,6 +469,13 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
         51 => {
             let core = if d.core_override.is_empty() { default_label(ui, &d.core_default) } else { d.core_override.clone() };
             rows.push(("core".into(), nav(tr(ui, 525, "Emulator"), core), d.cores.len() > 1));
+            /* Other libretro emulators for the system, from the buildbot. */
+            if st.core_job.is_empty() {
+                let value = if st.cores_loading { tr(ui, 1272, "Looking for emulators…") } else { String::new() };
+                rows.push(("core-get".into(), nav(tr(ui, 1253, "Get More Emulators"), value), !st.cores_loading));
+            } else {
+                rows.push(("core-get".into(), progress_row(tr(ui, 1254, "Downloading emulator"), st.core_progress), false));
+            }
             let aspect = if d.aspect.is_empty() { default_label(ui, &tr(ui, 531, "Integer Scaling")) } else { aspect_label(ui, &d.aspect) };
             rows.push(("aspect".into(), nav(tr(ui, 526, "Aspect Ratio"), aspect), true));
             let filter = if d.filter.is_empty() { default_label(ui, &filter_label(ui, &d.filter_default)) } else { filter_label(ui, &d.filter) };
@@ -516,7 +541,7 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                 let channel = get("channel");
                 let mut channel_row = nav(tr(ui, 985, "Update Channel"), channel_name(ui, &channel));
                 if channel != "stable" {
-                    channel_row.detail = tr(ui, 989, "Beta and Alpha get new versions first and may have bugs").into();
+                    channel_row.detail = tr(ui, 989, "RC and Nightly get new versions first and may have bugs").into();
                 }
                 rows.push(("update-channel".into(), channel_row, !st.busy));
                 rows.push(("update-auto".into(), toggle(tr(ui, 992, "Check Automatically"), get("auto") == "1",
@@ -592,6 +617,9 @@ fn details_actions(ui: &HomeWindow, st: &State) -> Vec<(String, DetailAction, St
     }
     let names: Vec<&str> = d.members.iter().filter(|m| m.member).map(|m| m.name.as_str()).collect();
     out.push(("collections".into(), detail_action(2, tr(ui, 537, "Collections"), false), names.join(", ")));
+    let tags: Vec<String> = d.tags.iter().map(|t| crate::library::tag_label(ui, t)).collect();
+    out.push(("tags".into(), detail_action(35, tr(ui, 1230, "Tags"), false),
+        if tags.is_empty() { tr(ui, 1237, "Mark your progress, or a game that does not work") } else { tags.join(", ") }));
     if !d.cores.is_empty() {
         let core = if d.core.is_empty() { String::new() } else { format!("{}: {}", tr(ui, 525, "Emulator"), d.core) };
         out.push(("settings".into(), detail_action(3, tr(ui, 524, "Game Settings"), false), core));
@@ -652,6 +680,9 @@ fn details_chips(ui: &HomeWindow, d: &Details) -> Vec<DetailChip> {
     }
     if d.meta("match") == "review" {
         chips.push(detail_chip(13, tr(ui, 561, "Check this match"), true));
+    }
+    for t in &d.tags {
+        chips.push(detail_chip(if t == "broken" { 13 } else { 35 }, crate::library::tag_label(ui, t), t == "broken"));
     }
     if !d.meta("players").is_empty() {
         chips.push(detail_chip(11, d.meta("players").to_owned(), false));
@@ -891,11 +922,6 @@ pub(crate) fn show(ui: &HomeWindow, view: i32) {
     ui.set_gen_notice("".into());
     navigate_settings_view(ui, view);
     render(ui);
-}
-
-/* Keys of the generic rows on screen, in order. */
-pub(crate) fn gen_keys() -> Vec<String> {
-    STATE.with(|st| st.borrow().keys.clone())
 }
 
 pub(crate) fn focused_key(ui: &HomeWindow) -> String {
@@ -1173,6 +1199,19 @@ fn open_collections(ui: &HomeWindow) {
     open_settings_choice(ui, "game-collection", &tr(ui, 537, "Collections"), options, "");
 }
 
+/* Each tag On/Off; a status tag replaces the other one (libraryd). */
+fn open_tags(ui: &HomeWindow) {
+    let d = STATE.with(|st| st.borrow().details.clone());
+    let options: Vec<(String, String)> = crate::library::TAGS
+        .iter()
+        .map(|t| {
+            let on = d.tags.iter().any(|x| x == t);
+            (t.to_string(), format!("{}  •  {}", crate::library::tag_label(ui, t), if on { tr(ui, 222, "On") } else { tr(ui, 54, "Off") }))
+        })
+        .collect();
+    open_settings_choice(ui, "game-tag", &tr(ui, 1230, "Tags"), options, "");
+}
+
 fn open_core_choice(ui: &HomeWindow) {
     let d = STATE.with(|st| st.borrow().details.clone());
     let mut options = vec![(String::new(), default_label(ui, &d.core_default))];
@@ -1219,6 +1258,7 @@ fn game_set(ui: &HomeWindow, key: &str, value: String) {
 pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
     match context {
         "game-core" => game_set(ui, "core", value),
+        "game-core-get" => install_core(ui, value),
         "game-aspect" => game_set(ui, "aspect", value),
         "game-filter" => game_set(ui, "filter", value),
         "emu-slots" => emu_set(ui, "slots", value),
@@ -1230,6 +1270,14 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-source" => tool_then(ui, "/usr/bin/nuubos-scraper", vec!["provider".into(), "set".into(), value],
             None, |ui, _| refresh_gaming(ui)),
         c if c.starts_with("emu-hotkey:") => emu_set(ui, &format!("hotkey_{}", &c[11..]), value),
+        "game-tag" => {
+            let (id, on) = STATE.with(|st| {
+                let st = st.borrow();
+                (st.details.id.clone(), st.details.tags.iter().any(|t| *t == value))
+            });
+            let verb = if on { "TAG_CLEAR" } else { "TAG_SET" };
+            details_command(ui, format!("{verb}\t{id}\t{value}"));
+        }
         "game-collection" => {
             if value == "new" {
                 open_system_keyboard(ui, &tr(ui, 539, "Collection name"), KEYBOARD_COLLECTION, 50, "text", "");
@@ -1271,6 +1319,7 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
             crate::library::launch_by_id(ui, &id, d.available);
         }
         "collections" => open_collections(ui),
+        "tags" => open_tags(ui),
         "settings" => show(ui, 51),
         "bios" => {
             STATE.with(|st| st.borrow_mut().bios_system = d.system.clone());
@@ -1324,6 +1373,9 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
             });
         }
         "core" => open_core_choice(ui),
+        "core-get" if !STATE.with(|st| st.borrow().cores_loading) && STATE.with(|st| st.borrow().core_job.is_empty()) => {
+            open_core_offer(ui)
+        }
         "aspect" => open_aspect_choice(ui),
         "filter" => open_filter_choice(ui),
         "reset" => {
@@ -1483,6 +1535,18 @@ fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     let mut bios = nav(tr(ui, 576, "BIOS Files"), String::new());
     bios.detail = tr(ui, 581, "Copy BIOS files to the bios folder on the SD card. nuubOS never includes them.").into();
     rows.push(("bios".into(), bios, true));
+    /* The libretro cheat collection (Quick Menu → Cheats uses it). */
+    if st.cheats_job {
+        rows.push(("cheats".into(), progress_row(tr(ui, 1242, "Downloading cheats"), st.cheats_progress), false));
+    } else {
+        let value = if st.cheats_present {
+            tr_arg(ui, 1259, "Updated {0}", &days_ago(ui, st.cheats_updated))
+        } else {
+            tr(ui, 1258, "Not downloaded")
+        };
+        rows.push(("cheats".into(), row(tr(ui, 1257, "Cheat Collection"), value,
+            tr(ui, 1260, "About 37 MB from libretro, with cheats for thousands of games")), true));
+    }
     /* SYNCTHING (USER): its page and, once on, the setup guide. */
     let (value, detail, enabled) = crate::syncui::summary(ui);
     let mut sync = nav(tr(ui, 669, "Syncthing"), value);
@@ -1545,11 +1609,14 @@ pub fn refresh_gaming(ui: &HomeWindow) {
         let ra = if user.is_empty() { String::new() } else { run_tool("/usr/bin/nuubos-achievementsctl", &["status", &user], None) };
         let ss = run_tool("/usr/bin/nuubos-scraper", &["account", "status"], None);
         let emu = pairs(&emulation("SETTINGS", true));
+        let cheats = run_tool("/usr/bin/nuubos-libretroctl", &["cheats", "status"], None);
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             STATE.with(|st| {
                 let mut st = st.borrow_mut();
                 st.emu = emu;
+                st.cheats_present = kv(&cheats, "cheats") == "1";
+                st.cheats_updated = kv(&cheats, "updated").parse().unwrap_or(0);
                 st.ra_user = kv(&ra, "user").to_owned();
                 st.ra_enabled = kv(&ra, "enabled") == "1";
                 st.ra_hardcore = kv(&ra, "hardcore") == "1";
@@ -1584,6 +1651,7 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
                 "sync" => open_sync(ui),
                 "sync-add" => crate::syncui::open_guide(ui),
                 "bios" => open_bios(ui),
+                "cheats" if !STATE.with(|st| st.borrow().cheats_job) => update_cheats(ui),
                 "boot_screens" | "slot_rotation" | "bezels" | "crt" => {
                     let on = STATE.with(|st| emu_get(&st.borrow(), &key) == "1");
                     emu_set(ui, &key, if on { "0" } else { "1" }.to_owned());
@@ -1642,6 +1710,98 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
         }
         _ => {}
     }
+}
+
+/* The libretro cheat collection: a job with its progress on the row. */
+fn update_cheats(ui: &HomeWindow) {
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.cheats_job = true;
+        st.cheats_progress = 0;
+    });
+    render_gaming(ui);
+    job_with_progress(ui, vec!["cheats-update".into()], |ui, p| {
+        STATE.with(|st| st.borrow_mut().cheats_progress = p);
+        if ui.get_settings_view() == GAMING_VIEW {
+            render_gaming(ui);
+        }
+    }, |ui, out| {
+        STATE.with(|st| st.borrow_mut().cheats_job = false);
+        if out.starts_with("ERR") {
+            notice(ui, job_failure(ui, &out));
+        }
+        refresh_gaming(ui);
+    });
+}
+
+/* "ERR <state> <reason>" of a download job, for the user. */
+fn job_failure(ui: &HomeWindow, out: &str) -> String {
+    match out.rsplit(' ').next().unwrap_or("") {
+        "network" => tr(ui, 494, "Check the network connection"),
+        "space" => tr(ui, 493, "Not enough free space"),
+        "cancelled" => tr(ui, 596, "Cancelled"),
+        _ => tr(ui, 93, "Failed"),
+    }
+}
+
+/* Get More Emulators: the buildbot's cores for the game's system that are
+ * not on the console (nuubos-libretroctl), as a dropdown. */
+fn open_core_offer(ui: &HomeWindow) {
+    let system = STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.cores_loading = true;
+        st.details.system.clone()
+    });
+    render(ui);
+    tool_then(ui, "/usr/bin/nuubos-libretroctl", vec!["cores".into(), system], None, |ui, out| {
+        STATE.with(|st| st.borrow_mut().cores_loading = false);
+        render(ui);
+        if ui.get_settings_view() != 51 {
+            return;
+        }
+        if !out.contains("end=1") {
+            notice(ui, tr(ui, 494, "Check the network connection"));
+            return;
+        }
+        let options: Vec<(String, String)> = out
+            .lines()
+            .filter_map(|l| l.strip_prefix("core="))
+            .filter_map(|v| {
+                let f: Vec<&str> = v.split('\t').collect();
+                Some((f.first()?.to_string(), f.get(1).unwrap_or(f.first()?).to_string()))
+            })
+            .collect();
+        if options.is_empty() {
+            notice(ui, tr(ui, 1255, "No other emulators for this system"));
+            return;
+        }
+        open_settings_choice(ui, "game-core-get", &tr(ui, 1253, "Get More Emulators"), options, "");
+    });
+}
+
+/* Downloads the chosen core (job core-install, progress on its row), then
+ * makes it the game's emulator. */
+fn install_core(ui: &HomeWindow, core: String) {
+    notice(ui, String::new());
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.core_job = core.clone();
+        st.core_progress = 0;
+    });
+    render(ui);
+    job_with_progress(ui, vec!["core-install".into(), core], |ui, p| {
+        STATE.with(|st| st.borrow_mut().core_progress = p);
+        render(ui);
+    }, |ui, out| {
+        let core = STATE.with(|st| std::mem::take(&mut st.borrow_mut().core_job));
+        if out.starts_with("ERR") {
+            notice(ui, job_failure(ui, &out));
+            render(ui);
+            return;
+        }
+        notice(ui, tr(ui, 1256, "Emulator installed"));
+        game_set(ui, "core", core);
+    });
 }
 
 /* Every libraryd snapshot: the Scan row follows `scanning`, and the end of a
@@ -1898,8 +2058,8 @@ fn release_notes(escaped: &str) -> Vec<String> {
 
 fn channel_name(ui: &HomeWindow, id: &str) -> String {
     match id {
-        "beta" => tr(ui, 987, "Beta"),
-        "alpha" => tr(ui, 988, "Alpha"),
+        "rc" => tr(ui, 987, "RC"),
+        "nightly" => tr(ui, 988, "Nightly"),
         _ => tr(ui, 986, "Stable"),
     }
 }
@@ -2109,7 +2269,7 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
         (63, "update-channel") => {
             let current = STATE.with(|st| st.borrow().update.iter().find(|(k, _)| k == "channel").map(|(_, v)| v.clone()))
                 .unwrap_or_default();
-            let options = ["stable", "beta", "alpha"].iter().map(|id| (id.to_string(), channel_name(ui, id))).collect();
+            let options = ["stable", "rc", "nightly"].iter().map(|id| (id.to_string(), channel_name(ui, id))).collect();
             open_settings_choice(ui, "update-channel", &tr(ui, 985, "Update Channel"), options, &current);
         }
         (63, "update-auto") => {

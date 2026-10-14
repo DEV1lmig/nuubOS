@@ -1,0 +1,6 @@
+# Get More Emulators: download one libretro core (argument: core name).
+COMMAND=/usr/bin/nuubos-libretroctl install
+SCOPE=device
+CANCEL=1
+RETRY=1
+ARGS=1

@@ -16,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <sys/inotify.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -127,11 +128,23 @@ struct audio_state {
 
 	bool headphones_known;
 	bool headphones_available;
+	/* Speaker amplifier parked (battery audit 2026-10-14): an idle open
+	 * PCM keeps the whole analog path powered by DAPM, amplifier
+	 * included; with the screen off and nothing playing only the speaker
+	 * pin goes off (no PCM close: no first-cue delay, no reopen pop). */
+	bool screen_off;
+	bool media_playing;
+	bool speaker_parked;
 
 	bool hdmi_known;
 	bool hdmi_available;
 
 	bool bluetooth_available;
+
+	/* A screen cast with sound runs (nuubos-castd's session owns the
+	 * PipeWire sink "nuubos_cast"): it takes the sound over every other
+	 * output while it exists, like a TV on HDMI. */
+	bool cast_available;
 
 	bool volume_config_dirty;
 	struct timespec volume_config_due;
@@ -349,6 +362,35 @@ static int set_codec_dac_volume(int percent)
 	rc = snd_mixer_selem_set_playback_switch_all(elem, 1);
 
 out:
+	snd_mixer_close(mixer);
+	return rc < 0 ? -1 : 0;
+}
+
+/* The codec's "Speaker" DAPM pin (the speaker amplifier). The kernel
+ * turns it off while headphones are in (patch 0003); audiod also turns it
+ * off while the screen is off and nothing plays (speaker_park). */
+static int set_codec_speaker_pin(bool on)
+{
+	snd_mixer_t *mixer = NULL;
+	snd_mixer_elem_t *elem;
+	snd_mixer_selem_id_t *sid;
+	int rc;
+
+	rc = snd_mixer_open(&mixer, 0);
+	if (rc < 0)
+		return -1;
+	rc = snd_mixer_attach(mixer, "hw:Codec");
+	if (rc >= 0)
+		rc = snd_mixer_selem_register(mixer, NULL, NULL);
+	if (rc >= 0)
+		rc = snd_mixer_load(mixer);
+	if (rc >= 0) {
+		snd_mixer_selem_id_alloca(&sid);
+		snd_mixer_selem_id_set_index(sid, 0);
+		snd_mixer_selem_id_set_name(sid, "Speaker");
+		elem = snd_mixer_find_selem(mixer, sid);
+		rc = elem ? snd_mixer_selem_set_playback_switch_all(elem, on ? 1 : 0) : -1;
+	}
 	snd_mixer_close(mixer);
 	return rc < 0 ? -1 : 0;
 }
@@ -622,7 +664,9 @@ static void reconcile_selection(struct audio_state *state)
 {
 	const char *selected;
 
-	if (strcmp(state->mode, "analog") == 0) {
+	if (state->cast_available) {
+		selected = "cast";
+	} else if (strcmp(state->mode, "analog") == 0) {
 		/* Speaker vs headphones is a physical jack route. "analog"
 		 * deliberately follows that hardware state. */
 		selected = (state->headphones_known &&
@@ -1444,6 +1488,7 @@ static void status_reply(const struct audio_state *state,
 		 "available.bluetooth=%d\n"
 		 "available.headphones=%s\n"
 		 "available.hdmi=%s\n"
+		 "available.cast=%d\n"
 		 "available.speaker=1\n"
 		 "volume.speaker=%d\n"
 		 "volume.headphones=%d\n"
@@ -1461,6 +1506,7 @@ static void status_reply(const struct audio_state *state,
 		 state->bluetooth_available ? 1 : 0,
 		 headphones,
 		 hdmi,
+		 state->cast_available ? 1 : 0,
 		 state->volume_speaker,
 		 state->volume_headphones,
 		 state->volume_bluetooth,
@@ -1492,6 +1538,11 @@ static void route_reply(const struct audio_state *state,
 
 		snprintf(reply, reply_size,
 			 "default\n");
+		return;
+	}
+
+	if (strcmp(state->selected, "cast") == 0) {
+		snprintf(reply, reply_size, state->cast_available ? "default\n" : "unavailable\n");
 		return;
 	}
 
@@ -1779,6 +1830,30 @@ static void stop_test(struct audio_state *state)
 	state->test_offset_ms = 0;
 }
 
+#define RUN_MARK_DIR "/run/nuubos"
+
+static void speaker_park(struct audio_state *state, bool park)
+{
+	if (park == state->speaker_parked)
+		return;
+	/* Unparked, the pin follows the headphone jack as the kernel sets
+	 * it: speaker off while headphones are in. */
+	if (set_codec_speaker_pin(park ? false :
+				  !(state->headphones_known && state->headphones_available)) != 0)
+		return;
+	state->speaker_parked = park;
+	fprintf(stderr, "nuubos-audiod: speaker amplifier %s\n",
+		park ? "parked" : "back");
+}
+
+static void reconcile_speaker_park(struct audio_state *state)
+{
+	state->screen_off = access(RUN_MARK_DIR "/screen-off", F_OK) == 0;
+	state->media_playing = access(RUN_MARK_DIR "/media-playing", F_OK) == 0;
+	speaker_park(state, state->screen_off && !state->media_playing &&
+			    state->music_pid <= 0);
+}
+
 static void start_system_sound(struct audio_state *state,
 			       const char *name)
 {
@@ -1787,6 +1862,7 @@ static void start_system_sound(struct audio_state *state,
 	if (!system_sound_allowed(state, name) ||
 	    !product_audio_master_enabled(state))
 		return;
+	speaker_park(state, false);
 
 	/* system_sound_allowed() already refuses any other name: the path
 	 * below is built only from the fixed cue list. */
@@ -1843,6 +1919,7 @@ static bool start_music_current(struct audio_state *state)
 		return false;
 
 	stop_music_player(state);
+	speaker_park(state, false);
 
 	state->music_pid = launch_mp3(
 		state,
@@ -3050,6 +3127,9 @@ struct sink_watch {
 	struct spa_hook registry_listener;
 	bool sink_added;
 	bool broken;
+	/* Registry id of the "nuubos_cast" sink, 0 = none. */
+	uint32_t cast_id;
+	bool cast_changed;
 };
 
 static void sink_watch_global(void *data, uint32_t id, uint32_t permissions,
@@ -3059,17 +3139,35 @@ static void sink_watch_global(void *data, uint32_t id, uint32_t permissions,
 	struct sink_watch *watch = data;
 	const char *media_class;
 
-	(void)id; (void)permissions; (void)version;
+	(void)permissions; (void)version;
 	if (props == NULL || strcmp(type, PW_TYPE_INTERFACE_Node) != 0)
 		return;
 	media_class = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
-	if (media_class != NULL && strcmp(media_class, "Audio/Sink") == 0)
+	if (media_class != NULL && strcmp(media_class, "Audio/Sink") == 0) {
+		const char *name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+
 		watch->sink_added = true;
+		if (name != NULL && strcmp(name, "nuubos_cast") == 0) {
+			watch->cast_id = id;
+			watch->cast_changed = true;
+		}
+	}
+}
+
+static void sink_watch_global_remove(void *data, uint32_t id)
+{
+	struct sink_watch *watch = data;
+
+	if (watch->cast_id != 0 && id == watch->cast_id) {
+		watch->cast_id = 0;
+		watch->cast_changed = true;
+	}
 }
 
 static const struct pw_registry_events sink_watch_registry_events = {
 	PW_VERSION_REGISTRY_EVENTS,
 	.global = sink_watch_global,
+	.global_remove = sink_watch_global_remove,
 };
 
 static void sink_watch_error(void *data, uint32_t id, int seq, int res,
@@ -3345,6 +3443,7 @@ int main(int argc, char **argv)
 	int jack_fd;
 	int server;
 	int sigchld_fd;
+	int marks_fd;
 
 	if (argc == 2 && strcmp(argv[1], "--supported") == 0)
 		return 0;
@@ -3401,11 +3500,21 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	/* Screen-off and media-playing marks (speaker amplifier park). */
+	marks_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (marks_fd >= 0 &&
+	    inotify_add_watch(marks_fd, RUN_MARK_DIR,
+			      IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM) < 0) {
+		close(marks_fd);
+		marks_fd = -1;
+	}
+
 	emit_state_changed(dbus_conn, &state);
 	start_system_sound(&state, "boot");
 
 	while (!stop_requested) {
-		struct pollfd fds[6 + MAX_SUBSCRIBERS];
+		struct pollfd fds[7 + MAX_SUBSCRIBERS];
+		int marks_index = -1;
 		int pw_index = -1;
 		int subscriber_index;
 		nfds_t nfds = 1;
@@ -3455,6 +3564,14 @@ int main(int argc, char **argv)
 			nfds++;
 		}
 
+		reconcile_speaker_park(&state);
+		if (marks_fd >= 0) {
+			marks_index = (int)nfds;
+			fds[nfds].fd = marks_fd;
+			fds[nfds].events = POLLIN;
+			nfds++;
+		}
+
 		/* Subscribers never send after SUBSCRIBE: watch them only to
 		 * notice a closed peer. */
 		subscriber_index = (int)nfds;
@@ -3489,12 +3606,23 @@ int main(int argc, char **argv)
 		if (rc == 0)
 			continue;
 
+		if (marks_index >= 0 && (fds[marks_index].revents & POLLIN)) {
+			char drain[1024];
+
+			while (read(marks_fd, drain, sizeof(drain)) > 0)
+				;
+		}
+
 		if (jack_index >= 0 &&
 		    fds[jack_index].revents != 0) {
 			bool alive = true;
 
 			if (fds[jack_index].revents & POLLIN)
 				alive = drain_headphone_jack(jack_fd, &state);
+			/* The jack switches the speaker pin itself (an unplug
+			 * turns it back on): keep a parked amplifier off. */
+			if (state.speaker_parked)
+				(void)set_codec_speaker_pin(false);
 
 			if (!alive ||
 			    (fds[jack_index].revents &
@@ -3549,6 +3677,18 @@ int main(int argc, char **argv)
 
 		if (pw_index >= 0 && fds[pw_index].revents != 0) {
 			(void)pw_loop_iterate(sink_watch.loop, 0);
+			if (sink_watch.cast_changed) {
+				/* Casting with sound started or ended: the
+				 * route follows at once (the cast sink is new,
+				 * or gone and the previous output returns). */
+				sink_watch.cast_changed = false;
+				sink_watch.sink_added = false;
+				state.cast_available = sink_watch.cast_id != 0;
+				reconcile_selection(&state);
+				if (strcmp(state.applied_route, state.selected) == 0)
+					reroute_owned_streams(&state);
+				emit_state_changed(dbus_conn, &state);
+			}
 			if (sink_watch.sink_added) {
 				sink_watch.sink_added = false;
 				if (strcmp(state.applied_route, state.selected) != 0) {

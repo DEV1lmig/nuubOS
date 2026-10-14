@@ -9,6 +9,7 @@ name = "nuubos-admind"
 path = "admind/main.rs"
 
 [dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 serde = "=1.0.229"
 serde_json = "=1.0.151"
 zbus = "=5.19.0"

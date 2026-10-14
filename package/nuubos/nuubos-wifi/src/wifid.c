@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dbus/dbus.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
@@ -11,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -76,6 +78,15 @@ struct ip_config {
 
 static volatile sig_atomic_t running = 1;
 static volatile sig_atomic_t refresh_requested = 0;
+/* Radio power save (battery audit 2026-10-14): on, except while a file
+ * exists in LOW_LATENCY_DIR (one per session that needs low latency:
+ * streamd game streaming, emud netplay). Power save costs ~60 ms of
+ * latency on an idle link (measured 4 ms off, 65 ms on); with it off the
+ * radio stays awake all the time. Reapplied after a reconnection and after
+ * a resume (SIGUSR1 from nuubos-suspend: the driver may reset it). */
+#define LOW_LATENCY_DIR "/run/nuubos/low-latency"
+static volatile sig_atomic_t power_save_dirty = 1;
+static int low_latency_fd = -1;
 static bool scan_results_requested = false;
 /* Own wpa_supplicant control-interface monitor (ATTACH): unlike the
  * `wpa_cli -a` action script it receives every event, including
@@ -204,8 +215,10 @@ static void on_signal(int signo)
 
     if (signo == SIGTERM || signo == SIGINT)
         running = 0;
-    else if (signo == SIGUSR1)
+    else if (signo == SIGUSR1) {
         refresh_requested = 1;
+        power_save_dirty = 1;
+    }
     if (wake_pipe[1] >= 0)
         if (write(wake_pipe[1], "w", 1) < 0) {
             /* Pipe full: a wakeup is already pending. */
@@ -228,13 +241,13 @@ static bool open_wake_pipe(void)
  * DHCP lease, stop) or the next scan of an active scan session. */
 static void wait_for_work(DBusConnection *conn, int dbus_fd)
 {
-    struct pollfd fds[3];
+    struct pollfd fds[4];
     nfds_t count = 0;
     int timeout = -1;
     char buf[64];
 
     if (dbus_connection_get_dispatch_status(conn) == DBUS_DISPATCH_DATA_REMAINS ||
-        refresh_requested || scan_results_requested || !running)
+        refresh_requested || scan_results_requested || power_save_dirty || !running)
         timeout = 0;
     else if (scan_session_active && !scan_in_flight && next_scan_due_ms != 0) {
         uint64_t now = monotonic_ms();
@@ -257,7 +270,20 @@ static void wait_for_work(DBusConnection *conn, int dbus_fd)
         fds[count].fd = wpa_monitor_fd;
         fds[count++].events = POLLIN;
     }
+    if (low_latency_fd >= 0) {
+        fds[count].fd = low_latency_fd;
+        fds[count++].events = POLLIN;
+    }
     (void)poll(fds, count, timeout);
+    if (low_latency_fd >= 0) {
+        char events[1024];
+        bool changed = false;
+
+        while (read(low_latency_fd, events, sizeof(events)) > 0)
+            changed = true;
+        if (changed)
+            power_save_dirty = 1;
+    }
     if (wake_pipe[0] >= 0)
         while (read(wake_pipe[0], buf, sizeof(buf)) > 0)
             ;
@@ -2398,6 +2424,33 @@ static void drain_wpa_monitor(DBusConnection *conn)
     }
 }
 
+static bool low_latency_requested(void)
+{
+    DIR *dir = opendir(LOW_LATENCY_DIR);
+    struct dirent *entry;
+    bool requested = false;
+
+    if (!dir)
+        return false;
+    while (!requested && (entry = readdir(dir)) != NULL)
+        requested = entry->d_name[0] != '.';
+    closedir(dir);
+    return requested;
+}
+
+static void apply_power_save(void)
+{
+    static int applied = -1;
+    bool on = !low_latency_requested();
+    char *argv[] = {"iw", "dev", WIFI_IFACE, "set", "power_save", on ? "on" : "off", NULL};
+
+    if (run_quiet(argv) != 0)
+        return;
+    if (applied != (int)on)
+        fprintf(stderr, "nuubos-wifid: power save %s\n", on ? "on" : "off (low latency)");
+    applied = on;
+}
+
 int main(void)
 {
     DBusConnection *conn;
@@ -2470,6 +2523,15 @@ int main(void)
     refresh_state(&current);
     ensure_ip_profile(&current);
 
+    (void)mkdir(LOW_LATENCY_DIR, 0755);
+    low_latency_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (low_latency_fd >= 0 &&
+        inotify_add_watch(low_latency_fd, LOW_LATENCY_DIR,
+                          IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM) < 0) {
+        close(low_latency_fd);
+        low_latency_fd = -1;
+    }
+
     if (!dbus_connection_get_unix_fd(conn, &dbus_fd))
         dbus_fd = -1;
 
@@ -2508,6 +2570,7 @@ int main(void)
                 if (newly_connected) {
                     bool resumed = loss_due_ms != 0 &&
                         strcmp(loss_ssid, current.ssid) == 0;
+                    power_save_dirty = 1;
                     loss_due_ms = 0;
                     if (!resumed)
                         post_wifi_notification("wifi.connected", current.ssid);
@@ -2559,6 +2622,12 @@ int main(void)
                 emit_operation_failed(conn, "scan", text);
                 next_scan_due_ms = monotonic_ms() + SCAN_SESSION_INTERVAL_MS;
             }
+        }
+
+        if (power_save_dirty) {
+            power_save_dirty = 0;
+            if (current.enabled)
+                apply_power_save();
         }
 
         ensure_ip_profile(&current);

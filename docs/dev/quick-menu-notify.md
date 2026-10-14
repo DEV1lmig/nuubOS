@@ -27,3 +27,7 @@ Global notifications/OSD above applications and fullscreen games: volume, emulat
 - Steam Link toasts `stream.steamlink.rolledback` (automatic) / `stream.steamlink.restored` (manual).
 - GAME row "RetroArch Advanced" is now "RetroArch" (string 421).
 - No Quick Menu while nuubUI writes ui-context `user-picker`, `oob` or `safe-mode` (`menu_allowed()`); the menu key is then silent too: the `quick-settings` cue plays only when the menu actually opens/closes (user request 2026-10-11).
+## MUSIC section (user requests 2026-10-12)
+- Visible while the Media app's music plays or is paused (QM subscribes to `mediad.sock`, forwards only changes of state/title/artist/volume), over Home and over a game, between the GAME/STREAM/WEB block and BACKGROUND TASK. Rows: 31 track (title • artist, value Pause/Play; confirm toggles, ←/→ previous/next), 32 Next Track, 33 Music Volume (slider, ±5 → mediad `VOLUME`), 34 Game Volume (only over a game: the Applications volume, ±5 → audiod `APPLICATIONS VOLUME SET`), 35 Stop Music. Strings 1132–1137; icons play/pause (Font Awesome). Headless scenes `qm_music_home`, `qm_music_game`.
+- Media Screen Off: while `/run/nuubos/screen-off` exists the Quick Menu ignores every key except Power, which only runs `nuubos-displayctl screen on` (no Power menu).
+

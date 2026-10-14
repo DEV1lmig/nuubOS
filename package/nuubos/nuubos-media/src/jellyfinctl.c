@@ -5,9 +5,14 @@
  *   status USER                      server= name= signed=0|1
  *   login USER SERVER NAME           password on stdin; stores the token only
  *   logout USER
- *   views USER                       item=<id>\t<name>\t<type>\t1\t0\t0 ... end=1
+ *   views USER                       item=<id>\t<name>\t<type>\t1\t0\t0\t\t0 ... end=1
  *   items USER PARENT                item=<id>\t<name>\t<type>\t<folder>\t<resume s>\t<length s>
- *   stream USER ID                   direct-play URL for nuubos-mediad
+ *                                    \t<subtitle>\t<number>  (subtitle: artist, series,
+ *                                    library kind or year; number: track/episode)
+ *   resume USER                      the server's Continue Watching, same lines
+ *   image USER ID                    image=<path>: the item's primary picture, cached
+ *                                    in /userdata/cache/media/jellyfin ("" = none)
+ *   stream USER ID [ID...]           direct-play URLs for nuubos-mediad, one a line
  *   progress USER ID SECONDS         report the stop position (resume)
  *
  * Jellyfin is self-hosted and open source; no cloud account is involved.
@@ -23,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cjson/cJSON.h>
@@ -31,6 +37,11 @@
 #ifndef STATE_USERS
 #define STATE_USERS "/state/users"
 #endif
+#ifndef IMAGE_CACHE
+#define IMAGE_CACHE "/userdata/cache/media/jellyfin"
+#endif
+/* A cached picture is refreshed after a week. */
+#define IMAGE_MAX_AGE (7 * 24 * 3600)
 #define CLIENT_NAME "nuubOS"
 #define DEVICE_ID_FILE "/etc/machine-id"
 
@@ -234,17 +245,85 @@ static int list(const char *url, const char *token)
 		const cJSON *ud = cJSON_GetObjectItemCaseSensitive(it, "UserData");
 		const cJSON *pos = ud ? cJSON_GetObjectItemCaseSensitive(ud, "PlaybackPositionTicks") : NULL;
 		const cJSON *len = cJSON_GetObjectItemCaseSensitive(it, "RunTimeTicks");
+		const cJSON *year = cJSON_GetObjectItemCaseSensitive(it, "ProductionYear");
+		const cJSON *number = cJSON_GetObjectItemCaseSensitive(it, "IndexNumber");
+		const char *sub = jstr(it, "AlbumArtist");
+		char year_text[16] = "";
 
 		if (!valid_item(jstr(it, "Id")))
 			continue;
+		if (!sub[0])
+			sub = jstr(it, "SeriesName");
+		/* Libraries: their kind (music, movies, tvshows...), so the Media
+		 * app puts them in its Music or Video section. */
+		if (!sub[0])
+			sub = jstr(it, "CollectionType");
+		if (!sub[0] && cJSON_IsNumber(year)) {
+			snprintf(year_text, sizeof(year_text), "%d", year->valueint);
+			sub = year_text;
+		}
 		printf("item=%s\t", jstr(it, "Id"));
 		print_clean(jstr(it, "Name"));
-		printf("\t%s\t%d\t%.0f\t%.0f\n", jstr(it, "Type"), cJSON_IsTrue(folder) ? 1 : 0,
+		printf("\t%s\t%d\t%.0f\t%.0f\t", jstr(it, "Type"), cJSON_IsTrue(folder) ? 1 : 0,
 		       cJSON_IsNumber(pos) ? pos->valuedouble / 1e7 : 0.0,
 		       cJSON_IsNumber(len) ? len->valuedouble / 1e7 : 0.0);
+		print_clean(sub);
+		printf("\t%d\n", cJSON_IsNumber(number) ? number->valueint : 0);
 	}
 	cJSON_Delete(root);
 	puts("end=1");
+	return 0;
+}
+
+static void mkdir_p(const char *path)
+{
+	char tmp[512];
+
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	for (char *p = tmp + 1; *p; p++)
+		if (*p == '/') {
+			*p = '\0';
+			mkdir(tmp, 0755);
+			*p = '/';
+		}
+	mkdir(tmp, 0755);
+}
+
+/* The item's primary picture, downloaded once a week at most. */
+static int image(const struct account *a, const char *id)
+{
+	char path[512], tmp[560], url[1024];
+	struct buffer b = { 0 };
+	struct stat st;
+	long status;
+	FILE *fp;
+
+	snprintf(path, sizeof(path), IMAGE_CACHE "/%s.img", id);
+	if (stat(path, &st) == 0 && time(NULL) - st.st_mtime < IMAGE_MAX_AGE) {
+		printf("image=%s\n", st.st_size > 0 ? path : "");
+		return 0;
+	}
+	snprintf(url, sizeof(url), "%s/Items/%s/Images/Primary?fillHeight=360&quality=85", a->server, id);
+	status = request("GET", url, a->token, NULL, &b);
+	if (status != 200 && status != 404) {
+		free(b.data);
+		/* Offline: an old copy is better than none. */
+		printf("image=%s\n", stat(path, &st) == 0 && st.st_size > 0 ? path : "");
+		return 0;
+	}
+	mkdir_p(IMAGE_CACHE);
+	snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid());
+	fp = fopen(tmp, "wb");
+	/* 404 = no picture: an empty file remembers it. */
+	if (!fp || (status == 200 && fwrite(b.data, 1, b.len, fp) != b.len) || fclose(fp) != 0 ||
+	    rename(tmp, path) != 0) {
+		if (fp)
+			unlink(tmp);
+		free(b.data);
+		return fail("storage");
+	}
+	free(b.data);
+	printf("image=%s\n", status == 200 && b.len > 0 ? path : "");
 	return 0;
 }
 
@@ -256,7 +335,8 @@ int main(int argc, char **argv)
 
 	if (argc < 3 || !valid_user(argv[2])) {
 		fprintf(stderr, "Usage: nuubos-jellyfinctl status|logout|views USER | login USER SERVER NAME | "
-				"items USER PARENT | stream USER ID | progress USER ID SECONDS\n");
+				"items USER PARENT | resume USER | image USER ID | stream USER ID... | "
+				"progress USER ID SECONDS\n");
 		return 2;
 	}
 	curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -317,13 +397,23 @@ int main(int argc, char **argv)
 		rc = list(url, a.token);
 	} else if (!strcmp(argv[1], "items") && argc == 4 && valid_item(argv[3])) {
 		snprintf(url, sizeof(url),
-			 "%s/Users/%s/Items?ParentId=%s&SortBy=SortName&Fields=UserData&Limit=500",
+			 "%s/Users/%s/Items?ParentId=%s&SortBy=ParentIndexNumber,IndexNumber,SortName"
+			 "&Fields=UserData,ProductionYear&Limit=500",
 			 a.server, a.user_id, argv[3]);
 		rc = list(url, a.token);
-	} else if (!strcmp(argv[1], "stream") && argc == 4 && valid_item(argv[3])) {
+	} else if (!strcmp(argv[1], "resume") && argc == 3) {
+		snprintf(url, sizeof(url), "%s/Users/%s/Items/Resume?Limit=20&MediaTypes=Video&Fields=UserData,ProductionYear",
+			 a.server, a.user_id);
+		rc = list(url, a.token);
+	} else if (!strcmp(argv[1], "image") && argc == 4 && valid_item(argv[3])) {
+		rc = image(&a, argv[3]);
+	} else if (!strcmp(argv[1], "stream") && argc >= 4) {
 		/* Static direct play; the player decides from the container. */
-		printf("%s/Items/%s/Download?api_key=%s\n", a.server, argv[3], a.token);
 		rc = 0;
+		for (int i = 3; i < argc && !rc; i++)
+			rc = valid_item(argv[i]) ? 0 : fail("item");
+		for (int i = 3; i < argc && !rc; i++)
+			printf("%s/Items/%s/Download?api_key=%s\n", a.server, argv[i], a.token);
 	} else if (!strcmp(argv[1], "progress") && argc == 5 && valid_item(argv[3])) {
 		char body[256];
 		struct buffer b = { 0 };

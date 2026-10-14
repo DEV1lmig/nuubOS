@@ -6,6 +6,9 @@
  * downloads, large lists. */
 
 const ROMS = '/userdata/roms';
+/* Where new games go: libraryd's games_root (the SD2 games card while it
+ * can be written, else SD1). */
+const gamesRoot = async () => (await get('library')).games_root || ROMS;
 const BIOS = '/userdata/bios';
 const LANGUAGES = [['en', 'English'], ['it', 'Italiano'], ['fr', 'Français'], ['de', 'Deutsch'], ['es', 'Español'], ['pt', 'Português'], ['nl', 'Nederlands']];
 
@@ -42,7 +45,9 @@ async function droppedFiles(dt) {
   return out.filter((x) => !x.file.name.startsWith('.'));
 }
 
-/* A drop zone with a multi-file picker; onFiles([{ file, rel }]). */
+/* A drop zone with a multi-file picker and, where folders are taken, a
+ * folder picker (its files keep their folder, as in a drop);
+ * onFiles([{ file, rel }]). */
 function dropZone(title, detail, onFiles, { accept = '', folders = true } = {}) {
   const input = h('input', { type: 'file', multiple: true, accept: accept || null, hidden: true });
   input.addEventListener('change', () => {
@@ -51,8 +56,19 @@ function dropZone(title, detail, onFiles, { accept = '', folders = true } = {}) 
     if (files.length) onFiles(files);
   });
   const pick = button(T('choose_files'), () => input.click(), { icon: 'upload', key: 'pick:' + title });
+  let dirs = null;
+  if (folders) {
+    const dirInput = h('input', { type: 'file', multiple: true, webkitdirectory: true, hidden: true });
+    dirInput.addEventListener('change', () => {
+      const files = [...dirInput.files].map((file) => ({ file, rel: (file.webkitRelativePath || '').split('/').slice(0, -1).join('/') }))
+        .filter((x) => !x.file.name.startsWith('.'));
+      dirInput.value = '';
+      if (files.length) onFiles(files);
+    });
+    dirs = [button(T('choose_folder'), () => dirInput.click(), { icon: 'folder', key: 'pickdir:' + title }), dirInput];
+  }
   const zone = h('div', { class: 'drop' }, icon('upload'),
-    h('div', { class: 'dt' }, h('b', { text: title }), h('span', { text: detail })), pick, input);
+    h('div', { class: 'dt' }, h('b', { text: title }), h('span', { text: detail })), pick, dirs, input);
   zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
   zone.addEventListener('dragleave', () => zone.classList.remove('over'));
   zone.addEventListener('drop', async (e) => {
@@ -76,15 +92,15 @@ function gameCard(g, from) {
   const [id, , title, cover, , , , avail] = g;
   const c = h('button', { class: 'card' + (avail === '0' ? ' na' : ''), type: 'button', data: { key: 'g:' + id }, title,
     on: { click: () => go('library/game/' + id + (from ? '/' + from : '')) } },
-  cover ? h('img', { src: img(cover), alt: '', loading: 'lazy' }) : null, h('span', { class: 'ct', text: title }));
+  cover ? h('img', { src: img(cover, 320), alt: '', loading: 'lazy' }) : null, h('span', { class: 'ct', text: title }));
   return c;
 }
 
 function showcase(key, name, sub, color, previews, glyph, onClick) {
   const b = h('button', { class: 'show', type: 'button', data: { key }, vars: color ? { '--c': color } : null, on: { click: onClick } },
     h('span', { class: 'wash' }),
-    previews.length ? h('span', { class: 'fan' }, previews.slice(0, 3).map((p) => h('img', { src: img(p), alt: '', loading: 'lazy' })))
-      : glyph ? h('img', { class: 'glyph', src: img(glyph), alt: '' }) : null,
+    previews.length ? h('span', { class: 'fan' }, previews.slice(0, 3).map((p) => h('img', { src: img(p, 192), alt: '', loading: 'lazy' })))
+      : glyph ? h('img', { class: 'glyph', src: img(glyph, 192), alt: '' }) : null,
     h('span', { class: 'lab' }, h('b', { text: name }), h('span', { text: sub })));
   return b;
 }
@@ -125,7 +141,7 @@ page('overview', 'manage', () => T('overview'), async () => {
     let d = null;
     try { d = await get('details', { id: emu.game }); } catch (e) { /* unknown game */ }
     const g = d ? rows(d.game)[0] : null;
-    nodes.push(h('div', { class: 'now' }, g && g[3] ? h('img', { src: img(g[3]), alt: '' }) : null,
+    nodes.push(h('div', { class: 'now' }, g && g[3] ? h('img', { src: img(g[3], 96), alt: '' }) : null,
       h('div', { class: 'rt' }, h('div', { class: 'kicker', text: C(369, 'Now Playing') }), h('div', { class: 'title', text: g ? g[2] : emu.game }),
         h('div', { class: 'detail', text: d ? d.system_name : emu.system })),
       button(C(422, 'Quit Game'), () => act('emu.quit', {}, { topics: ['emu'] }), { key: 'quit', arm: { prompt: C(191, 'Press again to confirm') } })));
@@ -135,15 +151,13 @@ page('overview', 'manage', () => T('overview'), async () => {
   const root = rows(roots.root).find((r) => r[1] === '/userdata') || rows(roots.root)[0];
   const total = root ? Number(root[2]) : 0, free = root ? Number(root[3]) : 0;
   const tile = (label, ic, value, sub, meter) => h('div', { class: 'tile' }, h('div', { class: 'tl' }, icon(ic), label),
-    h('div', { class: 'tv', text: value }), meter !== undefined ? h('div', { class: 'meter' }, h('i', { vars: { width: meter + '%' } })) : null, h('div', { class: 'ts', text: sub }));
-  const meterTile = (el, f) => { const i = $('.meter i', el); if (i) i.style.width = f + '%'; return el; };
+    h('div', { class: 'tv', text: value }), meter !== undefined ? h('div', { class: 'meter' }, h('i', { vars: { '--m': meter + '%' } })) : null, h('div', { class: 'ts', text: sub }));
   nodes.push(h('div', { class: 'hero' },
-    meterTile(tile(C(100, 'Battery'), 'battery-full', Number.isNaN(battery) ? '–' : battery + '%',
-      bstate === 'charging' ? C(382, 'Charging') : bstate === 'full' ? C(383, 'Fully charged') : C(818, 'Discharging'), 0), battery),
-    meterTile(tile(C(19, 'Storage'), 'sd-card', total ? sizeText(free) : '–', total ? C(622, '{0} free', sizeText(free)) + ' / ' + sizeText(total) : '', 0), total ? (1 - free / total) * 100 : 0),
+    tile(C(100, 'Battery'), 'battery-full', Number.isNaN(battery) ? '–' : battery + '%',
+      bstate === 'charging' ? C(382, 'Charging') : bstate === 'full' ? C(383, 'Fully charged') : C(818, 'Discharging'), Number.isNaN(battery) ? 0 : battery),
+    tile(C(19, 'Storage'), 'sd-card', total ? sizeText(free) : '–', total ? C(622, '{0} free', sizeText(free)) + ' / ' + sizeText(total) : '', total ? (1 - free / total) * 100 : 0),
     tile(C(149, 'Games'), 'gamepad', lib.games || '0', lib.scanning === '1' ? C(410, 'Searching for games…') : C(840, 'Systems') + ': ' + rows(lib.system).length),
-    tile(C(103, 'Network'), 'wifi', (sys.network || '').split('•').pop().trim() || C(159, 'Not connected'), sys.network ? (sys.network.split('•')[0] || '').trim() : ''),
-    tile(C(98, 'Device'), 'microchip', 'nuubOS ' + (sys['nuubos.version'] || ''), sys['device.model'] || '')));
+    tile(C(103, 'Network'), 'wifi', (sys.network || '').split('•').pop().trim() || C(159, 'Not connected'), sys.network ? (sys.network.split('•')[0] || '').trim() : '')));
 
   const recent = rows(lib.recent);
   nodes.push(section(C(0, 'Recently Played'), 'user'));
@@ -156,10 +170,11 @@ page('overview', 'manage', () => T('overview'), async () => {
     nodes.push(section(T('tasks'), 'device'));
     nodes.push(group([...live, ...past].map(jobRow)));
   }
-  nodes.push(h('div', { class: 'actions' },
-    button(C(804, 'Scan for New Games'), () => act('lib.scan').then(() => toast(C(410, 'Searching for games…'))), { icon: 'magnifying-glass', key: 'scan' }),
-    button(T('upload_games'), () => go('library/upload'), { icon: 'upload', key: 'up' })));
-  return { title: T('overview'), nodes, topics: ['system', 'library', 'emu', 'jobs', 'status'] };
+  return {
+    title: T('overview'), kicker: [sys['device.model'], 'nuubOS ' + (sys['nuubos.version'] || '')].filter(Boolean).join(' • '),
+    nodes, topics: ['system', 'library', 'emu', 'jobs', 'status'],
+    tools: button(T('add_games'), () => go('library'), { icon: 'upload', key: 'add', cls: 'primary' }),
+  };
 });
 
 /* ========================================================== LIBRARY */
@@ -168,30 +183,199 @@ async function systemsRegistry() {
   return (await get('systems')).systems || [];
 }
 
+const extOf = (name) => (name.match(/\.([^./]+)$/) || [, ''])[1].toLowerCase();
+/* Disc images and multi-disc sets come as an index plus the files it
+ * names: a .cue its tracks, a .gdi its tracks, a .ccd its .img/.sub, an
+ * .m3u (a playlist: PS1 and other multi-disc games, floppy sets) its discs,
+ * which can be indexes again (.m3u -> .cue -> .bin), also in subfolders. */
+const DISC_INDEX = ['cue', 'm3u', 'gdi', 'ccd'];
+const DISC_TRACKS = ['bin', 'img', 'sub', 'iso', 'raw', 'wav'];
+
+const pathOf = (x) => (x.rel ? x.rel + '/' : '') + x.file.name;
+
+/* dir + a path from an index ('..', '.' and backslashes allowed). */
+function joinPath(dir, ref) {
+  const out = dir ? dir.split('/') : [];
+  for (const p of ref.replace(/\\/g, '/').split('/')) {
+    if (!p || p === '.') continue;
+    if (p === '..') out.pop(); else out.push(p);
+  }
+  return out.join('/');
+}
+
+/* Paths (lower case, relative to the drop) of the files an index names. */
+async function discRefs(x) {
+  const ext = extOf(x.file.name);
+  const names = [];
+  if (ext === 'ccd') {
+    const base = x.file.name.replace(/\.[^.]+$/, '');
+    names.push(base + '.img', base + '.sub');
+  } else if (x.file.size <= 256 * 1024) {
+    const text = await x.file.text().catch(() => '');
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      let m;
+      if (!line) continue;
+      if (ext === 'm3u') { if (!line.startsWith('#')) names.push(line.split('|')[0].trim()); }
+      else if (ext === 'cue') { if ((m = line.match(/^FILE\s+(?:"([^"]+)"|(\S+))/i))) names.push(m[1] || m[2]); }
+      else if (ext === 'gdi' && (m = line.match(/^\d+\s+\d+\s+\d+\s+\d+\s+(?:"([^"]+)"|(\S+))/))) names.push(m[1] || m[2]);
+    }
+  }
+  return names.map((n) => joinPath(x.rel, n).toLowerCase());
+}
+
+/* The system of a disc set from the header of its first track or image
+ * (the strings libraryd's sniff_system() knows); '' when it does not tell
+ * (a .chd is compressed). */
+const DISC_MAGIC = [['PLAYSTATION', 'psx'], ['SEGASATURN', 'saturn'], ['SEGADISCSYSTEM', 'segacd'], ['SEGAKATANA', 'dreamcast']];
+async function discSystem(files) {
+  const track = files.find((x) => ['bin', 'img', 'iso'].includes(extOf(x.file.name)));
+  if (!track) return '';
+  const head = await track.file.slice(0, 40960).text().catch(() => '');
+  const hit = DISC_MAGIC.find(([m]) => head.includes(m));
+  return hit ? hit[1] : '';
+}
+
+/* Disc sets in a drop: Map(top index -> its files, the index first).
+ * Tracks an index does not name follow the first index of their folder. */
+async function discSets(items) {
+  const byPath = new Map(items.map((x) => [pathOf(x).toLowerCase(), x]));
+  const owner = new Map();
+  const indexes = items.filter((x) => DISC_INDEX.includes(extOf(x.file.name)));
+  for (const ix of indexes)
+    for (const p of await discRefs(ix)) {
+      const r = byPath.get(p);
+      if (r && r !== ix && !owner.has(r)) owner.set(r, ix);
+    }
+  for (const x of items) {
+    if (owner.has(x) || !DISC_TRACKS.includes(extOf(x.file.name))) continue;
+    const ix = indexes.find((i) => i.rel === x.rel);
+    if (ix) owner.set(x, ix);
+  }
+  const top = (x) => {
+    const seen = new Set([x]);
+    while (owner.has(x) && !seen.has(owner.get(x))) { x = owner.get(x); seen.add(x); }
+    return x;
+  };
+  const sets = new Map();
+  for (const ix of indexes) if (top(ix) === ix) sets.set(ix, [ix]);
+  for (const x of owner.keys()) { const t = top(x); if (sets.has(t)) sets.get(t).push(x); }
+  return sets;
+}
+
+/* Where dropped games go: a folder named like a system (id, folder, name
+ * or alias, at any depth) gives its system, the path below it is kept; a disc set goes as a whole to the one system
+ * that takes its index and its discs, else the user picks it once; any
+ * other file goes by its type when a single system takes it; the rest is
+ * asked once per file type (nuubos-library-import places games copied on
+ * the console the same way). Resolves to [{ file, dir }] and the number
+ * of files the user chose to skip. */
+async function placeGames(items, registry, root) {
+  const named = new Map();
+  for (const s of registry)
+    for (const k of [s.id, s.folder, s.name, ...String(s.aliases || '').split(',')]) if (k) named.set(String(k).toLowerCase(), s);
+  const takers = new Map();
+  for (const s of registry) for (const e of s.extensions.split(',').filter(Boolean)) takers.set(e, [...(takers.get(e) || []), s]);
+  const placed = [], pending = new Map(), loose = [];
+  for (const x of items) {
+    const parts = x.rel ? x.rel.split('/') : [];
+    const at = parts.findIndex((p) => named.has(p.toLowerCase()));
+    if (at >= 0) placed.push({ x, sys: named.get(parts[at].toLowerCase()), rel: parts.slice(at + 1).join('/') });
+    else loose.push(x);
+  }
+  const inSet = new Set();
+  for (const [ix, files] of await discSets(loose)) {
+    files.forEach((x) => inSet.add(x));
+    /* Track files (.bin, .img…) do not tell the system; indexes and disc
+     * images (.chd, .pbp, .d64…) do. */
+    const telling = [...new Set(files.map((x) => extOf(x.file.name)).filter((e) => !DISC_TRACKS.includes(e)))];
+    let options = registry.filter((s) => { const ex = s.extensions.split(','); return telling.every((e) => ex.includes(e)); });
+    if (options.length > 1) {
+      const id = await discSystem(files);
+      if (options.some((s) => s.id === id)) options = options.filter((s) => s.id === id);
+    }
+    if (options.length === 1) { files.forEach((x) => placed.push({ x, sys: options[0], rel: x.rel })); continue; }
+    pending.set('disc:' + pathOf(ix), { options: options.length ? options : registry, items: files });
+  }
+  for (const x of loose) {
+    if (inSet.has(x)) continue;
+    const ext = extOf(x.file.name);
+    const options = takers.get(ext) || [];
+    if (options.length === 1) { placed.push({ x, sys: options[0], rel: x.rel }); continue; }
+    const key = 'ext:' + ext;
+    if (!pending.has(key)) pending.set(key, { options: options.length ? options : registry, items: [] });
+    pending.get(key).items.push(x);
+  }
+  let skipped = 0;
+  for (const p of pending.values()) {
+    const first = p.items[0];
+    const label = first.file.name + (p.items.length > 1 ? ' (+' + (p.items.length - 1) + ')' : '');
+    const sorted = [...p.options].sort((a, b) => a.name.localeCompare(b.name, LANG));
+    const id = await choose(T('which_system', label), sorted.map((s) => ({ value: s.id, label: s.name })));
+    const sys = sorted.find((s) => s.id === id);
+    if (!sys) { skipped += p.items.length; continue; }
+    for (const x of p.items) placed.push({ x, sys, rel: x.rel });
+  }
+  return { files: placed.map((p) => ({ file: p.x.file, dir: root + '/' + p.sys.folder + (p.rel ? '/' + p.rel : '') })), skipped };
+}
+
+async function addGames(items) {
+  if (!items.length) return;
+  const { files, skipped } = await placeGames(items, await systemsRegistry(), await gamesRoot());
+  if (skipped) toast(T('skipped', skipped), '', true);
+  const dirs = new Map(files.map((f) => [f.file, f.dir]));
+  await uploadFiles(files.map((f) => f.file), (f) => dirs.get(f), { mkdirs: true, after: 'scan' });
+}
+
+/* The search text survives the page's live refreshes. */
+let libraryQuery = '';
+
+async function searchResults(q) {
+  const words = q.replace(/[|\t]/g, ' ').trim();
+  const r = await get('search', { spec: 'q=' + words }, true).catch(() => ({}));
+  const list = rows(r.game);
+  return [section(gamesText(list.length), null),
+    list.length ? h('div', { class: 'grid' }, list.map((g) => gameCard(g))) : empty(C(836, 'No games match these filters'), '')];
+}
+
 page('library', 'manage', () => T('library'), async (path) => {
-  const [what, arg, from] = path;
+  const [what, arg] = path;
   if (what === 'game') return gamePage(arg, path[2]);
+  if (what === 'gamesettings') return gameSettingsPage(arg, path[2]);
   if (what === 'system') return systemPage(arg);
   if (what === 'collection') return collectionPage(arg);
-  if (what === 'search') return searchPage(arg || '');
-  if (what === 'upload') return uploadPage();
   const lib = await get('library');
-  const search = h('input', { class: 'input', type: 'search', placeholder: C(831, 'Title'), 'aria-label': C(828, 'Find'), data: { key: 'search' } });
-  search.addEventListener('keydown', (e) => { if (e.key === 'Enter' && search.value.trim()) go('library/search/' + search.value.trim()); });
-  const nodes = [
-    h('div', { class: 'searchbar' }, h('div', { class: 'wrap' }, icon('magnifying-glass'), search),
-      button(T('upload_games'), () => go('library/upload'), { icon: 'upload', key: 'upload' })),
-  ];
+  const results = h('div', { class: 'results' });
+  const shelves = h('div', { class: 'shelves' });
+  const search = h('input', { class: 'input', type: 'search', value: libraryQuery, placeholder: T('search_games'), 'aria-label': T('search_games'), data: { key: 'search' } });
+  let timer = null, seq = 0;
+  const show = async () => {
+    const n = ++seq;
+    const q = libraryQuery.trim();
+    const nodes = q ? await searchResults(q) : [];
+    if (n !== seq) return;
+    results.replaceChildren(...nodes);
+    shelves.hidden = !!q;
+  };
+  search.addEventListener('input', () => { libraryQuery = search.value; clearTimeout(timer); timer = setTimeout(show, 250); });
   const systems = rows(lib.system);
-  nodes.push(section(C(840, 'Systems'), 'device'));
-  nodes.push(systems.length
-    ? h('div', { class: 'shelf' }, systems.map((s) => showcase('s:' + s[0], s[1], gamesText(s[2]), s[4], s.slice(6).filter(Boolean), s[5], () => go('library/system/' + s[0]))))
-    : empty(C(398, 'No games yet'), C(2, 'Copy your games to the roms folder on the SD card, one folder per system.')));
-  nodes.push(section(C(537, 'Collections'), 'user'));
-  const cols = rows(lib.collection);
-  nodes.push(h('div', { class: 'shelf' },
-    cols.map((c) => showcase('c:' + c[0], c[1], gamesText(c[2]), null, c.slice(3).filter(Boolean), null, () => go('library/collection/' + c[0]))),
-    h('button', { class: 'show new', type: 'button', data: { key: 'newcol' }, on: { click: newCollection } }, h('span', { class: 'lab' }, h('b', { text: C(538, 'New Collection') })))));
+  shelves.append(section(C(840, 'Systems'), 'device'),
+    systems.length
+      ? h('div', { class: 'shelf' }, systems.map((s) => showcase('s:' + s[0], s[1], gamesText(s[2]), s[4], s.slice(6).filter(Boolean), s[5], () => go('library/system/' + s[0]))))
+      : empty(C(398, 'No games yet'), C(2, 'Copy your games to the roms folder on the SD card, one folder per system.')),
+    section(C(537, 'Collections'), 'user'),
+    h('div', { class: 'shelf' },
+      rows(lib.collection).map((c) => showcase('c:' + c[0], c[1], gamesText(c[2]), null, c.slice(3).filter(Boolean), null, () => go('library/collection/' + c[0]))),
+      h('button', { class: 'show new', type: 'button', data: { key: 'newcol' }, on: { click: newCollection } }, icon('plus'), h('b', { text: C(538, 'New Collection') }))));
+  if (libraryQuery.trim()) {
+    results.append(...await searchResults(libraryQuery.trim()));
+    shelves.hidden = true;
+  }
+  const nodes = [
+    dropZone(T('add_games'), T('add_games_hint'), addGames),
+    h('div', { class: 'searchbar' }, h('div', { class: 'wrap' }, icon('magnifying-glass'), search)),
+    results, shelves,
+  ];
   return { title: T('library'), nodes, topics: ['library'] };
 });
 
@@ -213,58 +397,37 @@ async function systemPage(id) {
   const list = rows(games.game);
   const exts = sys.extensions.split(',').filter(Boolean);
   const nodes = [dropZone(T('upload_to', sys.name), T('file_types', exts.map((e) => '.' + e).join(' ')), (items) => {
-    const bad = items.filter((x) => !exts.some((e) => x.file.name.toLowerCase().endsWith('.' + e)) && !/\.(cue|bin|m3u|img|iso|chd|ccd|sub)$/i.test(x.file.name));
+    const ok = (x) => exts.includes(extOf(x.file.name)) || DISC_INDEX.includes(extOf(x.file.name)) || DISC_TRACKS.includes(extOf(x.file.name));
+    const bad = items.filter((x) => !ok(x));
     if (bad.length) toast(T('not_for_system', bad.length), bad.slice(0, 3).map((x) => x.file.name).join(', '), true, 6000);
-    const good = items.filter((x) => !bad.includes(x));
-    sendAll(good, (x) => ROMS + '/' + sys.folder + (x.rel ? '/' + x.rel : ''), { after: 'scan' });
+    const root = lib.games_root || ROMS;
+    sendAll(items.filter(ok), (x) => root + '/' + sys.folder + (x.rel ? '/' + x.rel : ''), { after: 'scan' });
   })];
   nodes.push(list.length ? h('div', { class: 'grid' }, list.map((g) => gameCard(g))) : empty(C(398, 'No games yet'), ''));
   const sysLib = rows(lib.system).find((s) => s[0] === id);
-  return { title: sys.name, kicker: gamesText(list.length), back: 'library', nodes, topics: ['library'], tools: sysLib && sysLib[5] ? h('img', { class: 'avatar', src: img(sysLib[5]), alt: '' }) : null };
+  return { title: sys.name, kicker: gamesText(list.length), back: 'library', nodes, topics: ['library'], tools: sysLib && sysLib[5] ? h('img', { class: 'sysicon', src: img(sysLib[5], 96), alt: '' }) : null };
 }
 
 async function collectionPage(id) {
   const [games, lib] = await Promise.all([get('games', { scope: 'collection:' + id }), get('library')]);
   const col = rows(lib.collection).find((c) => c[0] === id);
   const list = rows(games.game);
-  const tools = h('div', { class: 'actions' },
-    button(C(843, 'Rename Collection'), async () => {
-      const v = await form(C(843, 'Rename Collection'), [{ name: 'name', label: C(539, 'Collection name'), value: col ? col[1] : '' }]);
-      if (v && v.name.trim()) await act('coll.rename', { id, name: v.name.trim() }, { topics: ['library'] });
-    }, { icon: 'pen', round: true, key: 'rename' }),
-    button(C(839, 'Delete Collection'), async () => {
-      await act('coll.delete', { id }, { topics: ['library'] });
-      toast(C(848, 'Collection deleted'));
-      go('library');
-    }, { icon: 'trash-can', round: true, cls: 'danger', key: 'delcol', arm: { prompt: C(191, 'Press again to confirm') } }));
-  const nodes = [list.length ? h('div', { class: 'grid' }, list.map((g) => gameCard(g, 'c-' + id))) : empty(C(398, 'No games yet'), C(850, 'Games stay in your library; only the collection goes away'))];
-  if (armedKey === 'delcol') nodes.unshift(h('div', { class: 'notice', text: C(850, 'Games stay in your library; only the collection goes away') }));
-  return { title: col ? col[1] : C(537, 'Collections'), kicker: gamesText(list.length), back: 'library', nodes, tools, topics: ['library'] };
-}
-
-async function searchPage(q) {
-  const words = q.replace(/[|\t]/g, ' ').trim();
-  const r = await get('search', { spec: 'q=' + words });
-  const list = rows(r.game);
-  const search = h('input', { class: 'input', type: 'search', value: words, 'aria-label': C(828, 'Find'), data: { key: 'search' } });
-  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') go('library/search/' + search.value.trim(), { replace: true }); });
-  return {
-    title: C(837, 'Results'), kicker: gamesText(list.length), back: 'library', topics: ['library'],
-    nodes: [h('div', { class: 'searchbar' }, h('div', { class: 'wrap' }, icon('magnifying-glass'), search)),
-      list.length ? h('div', { class: 'grid' }, list.map((g) => gameCard(g))) : empty(C(836, 'No games match these filters'), '')],
-  };
-}
-
-async function uploadPage() {
-  const [registry, lib] = await Promise.all([systemsRegistry(), get('library')]);
-  const counts = Object.fromEntries(rows(lib.system).map((s) => [s[0], s[2]]));
-  const sorted = [...registry].sort((a, b) => a.name.localeCompare(b.name, LANG));
-  return {
-    title: T('upload_games'), back: 'library', topics: ['library'],
-    nodes: [h('div', { class: 'notice', text: T('upload_pick_system') }),
-      group(sorted.map((s) => row({ key: 'u:' + s.id, title: s.name, detail: T('file_types', s.extensions.split(',').map((e) => '.' + e).join(' ')),
-        value: counts[s.id] ? gamesText(counts[s.id]) : '', chevron: true, on: () => go('library/system/' + s.id) })))],
-  };
+  const nodes = [
+    list.length ? h('div', { class: 'grid' }, list.map((g) => gameCard(g, 'c-' + id))) : empty(C(398, 'No games yet'), ''),
+    section(C(849, 'Manage'), 'user'),
+    group(
+      row({ key: 'rename', title: C(843, 'Rename Collection'), icon: 'pen', on: async () => {
+        const v = await form(C(843, 'Rename Collection'), [{ name: 'name', label: C(539, 'Collection name'), value: col ? col[1] : '' }]);
+        if (v && v.name.trim()) await act('coll.rename', { id, name: v.name.trim() }, { topics: ['library'] });
+      } }),
+      row({ key: 'delcol', title: C(839, 'Delete Collection'), icon: 'trash-can', danger: true, detail: C(850, 'Games stay in your library; only the collection goes away'),
+        arm: { prompt: C(191, 'Press again to confirm') }, on: async () => {
+          await act('coll.delete', { id }, { topics: ['library'] });
+          toast(C(848, 'Collection deleted'));
+          go('library');
+        } })),
+  ];
+  return { title: col ? col[1] : C(537, 'Collections'), kicker: gamesText(list.length), back: 'library', nodes, topics: ['library'] };
 }
 
 async function gamePage(id, from) {
@@ -279,8 +442,9 @@ async function gamePage(id, from) {
   if (meta('rating')) chips.push(h('span', {}, icon('star'), meta('rating')));
   chips.push(h('span', {}, icon('clock'), Number(last) ? agoText(last) + ' • ' + playtimeText(time) : C(405, 'Never played')));
   const members = rows(d.member);
-  const actions = h('div', { class: 'actions' },
-    button(C(838, 'Add to Collection'), async () => {
+  const inside = members.filter((m) => m[2] === '1').map((m) => m[1]);
+  const actions = group(
+    row({ key: 'col', title: C(838, 'Add to Collection'), icon: 'layer-group', value: inside.join(', '), chevron: true, on: async () => {
       const opts = members.map((m) => ({ value: m[0], label: m[1], detail: m[2] === '1' ? C(222, 'On') : C(54, 'Off') }));
       opts.push({ value: '__new', label: C(538, 'New Collection') });
       const v = await choose(C(537, 'Collections'), opts);
@@ -290,51 +454,40 @@ async function gamePage(id, from) {
       const adding = m[2] !== '1';
       await act(adding ? 'coll.add' : 'coll.remove', { id: v, game: id }, { topics: ['details', 'library'] });
       toast(adding ? C(846, 'Added to {0}', m[1]) : C(847, 'Removed from {0}', m[1]));
-    }, { icon: 'layer-group', round: true, key: 'col' }),
-    button(meta('match') || meta('title') ? C(560, 'Update Metadata') : C(559, 'Get Metadata'), async () => {
+    } }),
+    row({ key: 'gs', title: C(524, 'Game Settings'), icon: 'sliders', chevron: true, on: () => go('library/gamesettings/' + id + '/' + system) }),
+    row({ key: 'meta', title: meta('match') || meta('title') ? C(560, 'Update Metadata') : C(559, 'Get Metadata'), icon: 'rotate', on: async () => {
       await act('scraper.game', { id, mode: meta('match') ? 'force' : '' });
       toast(C(571, 'Getting metadata'), title);
-    }, { icon: 'rotate', round: true, key: 'meta' }),
-    button(C(524, 'Game Settings'), () => go('library/gamesettings/' + id + '/' + system), { icon: 'sliders', round: true, key: 'gs' }),
-    button(T('download'), () => { location.href = '/api/download?' + new URLSearchParams({ p: ROMS + '/' + d.path }); }, { icon: 'download', round: true, key: 'dl', disabled: avail === '0' }),
-    button(C(549, 'Reset Play Statistics'), () => act('lib.statsreset', { id }, { topics: ['details', 'library'] }), { icon: 'rotate-left', round: true, key: 'stats', arm: { prompt: C(598, 'Press again to reset') } }),
-    button(C(544, 'Delete Game'), async () => {
-      await act('lib.delete', { id }, { topics: ['library'] });
-      toast(C(547, 'Game deleted'), title);
-      go(backTo);
-    }, { icon: 'trash-can', round: true, cls: 'danger', key: 'del', arm: { prompt: C(546, 'Press again to delete permanently') } }));
-  /* The caption of the focused action, like the console. */
-  const caption = h('div', { class: 'caption' });
-  const captionFor = (b) => {
-    const k = b.dataset.key;
-    caption.textContent = armedKey === k ? (k === 'del' ? C(546, 'Press again to delete permanently') : C(598, 'Press again to reset'))
-      : k === 'del' ? C(545, 'Permanently deletes the game file for every user. Saves are kept.') : b.getAttribute('aria-label') || '';
-  };
-  $$('.btn', actions).forEach((b) => { b.addEventListener('focus', () => captionFor(b)); b.addEventListener('mouseenter', () => captionFor(b)); });
+    } }),
+    row({ key: 'dl', title: T('download'), icon: 'download', value: sizeText(d.size), disabled: avail === '0' || !d.file,
+      on: () => { location.href = '/api/download?' + new URLSearchParams({ p: d.file }); } }),
+    row({ key: 'stats', title: C(549, 'Reset Play Statistics'), icon: 'rotate-left', arm: { prompt: C(598, 'Press again to reset') },
+      on: () => act('lib.statsreset', { id }, { topics: ['details', 'library'] }) }),
+    row({ key: 'del', title: C(544, 'Delete Game'), icon: 'trash-can', danger: true, detail: C(545, 'Permanently deletes the game file for every user. Saves are kept.'),
+      arm: { prompt: C(546, 'Press again to delete permanently') }, on: async () => {
+        await act('lib.delete', { id }, { topics: ['library'] });
+        toast(C(547, 'Game deleted'), title);
+        go(backTo);
+      } }));
   const info = [
-    [C(558, 'File'), d.path], [T('size'), sizeText(d.size)], [T('added'), dateText(d.added, false)],
+    [C(558, 'File'), d.path.startsWith('sd2:') ? C(64, 'SD2') + ' • ' + d.path.slice(4) : d.path], [T('added'), dateText(d.added, false)],
     [C(550, 'Sessions'), d.sessions], [C(551, 'Last Played'), Number(last) ? dateText(last) : C(405, 'Never played')],
     [C(552, 'Time Played'), playtimeText(time)], [C(553, 'Developer'), meta('developer')], [C(554, 'Publisher'), meta('publisher')],
     [C(555, 'Release Date'), meta('release')], [C(556, 'Genre'), genre], [C(557, 'Players'), meta('players') || (Number(players) ? players : '')],
   ].filter(([, v]) => v);
   const nodes = [
     h('div', { class: 'details' },
-      cover ? h('img', { class: 'cover', src: img(cover), alt: '' }) : h('div', { class: 'cover' }),
-      h('div', {}, h('div', { class: 'kicker', text: d.system_name || system }), h('h2', { text: title }),
+      cover ? h('img', { class: 'cover', src: img(cover, 480), alt: '' }) : h('div', { class: 'cover' }),
+      h('div', { class: 'dbody' }, h('div', { class: 'kicker', text: d.system_name || system }), h('h2', { text: title }),
         h('div', { class: 'meta', text: [Number(year) ? year : '', genre, meta('developer')].filter(Boolean).join('  •  ') }),
         h('div', { class: 'chips' }, chips), meta('description') ? h('div', { class: 'desc', text: meta('description').replace(/\\n/g, '\n') }) : null,
-        actions, caption)),
+        actions)),
     section(C(523, 'Details'), null),
     group(info.map(([k, v]) => row({ key: 'i:' + k, title: k, value: String(v) }))),
   ];
-  return { title: C(522, 'Game Details'), back: backTo, nodes, topics: ['library'], backdrop: cover ? img(cover) : null };
+  return { title: C(522, 'Game Details'), back: backTo, nodes, topics: ['library'], backdrop: cover ? img(cover, 96) : null };
 }
-
-const libraryRender = PAGES.library.render;
-PAGES.library.render = async (path) => {
-  if (path[0] === 'gamesettings') return gameSettingsPage(path[1], path[2]);
-  return libraryRender(path);
-};
 
 async function gameSettingsPage(id, system) {
   const s = await get('game_settings', { id, system }, true);
@@ -396,7 +549,7 @@ page('files', 'manage', () => C(609, 'Files'), async (path) => {
       toast(clipboard.op === 'move' ? C(624, 'Moving files') : C(623, 'Copying files'), clipboard.path.split('/').pop());
       clipboard = null;
     }, { icon: 'paste', round: true, key: 'paste' }) : null);
-  const nodes = [crumbs,
+  const nodes = [path.length > 1 ? crumbs : null,
     dropZone(T('upload_files'), T('upload_here'), (items) => sendAll(items, (x) => abs + (x.rel ? '/' + x.rel : '')).then(refresh))];
   if (!entries.length) nodes.push(empty(C(621, 'Empty folder'), ''));
   nodes.push(group(entries.map((e) => {
@@ -404,7 +557,7 @@ page('files', 'manage', () => C(609, 'Files'), async (path) => {
     const p = abs + '/' + name;
     const dir = type === 'd';
     const ic = dir ? 'folder' : (FILE_ICONS.find(([re]) => re.test(name)) || [null, 'file'])[1];
-    return row({ key: 'e:' + name, title: name, icon: ic, image: !dir && /\.(png|jpe?g|webp|gif)$/i.test(name) ? img(p) : null,
+    return row({ key: 'e:' + name, title: name, icon: ic, image: !dir && /\.(png|jpe?g|webp|gif)$/i.test(name) ? img(p, 96) : null,
       detail: dir ? dateText(mtime) : sizeText(size) + ' • ' + dateText(mtime), chevron: dir,
       on: () => (dir ? go('files' + p) : fileMenu(p, name, false)), more: true, path: p, name, dir });
   })));
@@ -423,11 +576,9 @@ page('files', 'manage', () => C(609, 'Files'), async (path) => {
 async function fileMenu(p, name, dir) {
   const opts = [];
   if (!dir) opts.push({ value: 'download', label: T('download') });
-  if (!dir && /\.tar$/i.test(name)) opts.push({ value: 'mood', label: C(648, 'Install Mood') });
   opts.push({ value: 'copy', label: C(615, 'Copy') }, { value: 'move', label: C(616, 'Move') }, { value: 'rename', label: C(617, 'Rename') }, { value: 'delete', label: C(618, 'Delete') });
   const v = await choose(name, opts);
   if (v === 'download') location.href = '/api/download?' + new URLSearchParams({ p });
-  else if (v === 'mood') { await act('mood.install', { path: p }); toast(C(649, 'Mood installed')); }
   else if (v === 'copy' || v === 'move') { clipboard = { op: v, path: p }; toast(v === 'copy' ? C(615, 'Copy') : C(616, 'Move'), T('paste_hint')); }
   else if (v === 'rename') {
     const f = await form(C(617, 'Rename'), [{ name: 'name', label: C(617, 'Rename'), value: name }]);
@@ -539,58 +690,52 @@ page('general', 'settings', () => C(4, 'General'), async (path) => {
   const [users, loc, reg, themes] = await Promise.all([get('users'), get('localization'), get('regional'), get('themes')]);
   const all = rows(users.user);
   const me = all.find((u) => u[0] === users.active);
-  if (path[0] === 'profile') return profilePage(path[1] || users.active, all, users);
+  if (path[0] === 'users') return usersPage(all);
+  if (path[0] === 'profile') return profilePage(path[1] || users.active, all, users, !!path[1]);
   if (path[0] === 'avatar') return avatarPage(path[1] || users.active);
   const theme = rows(themes.list).find((t) => t[0] === themes.selected);
+  const auto = on01(reg.automatic_time);
+  const many = all.length > 1;
   const nodes = [
     section(C(333, 'PROFILE'), 'user'),
     group(
-      row({ key: 'profile', title: C(192, 'Profile'), image: me && me[3] ? img(me[3]) : null, value: me ? me[1] : '', chevron: true, on: () => go('general/profile') }),
+      row({ key: 'profile', title: C(192, 'Profile'), image: me && me[3] ? img(me[3], 96) : null, value: me ? me[1] : '', chevron: true, on: () => go('general/profile') }),
       row({ key: 'lang', title: C(193, 'Language'), value: (LANGUAGES.find((l) => l[0] === loc.language) || ['', loc.language])[1], chevron: true,
         on: () => pickAndAct(C(193, 'Language'), LANGUAGES.map(([value, label]) => ({ value, label })), loc.language, 'lang.set') }),
       row({ key: 'mood', title: C(194, 'Mood'), value: theme ? theme[1] : C(195, 'Default mood'), chevron: true, on: async () => {
         const v = await choose(C(194, 'Mood'), rows(themes.list).map((t) => ({ value: t[0], label: t[1], detail: t[2] })), themes.selected);
         if (v) { await act('mood.select', { id: v }, { topics: ['themes'] }); loadMood(); }
-      } }),
-    ),
-    dropZone(C(648, 'Install Mood'), T('mood_hint'), (items) => uploadFiles(items.map((x) => x.file), () => '/userdata/downloads', { after: 'mood' }), { accept: '.tar', folders: false }),
+      } })),
     section(C(334, 'USERS'), 'device'),
     group(
-      all.map((u) => row({ key: 'u:' + u[0], title: u[1], image: img(u[3]),
-        detail: [u[4] === '1' ? C(304, 'Active') : '', u[5] === '1' ? C(303, 'Default') : ''].filter(Boolean).join(' • '), chevron: true,
-        on: () => go('general/profile/' + u[0]) })),
-      row({ key: 'adduser', title: C(288, 'Add User'), icon: 'plus', on: async () => {
-        const v = await form(C(295, 'Create User'), [{ name: 'name', label: C(296, 'Enter username') }]);
-        if (v && v.name.trim()) { await act('user.create', { name: v.name.trim() }); toast(C(318, 'User created')); }
-      } }),
-      row({ key: 'login', title: C(276, 'Startup'), value: users.login_mode === 'default' ? C(278, 'Direct Login') : C(277, 'User Picker'), chevron: true,
+      row({ key: 'users', title: C(287, 'Manage Users'), value: String(all.length), chevron: true, on: () => go('general/users') }),
+      row({ key: 'login', title: C(276, 'Startup'), value: users.login_mode === 'default' ? C(278, 'Direct Login') : C(277, 'User Picker'), chevron: true, disabled: !many,
         on: () => pickAndAct(C(276, 'Startup'), [{ value: 'select', label: C(277, 'User Picker'), detail: C(307, 'Show user picker at boot') },
           { value: 'default', label: C(278, 'Direct Login'), detail: C(308, 'Load the default user at boot') }], users.login_mode, 'user.loginmode') }),
-      row({ key: 'defuser', title: C(279, 'Default User'), value: (all.find((u) => u[0] === users.default_user) || [, ''])[1], chevron: true,
-        on: () => pickAndAct(C(279, 'Default User'), all.map((u) => ({ value: u[0], label: u[1] })), users.default_user, 'user.default', 'id') }),
-    ),
+      row({ key: 'defuser', title: C(324, 'Boot User'), value: (all.find((u) => u[0] === users.default_user) || [, C(173, 'None')])[1], chevron: true,
+        disabled: !many || users.login_mode !== 'default',
+        on: () => pickAndAct(C(324, 'Boot User'), all.map((u) => ({ value: u[0], label: u[1] })), users.default_user, 'user.default', 'id') })),
     section(C(335, 'DATE & TIME'), 'device'),
     group(
       row({ key: 'tz', title: C(280, 'Timezone'), value: reg.timezone, chevron: true, on: async () => {
         const z = await get('timezones');
         await pickAndAct(C(280, 'Timezone'), list(z.zone).map((v) => ({ value: v, label: v.replace(/_/g, ' ') })), reg.timezone, 'tz.set');
       } }),
-      row({ key: 'auto', title: C(281, 'Automatic Time'), detail: C(310, 'Use NTP when network is available'), toggle: on01(reg.automatic_time),
-        set: (v) => act('time.auto', { v }) }),
-      row({ key: 'clock', title: C(326, 'Date') + ' / ' + C(327, 'Time'), value: reg.local_date + ' ' + reg.local_time, disabled: on01(reg.automatic_time),
-        detail: on01(reg.automatic_time) ? '' : C(322, 'Automatic time is off'), on: async () => {
-          const v = await form(C(326, 'Date') + ' / ' + C(327, 'Time'), [{ name: 'd', label: C(326, 'Date'), type: 'date', value: reg.local_date },
-            { name: 't', label: C(327, 'Time'), type: 'time', value: reg.local_time }]);
-          if (v && v.d && v.t) await act('time.set', { v: v.d + ' ' + v.t.slice(0, 5) });
-        } }),
-      row({ key: 'sync', title: C(282, 'Sync Now'), detail: C(301, 'Last Sync') + ': ' + (Number(reg.last_sync) ? dateText(reg.last_sync) : C(302, 'Never')),
-        disabled: !on01(reg.automatic_time), on: async () => {
-          toast(C(323, 'Syncing…'));
-          try { await act('time.sync', {}, { quiet: true }); toast(C(299, 'Time synchronized')); } catch (e) { toast(C(300, 'Time synchronization failed'), '', true); }
-        } }),
-    ),
+      row({ key: 'auto', title: C(281, 'Automatic Time'), toggle: auto, set: (v) => act('time.auto', { v }) }),
+      row({ key: 'date', title: C(326, 'Date'), value: reg.local_date, chevron: !auto, disabled: auto, on: async () => {
+        const v = await form(C(326, 'Date'), [{ name: 'd', label: C(326, 'Date'), type: 'date', value: reg.local_date }]);
+        if (v && v.d) await act('time.set', { v: v.d + ' ' + reg.local_time.slice(0, 5) });
+      } }),
+      row({ key: 'time', title: C(327, 'Time'), value: reg.local_time, chevron: !auto, disabled: auto, on: async () => {
+        const v = await form(C(327, 'Time'), [{ name: 't', label: C(327, 'Time'), type: 'time', value: reg.local_time }]);
+        if (v && v.t) await act('time.set', { v: reg.local_date + ' ' + v.t.slice(0, 5) });
+      } }),
+      row({ key: 'sync', title: C(282, 'Sync Now'), value: Number(reg.last_sync) ? dateText(reg.last_sync) : C(302, 'Never'), disabled: !auto, on: async () => {
+        toast(C(323, 'Syncing…'));
+        try { await act('time.sync', {}, { quiet: true }); toast(C(299, 'Time synchronized')); } catch (e) { toast(C(300, 'Time synchronization failed'), '', true); }
+      } })),
     section(C(336, 'KEYBOARD'), 'device'),
-    group(row({ key: 'kbd', title: C(283, 'Keyboard Layout'), detail: C(311, 'Physical and virtual keyboard'), value: reg.keyboard_layout, chevron: true, on: async () => {
+    group(row({ key: 'kbd', title: C(283, 'Keyboard Layout'), value: reg.keyboard_layout, chevron: true, on: async () => {
       const k = await get('keyboards');
       await pickAndAct(C(283, 'Keyboard Layout'), rows(k.keyboard).map((r) => ({ value: r[0], label: r[1], detail: r[2] })), reg.keyboard_layout, 'kbd.set');
     } })),
@@ -598,34 +743,44 @@ page('general', 'settings', () => C(4, 'General'), async (path) => {
   return { title: C(4, 'General'), nodes, topics: ['users', 'localization', 'regional', 'themes'] };
 });
 
-async function profilePage(id, all, users) {
+/* Manage Users: every profile, then Add User (console page 25). */
+function usersPage(all) {
+  return {
+    title: C(287, 'Manage Users'), back: 'general', topics: ['users'],
+    nodes: [group(
+      all.map((u) => row({ key: 'u:' + u[0], title: u[1], image: img(u[3], 96),
+        value: u[4] === '1' ? C(304, 'Active') : u[5] === '1' ? C(303, 'Default') : '', chevron: true, on: () => go('general/profile/' + u[0]) })),
+      row({ key: 'adduser', title: C(288, 'Add User'), icon: 'plus', on: async () => {
+        const v = await form(C(295, 'Create User'), [{ name: 'name', label: C(296, 'Enter username') }]);
+        if (v && v.name.trim()) { await act('user.create', { name: v.name.trim() }); toast(C(318, 'User created')); }
+      } }))],
+  };
+}
+
+async function profilePage(id, all, users, fromList) {
   const u = all.find((x) => x[0] === id);
   if (!u) return { title: C(192, 'Profile'), back: 'general', nodes: [empty(C(205, 'Unavailable'))] };
   const active = u[0] === users.active;
-  const nodes = [section(C(333, 'PROFILE'), 'user'), group(
+  const nodes = [group(
     row({ key: 'name', title: C(285, 'Username'), value: u[1], chevron: true, on: async () => {
       const v = await form(C(284, 'Edit Profile'), [{ name: 'name', label: C(285, 'Username'), value: u[1] }]);
       if (v && v.name.trim()) { await act('user.rename', { id, name: v.name.trim() }); toast(C(320, 'Profile updated')); }
     } }),
-    row({ key: 'pic', title: C(286, 'Profile Picture'), image: img(u[3]), chevron: true, on: () => go('general/avatar/' + id) }),
-  ), section(C(334, 'USERS'), 'device'), group(
+    row({ key: 'pic', title: C(286, 'Profile Picture'), detail: C(294, 'Custom pictures from your profile folder'), image: img(u[3], 96), chevron: true, on: () => go('general/avatar/' + id) }),
     active ? null : row({ key: 'switch', title: C(292, 'Switch User'), detail: T('switch_hint'), on: () => act('user.activate', { id }) }),
-    u[5] === '1' ? null : row({ key: 'def', title: C(279, 'Default User'), detail: C(306, 'Select a default user'), on: () => act('user.default', { id }) }),
-    row({ key: 'del', title: C(289, 'Delete User'), detail: active ? C(297, 'Cannot delete the active user') : C(305, 'Profile data only; shared games and apps are kept'),
-      disabled: active || all.length < 2, danger: true, arm: { prompt: C(290, 'Press again to delete') },
-      on: async () => { await act('user.delete', { id }); toast(C(319, 'User deleted')); go('general'); } }),
+    active ? null : row({ key: 'del', title: C(289, 'Delete User'), detail: C(305, 'Profile data only; shared games and apps are kept'),
+      disabled: all.length < 2, danger: true, arm: { prompt: C(290, 'Press again to delete') },
+      on: async () => { await act('user.delete', { id }); toast(C(319, 'User deleted')); go('general/users'); } }),
   )];
-  return { title: u[1], kicker: C(192, 'Profile'), back: 'general', nodes, topics: ['users'] };
+  return { title: u[1], kicker: C(192, 'Profile'), back: fromList ? 'general/users' : 'general', nodes, topics: ['users'] };
 }
 
 async function avatarPage(id) {
   const a = await get('avatars', { user: id }, true);
   const items = rows(a.avatar);
-  const grid = h('div', { class: 'grid' }, items.map((x) => h('button', { class: 'card', type: 'button', data: { key: 'a:' + x[0] }, title: x[1],
+  const grid = h('div', { class: 'grid avatars' }, items.map((x) => h('button', { class: 'card', type: 'button', data: { key: 'a:' + x[0] }, title: x[1],
     on: { click: async () => { await act('user.avatar', { id, spec: x[0] }); toast(C(320, 'Profile updated')); go('general/profile/' + id); } } },
-  h('img', { src: img(x[2]), alt: x[1], loading: 'lazy' }))));
-  grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(110px, 1fr))';
-  $$('.card', grid).forEach((c) => { c.style.aspectRatio = '1'; });
+  h('img', { src: img(x[2], 192), alt: x[1], loading: 'lazy' }))));
   return {
     title: C(293, 'Profile Pictures'), back: 'general/profile/' + id, topics: [],
     nodes: [dropZone(C(315, 'Custom'), C(294, 'Custom pictures from your profile folder') + ' (PNG, JPG)', (files) => {
@@ -667,47 +822,103 @@ async function wifiConnect(n) {
 
 page('connectivity', 'settings', () => C(5, 'Connectivity'), async (path) => {
   if (path[0] === 'wifi') return wifiPage();
+  if (path[0] === 'saved') return savedPage();
   if (path[0] === 'network') return networkPage(path[1]);
   if (path[0] === 'bt') return btPage();
-  const [w, b, r] = await Promise.all([get('wifi').catch(() => null), get('bluetooth').catch(() => null), get('remote')]);
+  if (path[0] === 'devices') return btDevicesPage();
+  if (path[0] === 'keys') return sshKeysPage();
+  const [w, b, r, keys] = await Promise.all([get('wifi').catch(() => null), get('bluetooth').catch(() => null), get('remote'), get('ssh_keys').catch(() => ({}))]);
   const addr = r.address || '';
   const nodes = [section(C(156, 'WI-FI'), 'device')];
   if (w) {
+    const connected = w.enabled && w.state === 'connected';
     nodes.push(group(
-      row({ key: 'wifi', title: C(157, 'Wi-Fi'), toggle: w.enabled, set: (v) => act('wifi.enable', { v }),
-        detail: w.state === 'connected' ? w.ssid + ' • ' + (w.ipv4 || '') : w.enabled ? C(159, 'Not connected') : '' }),
-      w.enabled && w.state === 'connected' ? row({ key: 'cur', title: w.ssid, icon: 'wifi', detail: C(198, 'Connected') + ' • ' + SIGNAL(w.signal), chevron: true, on: () => go('connectivity/network/' + w.ssid) }) : null,
-      w.enabled ? row({ key: 'connect', title: C(9, 'Connect to Wi-Fi'), detail: C(25, 'Choose a network or add a hidden network'), chevron: true, on: () => go('connectivity/wifi') }) : null,
-      row({ key: 'saved', title: C(10, 'Saved Networks'), value: w.saved.length ? w.saved.length + C(225, ' saved') : '', chevron: true, disabled: !w.saved.length,
-        on: async () => { const v = await choose(C(10, 'Saved Networks'), w.saved.map((n) => ({ value: n.ssid, label: n.ssid, detail: n.current ? C(198, 'Connected') : n.security }))); if (v) go('connectivity/network/' + v); } })));
+      row({ key: 'wifi', title: C(157, 'Wi-Fi'), toggle: w.enabled, set: (v) => act('wifi.enable', { v }) }),
+      row({ key: 'connect', title: C(158, 'Connect'), value: connected ? w.ssid : C(159, 'Not connected'), chevron: w.enabled, disabled: !w.enabled,
+        on: () => go('connectivity/wifi') }),
+      row({ key: 'saved', title: C(10, 'Saved Networks'), value: w.saved.length + C(225, ' saved'), chevron: true, on: () => go('connectivity/saved') })));
   } else nodes.push(group(row({ key: 'wifiwait', title: C(206, 'Waiting for Wi-Fi service'), disabled: true })));
   nodes.push(section(C(160, 'BLUETOOTH'), 'device'));
   if (b && b.present) {
-    const paired = b.devices.filter((d) => d.paired);
+    const known = b.devices.filter((d) => d.paired);
     nodes.push(group(
       row({ key: 'bt', title: C(161, 'Bluetooth'), toggle: b.powered, set: (v) => act('bt.enable', { v }) }),
-      b.powered ? paired.map((d) => btRow(d)) : null,
-      b.powered ? row({ key: 'btnew', title: C(11, 'Connect New Device'), detail: C(30, 'Choose a nearby Bluetooth device'), chevron: true, on: () => go('connectivity/bt') }) : null));
+      row({ key: 'btnew', title: C(11, 'Connect New Device'), chevron: b.powered, disabled: !b.powered, on: () => go('connectivity/bt') }),
+      row({ key: 'btmine', title: C(12, 'My Devices'), value: known.length + C(226, ' devices'), chevron: b.powered, disabled: !b.powered, on: () => go('connectivity/devices') })));
   } else nodes.push(group(row({ key: 'btwait', title: b ? C(205, 'Unavailable') : C(207, 'Waiting for Bluetooth service'), disabled: true })));
   nodes.push(section(C(727, 'SERVICES'), 'device'));
   nodes.push(group(
     row({ key: 'ssh', title: C(600, 'SSH, SCP and SFTP'), detail: addr ? 'root@' + addr : C(601, 'Sign in as root with the device password'), toggle: on01(r.ssh),
       set: (v) => act('remote.set', { svc: 'ssh', v }, { topics: ['remote'] }) }),
+    row({ key: 'keys', title: T('ssh_keys'), detail: T('ssh_keys_detail'), value: String(rows(keys.key).length), chevron: true, on: () => go('connectivity/keys') }),
     row({ key: 'smb', title: C(602, 'File Sharing (SMB)'), detail: addr ? '\\\\' + addr + '\\nuubOS' : '', toggle: on01(r.smb),
       set: (v) => act('remote.set', { svc: 'smb', v }, { topics: ['remote'] }) }),
-    row({ key: 'web', title: C(603, 'Web Administration'), detail: (addr ? 'https://' + addr : '') + (armedKey === 'web' ? '' : ''), toggle: on01(r.web),
+    row({ key: 'web', title: C(603, 'Web Administration'), detail: addr ? 'https://' + addr : '', toggle: on01(r.web),
       arm: { prompt: T('web_off') }, on: () => act('remote.set', { svc: 'web', v: 0 }).then(() => showLogin(T('web_disabled'))) }),
-    row({ key: 'pw', title: C(172, 'Password'), detail: C(608, 'Press to show'), value: revealed || '••••-••••-••••', on: async () => {
-      revealed = revealed ? '' : (await get('password', {}, true)).password;
-      setTimeout(() => { revealed = ''; refresh(); }, 30000);
-    } }),
+    row({ key: 'pw', title: C(172, 'Password'), value: revealed || '••••-••••-••••',
+      detail: revealed ? C(604, 'Only on networks you trust. Never exposed to the Internet.') : C(608, 'Press to show'), on: async () => {
+        revealed = revealed ? '' : (await get('password', {}, true)).password;
+        setTimeout(() => { revealed = ''; refresh(); }, 30000);
+      } }),
     row({ key: 'regen', title: C(606, 'Regenerate Password'), detail: C(607, 'The old password stops working') + ' • ' + T('signs_out'),
       arm: { prompt: C(191, 'Press again to confirm') }, on: async () => { await act('remote.regenerate'); showLogin(T('password_changed')); } })));
-  nodes.push(h('div', { class: 'notice', text: C(604, 'Only on networks you trust. Never exposed to the Internet.') }));
-  return { title: C(5, 'Connectivity'), nodes, topics: ['wifi', 'bluetooth', 'remote'] };
+  return { title: C(5, 'Connectivity'), nodes, topics: ['wifi', 'bluetooth', 'remote', 'ssh_keys'] };
 });
 
 let revealed = '';
+
+/* SSH Keys (EPIC-039): public keys that sign in as root over SSH/SFTP
+ * besides the password. nuubos-remotectl checks every key. */
+async function addSshKeys(texts) {
+  let added = 0;
+  for (const t of texts) {
+    for (const line of t.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))) {
+      try { await act('ssh.key.add', { key: line }, { topics: ['ssh_keys'] }); added++; } catch (e) { /* reported */ }
+    }
+  }
+  if (added) toast(T('ssh_key_added'));
+}
+
+async function sshKeysPage() {
+  const k = await get('ssh_keys', {}, true);
+  const keys = rows(k.key);
+  return {
+    title: T('ssh_keys'), back: 'connectivity', topics: ['ssh_keys'],
+    nodes: [
+      h('div', { class: 'notice', text: T('ssh_keys_hint') }),
+      dropZone(T('ssh_key_add'), T('ssh_key_drop'), async (items) => addSshKeys(await Promise.all(items.map((x) => x.file.text()))), { accept: '.pub', folders: false }),
+      group(
+        keys.map(([fp, type, comment]) => row({ key: 'k:' + fp, title: comment || type, icon: 'lock', detail: type + ' • ' + fp,
+          arm: { prompt: T('ssh_key_remove') }, on: async () => { await act('ssh.key.remove', { id: fp }, { topics: ['ssh_keys'] }); toast(T('ssh_key_removed')); } })),
+        row({ key: 'paste', title: T('ssh_key_paste'), icon: 'plus', on: async () => {
+          const v = await form(T('ssh_key_add'), [{ name: 'key', label: T('ssh_key_public'), placeholder: 'ssh-ed25519 AAAA… user@host' }]);
+          if (v && v.key.trim()) await addSshKeys([v.key]);
+        } })),
+    ],
+  };
+}
+
+/* Saved Networks: a flat list, each opens the network's page. */
+async function savedPage() {
+  const w = await get('wifi', {}, true);
+  return {
+    title: C(10, 'Saved Networks'), back: 'connectivity', topics: ['wifi'],
+    nodes: [group(w.saved.length
+      ? w.saved.map((n) => row({ key: 's:' + n.ssid, title: n.ssid, icon: 'wifi', detail: n.current ? C(198, 'Connected') : n.security,
+        chevron: true, on: () => go('connectivity/network/' + n.ssid) }))
+      : row({ key: 'none', title: C(10, 'Saved Networks'), value: '0' + C(225, ' saved'), disabled: true }))],
+  };
+}
+
+/* My Devices: the paired Bluetooth devices. */
+async function btDevicesPage() {
+  const b = await get('bluetooth', {}, true);
+  const known = b.devices.filter((d) => d.paired);
+  return {
+    title: C(12, 'My Devices'), back: 'connectivity', topics: ['bluetooth'],
+    nodes: [group(known.length ? known.map(btRow) : row({ key: 'none', title: C(12, 'My Devices'), value: '0' + C(226, ' devices'), disabled: true }))],
+  };
+}
 
 function btRow(d) {
   const kind = d.kind === 'audio' || /audio|headset|headphone/i.test(d.kind) ? 'headphones' : /input|gamepad|joystick/i.test(d.kind) ? 'gamepad' : 'bluetooth-b';
@@ -858,35 +1069,77 @@ const LIGHT_SIGNALS = [['power', 147, 'Startup & Sleep', 151], ['battery', 100, 
 const SIGNAL_DETAILS = { 151: 'Welcome, sleep, wake and power off', 152: 'Low battery, charging and full charge', 153: 'Controllers, headphones, Wi-Fi and USB drives', 154: 'Save states, screenshots and errors', 155: 'Downloads, backups and failures' };
 
 page('controllers', 'settings', () => C(6, 'Controllers & Input'), async (path) => {
-  if (path[0] === 'lighting') return lightingPage();
+  if (path[0] === 'players') return playersPage();
+  if (path[0] === 'list') return controllerListPage();
   if (path[0] === 'controller') return controllerPage(path[1]);
+  if (path[0] === 'rumble') return rumblePage();
+  if (path[0] === 'lighting') return lightingPage();
   const [c, rm, li] = await Promise.all([get('controllers').catch(() => ({ devices: [], players: [] })), get('rumble').catch(() => null), get('lighting').catch(() => null)]);
-  const connected = c.devices.filter((d) => d.connected);
-  const nodes = [section(C(734, 'CONTROLLERS'), 'user'), group(
-    c.players.map((p) => row({ key: 'p:' + p.player, title: C(220, 'Player ') + p.player, value: p.name ? p.name + (p.available ? '' : C(221, ' • unavailable')) : C(361, 'Not assigned'), chevron: true,
-      on: async () => {
-        const v = await choose(C(220, 'Player ') + p.player, [{ value: '', label: C(173, 'None') }, ...connected.map((d) => ({ value: d.id, label: d.name, detail: d.kind }))], p.id);
-        if (v !== null) await act('ctl.assign', { player: p.player, id: v, name: (connected.find((d) => d.id === v) || {}).name || '' });
-      } })).slice(0, Math.max(4, c.players.filter((p) => p.id).length + 1)),
-    connected.map((d) => row({ key: 'c:' + d.id, title: d.name, icon: 'gamepad', detail: [d.kind, d.player > 0 ? C(220, 'Player ') + d.player : '', d.battery >= 0 ? C(789, '{0}%', d.battery) : ''].filter(Boolean).join(' • '),
-      chevron: true, on: () => go('controllers/controller/' + d.id) }))),
-  section(li && li.supported ? C(735, 'RUMBLE & LIGHTING') : C(899, 'RUMBLE'), 'user'), group(
-    rm && rm.supported ? row({ key: 'rumble', title: C(17, 'Internal Rumble'), detail: C(37, 'User preference for the internal console rumble'), toggle: rm.enabled, set: (v) => act('rumble.enable', { v }) }) : null,
-    rm && rm.supported && rm.enabled ? row({ key: 'rtest', title: C(125, 'Test Rumble'), on: () => act('rumble.test') }) : null,
-    li && li.supported ? row({ key: 'light', title: C(18, 'RGB Lighting'), value: C(...(LIGHT_EFFECTS.find((e) => e[0] === li.effect) || [0, 54, 'Off']).slice(1, 3)), chevron: true, on: () => go('controllers/lighting') }) : null)];
+  const rumble = rm && rm.supported;
+  const lights = li && li.supported;
+  const nodes = [
+    section(C(734, 'CONTROLLERS'), 'user'),
+    group(
+      row({ key: 'players', title: C(13, 'Player Assignment'), value: C(111, 'P1–P8'), chevron: true, on: () => go('controllers/players') }),
+      row({ key: 'list', title: C(14, 'Controllers'), value: c.devices.length + C(219, ' available'), chevron: true, on: () => go('controllers/list') })),
+    section(lights ? C(735, 'RUMBLE & LIGHTING') : C(899, 'RUMBLE'), 'user'),
+    group(
+      row({ key: 'rumble', title: C(17, 'Internal Rumble'), value: rumble ? (rm.enabled ? C(112, 'Enabled') : C(113, 'Disabled')) : C(205, 'Unavailable'),
+        chevron: rumble, disabled: !rumble, on: () => go('controllers/rumble') }),
+      lights ? row({ key: 'light', title: C(18, 'RGB Lighting'), value: C(...(LIGHT_EFFECTS.find((e) => e[0] === li.effect) || [0, 54, 'Off']).slice(1, 3)), chevron: true,
+        on: () => go('controllers/lighting') }) : null),
+  ];
   return { title: C(6, 'Controllers & Input'), nodes, topics: ['controllers', 'rumble', 'lighting'] };
 });
+
+/* Player Assignment: every player slot of the service (P1-P8). */
+async function playersPage() {
+  const c = await get('controllers', {}, true);
+  const label = (d) => (d.connected ? d.name : d.name + C(221, ' • unavailable'));
+  return {
+    title: C(13, 'Player Assignment'), back: 'controllers', topics: ['controllers'],
+    nodes: [group(c.players.map((p) => row({ key: 'p:' + p.player, title: C(220, 'Player ') + p.player,
+      value: p.name ? p.name + (p.available ? '' : C(221, ' • unavailable')) : C(122, 'Automatic'), chevron: true,
+      on: async () => {
+        const v = await choose(C(220, 'Player ') + p.player, [{ value: '', label: C(122, 'Automatic') }, ...c.devices.map((d) => ({ value: d.id, label: label(d) }))], p.id || '');
+        if (v !== null) await act('ctl.assign', { player: p.player, id: v, name: (c.devices.find((d) => d.id === v) || {}).name || '' });
+      } })))],
+  };
+}
+
+/* Controllers: every known controller, each with its own page. */
+async function controllerListPage() {
+  const c = await get('controllers', {}, true);
+  return {
+    title: C(14, 'Controllers'), back: 'controllers', topics: ['controllers'],
+    nodes: [group(c.devices.length ? c.devices.map((d) => row({ key: 'c:' + d.id, title: d.name, icon: 'gamepad',
+      detail: [d.kind, d.battery >= 0 ? C(789, '{0}%', d.battery) : ''].filter(Boolean).join(' • '),
+      value: d.player > 0 ? 'P' + d.player : '', chevron: true, on: () => go('controllers/controller/' + d.id) }))
+      : row({ key: 'none', title: C(14, 'Controllers'), value: '0' + C(219, ' available'), disabled: true }))],
+  };
+}
 
 async function controllerPage(id) {
   const [c, dz] = await Promise.all([get('controllers'), get('deadzones', { id }, true).catch(() => null)]);
   const d = c.devices.find((x) => x.id === id) || { name: id };
   return {
-    title: d.name, kicker: C(14, 'Controllers'), back: 'controllers', topics: ['controllers'],
+    title: d.name, kicker: C(14, 'Controllers'), back: 'controllers/list', topics: ['controllers'],
     nodes: [group(
       dz ? row({ key: 'dzl', title: C(123, 'Left Stick Deadzone'), slider: { value: dz.left, min: 0, max: 50, set: (v) => act('ctl.deadzone', { id, stick: 'left', v }, { quiet: true }) } }) : null,
       dz ? row({ key: 'dzr', title: C(124, 'Right Stick Deadzone'), slider: { value: dz.right, min: 0, max: 50, set: (v) => act('ctl.deadzone', { id, stick: 'right', v }, { quiet: true }) } }) : null,
       row({ key: 'reset', title: C(365, 'Restore Default Mapping'), arm: { prompt: C(366, 'Press again to restore defaults') }, on: () => act('ctl.resetmapping', { id }) })),
     h('div', { class: 'notice', text: T('mapping_console') })],
+  };
+}
+
+/* Internal Rumble (console page 16): the preference and a test. */
+async function rumblePage() {
+  const rm = await get('rumble', {}, true);
+  return {
+    title: C(17, 'Internal Rumble'), back: 'controllers', topics: ['rumble'],
+    nodes: [group(
+      row({ key: 'on', title: C(112, 'Enabled'), detail: C(37, 'User preference for the internal console rumble'), toggle: rm.enabled, set: (v) => act('rumble.enable', { v }) }),
+      row({ key: 'test', title: C(125, 'Test Rumble'), disabled: !rm.enabled, on: () => act('rumble.test') }))],
   };
 }
 
@@ -1041,7 +1294,7 @@ page('display', 'settings', () => C(7, 'Display & Audio'), async () => {
   const sel = { speaker: C(240, 'Speaker'), headphones: C(330, 'Headphones'), bluetooth: C(331, 'Bluetooth Audio'), hdmi: 'HDMI' };
   const vol = a['volume.' + a.selected];
   const nodes = [section(C(728, 'DISPLAY'), 'device'), group(
-    d.hdmi ? row({ key: 'bri', title: C(127, 'Brightness'), detail: C(132, 'Internal display inactive'), disabled: true })
+    d.hdmi ? row({ key: 'bri', title: C(127, 'Brightness'), value: C(132, 'Internal display inactive'), disabled: true })
       : row({ key: 'bri', title: C(127, 'Brightness'), slider: { value: Number(d.brightness) || 60, min: 1, max: 100, set: (v) => act('display.brightness', { v }, { quiet: true }) } }),
     d.temperature_supported ? row({ key: 'temp', title: C(143, 'Color Temperature'), slider: { value: Number(d.temperature) || 6500, min: 3500, max: 7500, step: 250, text: (v) => v + C(224, ' K'),
       set: (v) => act('display.temperature', { v }, { quiet: true }) } }) : null),
@@ -1053,13 +1306,13 @@ page('display', 'settings', () => C(7, 'Display & Audio'), async () => {
       if (a['available.hdmi'] === '1') opts.push({ value: 'hdmi', label: outputs.hdmi });
       return pickAndAct(C(133, 'Audio Output'), opts, a.mode, 'audio.output');
     } }),
-    vol === 'unsupported' ? row({ key: 'vol', title: C(134, 'Volume'), detail: C(273, 'Volume controlled by TV / receiver'), disabled: true })
+    vol === 'unsupported' ? row({ key: 'vol', title: C(134, 'Volume'), value: a.selected === 'hdmi' ? C(223, 'TV / Receiver') : C(205, 'Unavailable'), detail: C(273, 'Volume controlled by TV / receiver'), disabled: true })
       : row({ key: 'vol', title: C(134, 'Volume'), slider: { value: Number(vol) || 0, set: (v) => act('audio.volume', { v }, { quiet: true }) } }),
     row({ key: 'apps', title: C(135, 'Applications'), slider: { value: Number(a['volume.applications']) || 0, set: (v) => act('audio.apps', { v }, { quiet: true }) } }),
     row({ key: 'music', title: C(139, 'Home Music'), slider: { value: Number(a['volume.home_music']) || 0, set: (v) => act('audio.music', { v }, { quiet: true }) } }),
     on01(a['home_music.playing']) ? row({ key: 'skip', title: C(329, 'Skip Track'), detail: a['home_music.track'] || '', on: () => act('audio.musicplay', { v: 'NEXT' }) }) : null,
-    row({ key: 'test', title: C(140, 'Test Sound'), value: T('on_console'), on: () => act('audio.test', { v: 'START' }) })),
-  section(C(730, 'SOUNDS'), 'user'), group(
+    row({ key: 'test', title: C(140, 'Test Sound'), value: C(142, 'Play'), detail: T('on_console'), on: () => act('audio.test', { v: 'START' }) })),
+  section(C(730, 'SOUNDS'), 'device'), group(
     row({ key: 'sys', title: C(136, 'System Sounds'), slider: { value: Number(a['volume.system']) || 0, set: (v) => act('audio.system', { v }, { quiet: true }) } }),
     row({ key: 'nav', title: C(137, 'Navigation Sounds'), toggle: on01(a['system.navigation_enabled']), set: (v) => act('audio.nav', { v }) }),
     row({ key: 'notif', title: C(851, 'Notification Sounds'), toggle: a['system.notify_enabled'] === undefined ? true : on01(a['system.notify_enabled']), set: (v) => act('audio.notify', { v }) }),
@@ -1084,8 +1337,8 @@ page('power', 'settings', () => C(813, 'Power'), async () => {
       chevron: true, on: () => pickAndAct(C(50, 'Performance Profile'), [{ value: 'auto', label: C(52, 'Auto') }, { value: 'battery-saver', label: C(51, 'Battery Saver') }], s['profile.requested'], 'system.profile') }),
     row({ key: 'auto', title: C(53, 'Automatic Battery Saver'), value: Number(s['auto_battery.threshold']) ? '≤ ' + s['auto_battery.threshold'] + '%' : C(54, 'Off'), chevron: true,
       on: () => pickAndAct(C(53, 'Automatic Battery Saver'), [0, 10, 15, 20, 25, 30, 40, 50].map((v) => ({ value: String(v), label: v ? '≤ ' + v + '%' : C(54, 'Off') })), s['auto_battery.threshold'], 'system.autobattery') }),
-    row({ key: 'sleep', title: C(56, 'Sleep After'), value: Number(s.sleep_after_min) ? s.sleep_after_min + ' min' : C(54, 'Off'), chevron: true,
-      on: () => pickAndAct(C(56, 'Sleep After'), [0, 1, 2, 5, 10, 15, 30, 45, 60, 120].map((v) => ({ value: String(v), label: v ? v + ' min' : C(54, 'Off') })), s.sleep_after_min, 'system.sleep') })),
+    row({ key: 'sleep', title: C(56, 'Sleep After'), value: Number(s.sleep_after_min) ? s.sleep_after_min + C(215, ' min') : C(54, 'Off'), chevron: true,
+      on: () => pickAndAct(C(56, 'Sleep After'), [0, 1, 2, 5, 10, 15, 30, 45, 60, 120].map((v) => ({ value: String(v), label: v ? v + C(215, ' min') : C(54, 'Off') })), s.sleep_after_min, 'system.sleep') })),
   section(C(814, 'BATTERY'), 'device'), group(
     row({ key: 'charge', title: C(816, 'Charge'), value: s['battery.percent'] + '%', detail: bstate === 'charging' ? C(382, 'Charging') : bstate === 'full' ? C(383, 'Fully charged') : bstate === 'not-charging' ? C(819, 'Not charging') : C(818, 'Discharging') }),
     row({ key: 'health', title: C(817, 'Battery Health'), value: health ? C(health[0], health[1]) : st.BATTERY_HEALTH ? C(824, 'Check the battery') : C(211, 'Unknown') }),
@@ -1103,22 +1356,22 @@ page('system', 'settings', () => C(8, 'System'), async (path) => {
   if (path[0] === 'storage') return storagePage();
   if (path[0] === 'update') return updatePage();
   if (path[0] === 'info') return infoPage();
+  if (path[0] === 'diagnostics') return diagnosticsPage();
+  if (path[0] === 'backup') return path[1] === 'content' ? backupContentPage() : backupPage();
   if (path[0] === 'recovery') return recoveryPage();
-  const [s, jobs] = await Promise.all([get('system'), get('jobs')]);
-  const report = rows(jobs.job).filter((j) => j[1] === 'support-bundle').pop();
+  const [s, rec] = await Promise.all([get('system'), get('recovery').catch(() => ({}))]);
   const nodes = [section(C(732, 'STORAGE & SOFTWARE'), 'device'), group(
     row({ key: 'storage', title: C(19, 'Storage'), value: ['ready', 'readonly'].includes(s['storage.sd2.state']) ? C(912, 'SD1') + ' • ' + C(64, 'SD2') : C(912, 'SD1'), chevron: true, on: () => go('system/storage') }),
     row({ key: 'update', title: C(651, 'Software Update'), value: 'nuubOS ' + (s['nuubos.version'] || ''), chevron: true, on: () => go('system/update') }),
     row({ key: 'info', title: C(20, 'System Information'), chevron: true, on: () => go('system/info') })),
   section(C(733, 'TROUBLESHOOTING'), 'device'), group(
-    row({ key: 'diag', title: C(500, 'Save Diagnostic Report'), detail: C(504, 'Useful for getting help. It contains no games, saves, passwords or Wi-Fi keys and is saved in the diagnostics folder.'),
-      busy: report && report[2] === 'running', on: async () => { await act('diag.bundle', {}, { topics: ['jobs'] }); toast(C(501, 'Saving diagnostic report…')); } }),
-    report && report[2] === 'succeeded' && report[6] ? row({ key: 'diagdl', title: T('download_report'), icon: 'download', detail: report[6].split('/').pop(),
-      on: () => { location.href = '/api/download?' + new URLSearchParams({ p: report[6] }); } }) : null,
-    row({ key: 'rec', title: C(499, 'Recovery'), chevron: true, on: () => go('system/recovery') }))];
-  return { title: C(8, 'System'), nodes, topics: ['system', 'jobs'] };
+    row({ key: 'diag', title: C(498, 'Diagnostics'), chevron: true, on: () => go('system/diagnostics') }),
+    row({ key: 'backup', title: C(982, 'Backup'), chevron: true, on: () => go('system/backup') }),
+    row({ key: 'rec', title: C(499, 'Recovery'), value: rec['safe-mode'] === '1' ? C(518, 'Safe Mode') : '', chevron: true, on: () => go('system/recovery') }))];
+  return { title: C(8, 'System'), nodes, topics: ['system'] };
 });
 
+/* System → Storage (console page: SD1, SD2 and its actions, Removable Media). */
 async function storagePage() {
   const s = await get('system', {}, true);
   const n = (k) => Number(s[k]) || 0;
@@ -1134,17 +1387,6 @@ async function storagePage() {
     ejected: [C(922, 'Ejected'), C(627, 'Safe to remove')],
     ignored: [C(978, 'Not in use'), C(980, 'nuubOS leaves this card alone until you choose to use it')],
   }[st] || [C(916, 'No card'), ''];
-  const items = (s['storage.backup.items'] || '').split(',');
-  const itemRows = [['saves', 947, 'Saves'], ['states', 948, 'Save States'], ['library', 949, 'Game Library'],
-    ['screenshots', 951, 'Screenshots & Recordings'], ['bios', 576, 'BIOS Files'], ['covers', 953, 'Covers & Metadata']]
-    .map(([k, id, en]) => row({ key: 'it-' + k, title: C(id, en), toggle: items.includes(k),
-      set: (v) => act('storage.backup.item', { item: k, v: v ? '1' : '0' }) }));
-  const last = n('storage.backup.last');
-  /* The console backup: one, on the destination the user chose. */
-  const dest = s['storage.backup.dest'] || 'sd1';
-  const available = s['storage.backup.available'] === '1';
-  const destName = (d) => (d === 'sd2' ? C(64, 'SD2') : d === 'usb' ? C(1016, 'USB Drive') : C(912, 'SD1'));
-  const missing = dest === 'sd2' ? C(935, 'Insert an SD2 card to back up') : dest === 'usb' ? C(1021, 'Connect a USB drive to back up') : '';
   return {
     title: C(19, 'Storage'), back: 'system', topics: ['system', 'jobs'],
     nodes: [group(
@@ -1156,23 +1398,69 @@ async function storagePage() {
       slot && st === 'ready' ? row({ key: 'prep', title: C(926, 'Create Game Folders'), detail: C(927, 'Adds a folder for each system. Nothing is deleted.'),
         on: () => act('storage.prepare', {}, { topics: ['jobs'] }) }) : null,
       slot && (mounted || st === 'unreadable' || st === 'ignored') && s['storage.sd2.cid'] ? row({ key: 'fmt', title: C(928, 'Format SD2'), detail: C(929, 'Erases everything on the card'), danger: true,
-        arm: { prompt: C(930, 'Press again • everything on SD2 will be erased') }, on: () => act('storage.format', { cid: s['storage.sd2.cid'] }, { topics: ['jobs'] }) }) : null),
-    section(C(1024, 'BACKUP'), 'device'),
-    group(
+        arm: { prompt: C(930, 'Press again • everything on SD2 will be erased') }, on: () => act('storage.format', { cid: s['storage.sd2.cid'] }, { topics: ['jobs'] }) }) : null,
+      row({ key: 'media', title: C(625, 'Removable Media'), chevron: true, on: () => go('files/:shares') }))],
+  };
+}
+
+/* System → Diagnostics: the report, where it goes, and (here) its download. */
+async function diagnosticsPage() {
+  const jobs = await get('jobs', {}, true);
+  const report = rows(jobs.job).filter((j) => j[1] === 'support-bundle').pop();
+  const running = report && report[2] === 'running';
+  return {
+    title: C(498, 'Diagnostics'), back: 'system', topics: ['jobs'],
+    nodes: [group(
+      row({ key: 'diag', title: C(500, 'Save Diagnostic Report'), value: running ? C(501, 'Saving diagnostic report…') : '', busy: running,
+        detail: C(504, 'Useful for getting help. It contains no games, saves, passwords or Wi-Fi keys and is saved in the diagnostics folder.'),
+        disabled: running, on: () => act('diag.bundle', {}, { topics: ['jobs'] }) }),
+      row({ key: 'out', title: C(521, 'Output Folder'), value: 'USERDATA/diagnostics' }),
+      report && report[2] === 'succeeded' && report[6] ? row({ key: 'diagdl', title: T('download_report'), icon: 'download', detail: report[6].split('/').pop(),
+        on: () => { location.href = '/api/download?' + new URLSearchParams({ p: report[6] }); } }) : null)],
+  };
+}
+
+const BACKUP_ITEMS = [['saves', 947, 'Saves', 0, ''], ['states', 948, 'Save States', 0, ''], ['library', 949, 'Game Library', 950, 'Play history and collections'],
+  ['screenshots', 951, 'Screenshots & Recordings', 0, ''], ['bios', 576, 'BIOS Files', 0, ''], ['covers', 953, 'Covers & Metadata', 954, 'Downloaded game information; it can take a lot of space']];
+
+/* System → Backup: the console backup, on the destination the user chose. */
+async function backupPage() {
+  const s = await get('system', {}, true);
+  const items = (s['storage.backup.items'] || '').split(',');
+  const last = Number(s['storage.backup.last']) || 0;
+  const dest = s['storage.backup.dest'] || 'sd1';
+  const available = s['storage.backup.available'] === '1';
+  const slot = s['storage.sd2.slot'] === '1';
+  const destName = (d) => (d === 'sd2' ? C(64, 'SD2') : d === 'usb' ? C(1016, 'USB Drive') : C(912, 'SD1'));
+  const missing = dest === 'sd2' ? C(935, 'Insert an SD2 card to back up') : dest === 'usb' ? C(1021, 'Connect a USB drive to back up') : '';
+  const on = BACKUP_ITEMS.filter((i) => items.includes(i[0])).length;
+  return {
+    title: C(982, 'Backup'), back: 'system', topics: ['system', 'jobs'],
+    nodes: [group(
       row({ key: 'auto', title: C(69, 'Automatic Backup'), toggle: s['storage.backup.enabled'] === '1',
-        detail: available ? (last ? C(933, 'Last backup: {0}', new Date(last * 1000).toLocaleString()) : C(934, 'Never backed up')) : missing,
+        detail: available ? (last ? C(933, 'Last backup: {0}', dateText(last)) : C(934, 'Never backed up')) : missing,
         set: (v) => act('storage.backup.enabled', { v: v ? '1' : '0' }) }),
       row({ key: 'dest', title: C(1015, 'Destination'), value: destName(dest), detail: dest === 'sd1' ? C(1022, 'Lost if SD1 is formatted or replaced') : '', chevron: true,
         on: async () => {
           const v = await choose(C(1015, 'Destination'), [...(slot ? ['sd2'] : []), 'sd1', 'usb'].map((d) => ({ value: d, label: destName(d) })), dest);
           if (v !== null && v !== dest) await act('storage.backup.dest', { v });
         } }),
+      row({ key: 'content', title: C(936, 'Backup Content'), value: on === BACKUP_ITEMS.length ? C(937, 'All') : C(938, '{0} of {1}', on, BACKUP_ITEMS.length),
+        chevron: true, on: () => go('system/backup/content') }),
       s['storage.backup.card'] !== 'conflict' ? row({ key: 'bk', title: C(88, 'Back Up Now'), disabled: !available, on: () => act('storage.backup', {}, { topics: ['jobs'] }) })
-        : row({ key: 'conflict', title: C(942, 'Backup of a previous SD1'), detail: C(943, 'Restore it, or keep it aside and start a new backup') })),
-    section(C(936, 'Backup Content'), 'device'),
-    group(row({ key: 'prof', title: C(945, 'Profiles & Settings'), detail: C(946, 'Always included. Passwords and accounts are never copied.'), disabled: true }), ...itemRows),
-    section(C(625, 'Removable Media'), 'device'),
-    group(row({ key: 'media', title: C(611, 'Network Shares') + ' / ' + C(625, 'Removable Media'), chevron: true, on: () => go('files/:shares') }))],
+        : row({ key: 'conflict', title: C(942, 'Backup of a previous SD1'), detail: C(943, 'Restore it, or keep it aside and start a new backup') }))],
+  };
+}
+
+async function backupContentPage() {
+  const s = await get('system', {}, true);
+  const items = (s['storage.backup.items'] || '').split(',');
+  return {
+    title: C(936, 'Backup Content'), back: 'system/backup', topics: ['system'],
+    nodes: [group(
+      row({ key: 'prof', title: C(945, 'Profiles & Settings'), detail: C(946, 'Always included. Passwords and accounts are never copied.'), toggle: true, disabled: true }),
+      BACKUP_ITEMS.map(([k, id, en, did, den]) => row({ key: 'it-' + k, title: C(id, en), detail: did ? C(did, den) : '', toggle: items.includes(k),
+        set: (v) => act('storage.backup.item', { item: k, v: v ? '1' : '0' }) })))],
   };
 }
 
@@ -1186,7 +1474,7 @@ function showNotes(title, lines) {
 async function updatePage() {
   const u = await get('update', {}, true);
   const available = on01(u.available), downloaded = on01(u.downloaded);
-  const channels = [{ value: 'stable', label: C(986, 'Stable') }, { value: 'beta', label: C(987, 'Beta') }, { value: 'alpha', label: C(988, 'Alpha') }];
+  const channels = [{ value: 'stable', label: C(986, 'Stable') }, { value: 'rc', label: C(987, 'RC') }, { value: 'nightly', label: C(988, 'Nightly') }];
   const channel = channels.find((c) => c.value === u.channel) || channels[0];
   /* Release notes: one manifest line, "\\n" = new line, "\\\\" = backslash. */
   const notes = available ? (u.notes || '').replace(/\\(n|\\)/g, (m, c) => (c === 'n' ? '\n' : '\\'))
@@ -1197,7 +1485,7 @@ async function updatePage() {
       row({ key: 'ver', title: C(485, 'Version'), value: u.build ? u.current + ' • ' + u.build : u.current }),
       u.provider !== 'available' ? row({ key: 'na', title: C(655, 'Updates are not available in this build'), disabled: true }) : [
         row({ key: 'chan', title: C(985, 'Update Channel'), value: channel.label, chevron: true,
-          detail: channel.value !== 'stable' ? C(989, 'Beta and Alpha get new versions first and may have bugs') : '',
+          detail: channel.value !== 'stable' ? C(989, 'RC and Nightly get new versions first and may have bugs') : '',
           on: () => pickAndAct(C(985, 'Update Channel'), channels, channel.value, 'update.channel', 'v', ['update']) }),
         row({ key: 'auto', title: C(992, 'Check Automatically'), detail: C(993, 'Once a day, when connected to Wi-Fi'), toggle: on01(u.auto),
           set: (v) => act('update.auto', { v: v ? '1' : '0' }, { topics: ['update'] }) }),
@@ -1220,7 +1508,7 @@ async function infoPage() {
     [C(100, 'Battery'), s['battery.percent'] + '%'], [C(101, 'CPU'), (Number(s['cpu.freq_khz']) / 1000).toFixed(0) + ' MHz • ' + (Number(s['temp.cpu_millic']) / 1000).toFixed(1) + ' °C'],
     [C(102, 'GPU'), (Number(s['gpu.freq_hz']) / 1e6).toFixed(0) + ' MHz • ' + (Number(s['temp.gpu_millic']) / 1000).toFixed(1) + ' °C'], [C(103, 'Network'), s.network],
     [C(104, 'RAM'), sizeText((Number(s['mem.total_kib']) - Number(s['mem.available_kib'])) * 1024) + ' / ' + sizeText(Number(s['mem.total_kib']) * 1024)],
-    [C(105, 'Uptime'), Math.floor(up / 3600) + ' h ' + Math.floor((up % 3600) / 60) + ' min']];
+    [C(105, 'Uptime'), playtimeText(up)]];
   return { title: C(20, 'System Information'), back: 'system', topics: ['system'], nodes: [group(info.map(([k, v]) => row({ key: k, title: k, value: v || '–' })))] };
 }
 

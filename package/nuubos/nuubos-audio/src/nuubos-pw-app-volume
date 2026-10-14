@@ -20,7 +20,8 @@ FRACTION="$(awk -v v="$VOL" 'BEGIN { printf "%.4f", v / 100.0 }')"
 
 # Best-effort immediate alignment for playback streams that already exist.
 # Keep nuubOS-owned Product Audio at unity; its System Sounds/Home Music gain is
-# applied by nuubos-audiod before samples enter PipeWire.
+# applied by nuubos-audiod before samples enter PipeWire. The Media music
+# ("nuubOS Music") has its own Music volume in nuubos-mediad.
 IDS="$(/usr/bin/wpctl status -n 2>/dev/null \
   | sed -n '/Streams:/,/^Video/p' \
   | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p')"
@@ -28,7 +29,7 @@ IDS="$(/usr/bin/wpctl status -n 2>/dev/null \
 for ID in $IDS; do
   INFO="$(/usr/bin/wpctl inspect "$ID" 2>/dev/null)"
   echo "$INFO" | grep -F 'media.class = "Stream/Output/Audio"' >/dev/null 2>&1 || continue
-  if echo "$INFO" | grep -E 'application.process.binary = "nuubos-audio-wav-player"|application.name = "nuubOS Product Audio"' >/dev/null 2>&1; then
+  if echo "$INFO" | grep -E 'application.process.binary = "nuubos-audio-wav-player"|application.name = "nuubOS (Product Audio|Music)"' >/dev/null 2>&1; then
     /usr/bin/wpctl set-volume "$ID" 100% >/dev/null 2>&1 || true
   else
     /usr/bin/wpctl set-volume "$ID" "${VOL}%" >/dev/null 2>&1 || true

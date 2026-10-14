@@ -1,0 +1,195 @@
+From: nuubOS Project <nuubos@localhost>
+Date: Tue, 13 Oct 2026 12:00:00 +0200
+Subject: [PATCH 6/6] control: home button, host MAC and more stream statistics
+
+BUTTONS <hex> on the control channel holds (or with 0 releases) gamepad
+buttons on player 1 on top of what its gamepad holds, so the supervising
+process can send the Home button the console keeps for its own menu.
+
+The status action reports the MAC address the host advertises (for
+Wake-on-LAN), and @stats adds the bytes received, the host processing
+latency and the frames lost on the network.
+---
+diff --color -ruN a/libgamestream/client.c b/libgamestream/client.c
+--- a/libgamestream/client.c	2026-10-13 11:56:21.295635352 +0200
++++ b/libgamestream/client.c	2026-10-13 11:56:45.253324293 +0200
+@@ -232,6 +232,11 @@
+   if (xml_search(data->memory, data->size, "hostname", &server->hostname) != GS_OK)
+     server->hostname = NULL;
+ 
++  // Optional: the MAC address (real only over HTTPS, once paired)
++  server->mac = NULL;
++  if (xml_search(data->memory, data->size, "mac", &server->mac) != GS_OK)
++    server->mac = NULL;
++
+   // These fields are present on all version of GFE that this client supports
+   if (!strlen(currentGameText) || !strlen(pairedText) || !strlen(server->serverInfo.serverInfoAppVersion) || !strlen(stateText))
+     goto cleanup;
+diff --color -ruN a/libgamestream/client.h b/libgamestream/client.h
+--- a/libgamestream/client.h	2026-10-13 11:56:21.301010207 +0200
++++ b/libgamestream/client.h	2026-10-13 11:56:45.253164616 +0200
+@@ -31,6 +31,7 @@
+ typedef struct _SERVER_DATA {
+   char* gpuType;
+   char* hostname;
++  char* mac;
+   bool paired;
+   bool unsupported;
+   bool isNvidiaSoftware;
+diff --color -ruN a/src/input/evdev.c b/src/input/evdev.c
+--- a/src/input/evdev.c	2026-10-13 11:56:21.310758168 +0200
++++ b/src/input/evdev.c	2026-10-13 11:56:45.254058300 +0200
+@@ -128,6 +128,8 @@
+ static bool* currentReverse;
+ 
+ static bool grabbingDevices;
++/* Buttons held by the supervising process (-control BUTTONS) on player 1. */
++static int extraButtonFlags;
+ static bool mouseEmulationEnabled;
+ 
+ static bool waitingToExitOnModifiersUp = false;
+@@ -387,7 +389,7 @@
+       }
+       // Send event only if mouse emulation is disabled.
+       if (dev->mouseEmulation == false)
+-        LiSendMultiControllerEvent(dev->controllerId, assignedControllerIds, dev->buttonFlags, dev->leftTrigger, dev->rightTrigger, dev->leftStickX, dev->leftStickY, dev->rightStickX, dev->rightStickY);
++        LiSendMultiControllerEvent(dev->controllerId, assignedControllerIds, dev->buttonFlags | (dev->controllerId == 0 ? extraButtonFlags : 0), dev->leftTrigger, dev->rightTrigger, dev->leftStickX, dev->leftStickY, dev->rightStickX, dev->rightStickY);
+       dev->gamepadModified = false;
+     }
+     break;
+@@ -1122,6 +1124,24 @@
+   mouseEmulationEnabled = mouse_emulation_enabled;
+ }
+ 
++/* Presses (flags) or releases (0) buttons on player 1, on top of what its
++ * gamepad holds: the Home button the console keeps for its own menu. */
++void evdev_set_extra_buttons(int flags) {
++  struct input_device* dev = NULL;
++
++  extraButtonFlags = flags;
++  for (int i = 0; i < numDevices; i++) {
++    if (devices[i].controllerId == 0 && !devices[i].is_keyboard && !devices[i].is_mouse) {
++      dev = &devices[i];
++      break;
++    }
++  }
++  if (dev != NULL)
++    LiSendMultiControllerEvent(0, assignedControllerIds, dev->buttonFlags | flags, dev->leftTrigger, dev->rightTrigger, dev->leftStickX, dev->leftStickY, dev->rightStickX, dev->rightStickY);
++  else
++    LiSendMultiControllerEvent(0, assignedControllerIds | 1, flags, 0, 0, 0, 0, 0, 0);
++}
++
+ static struct input_device* evdev_get_input_device(unsigned short controller_id) {
+   for (int i=0; i<numDevices; i++)
+     if (devices[i].controllerId == controller_id)
+diff --color -ruN a/src/input/evdev.h b/src/input/evdev.h
+--- a/src/input/evdev.h	2026-10-13 11:56:21.315615657 +0200
++++ b/src/input/evdev.h	2026-10-13 11:56:45.253758065 +0200
+@@ -29,4 +29,5 @@
+ void evdev_start();
+ void evdev_stop();
+ void evdev_map(char* device);
++void evdev_set_extra_buttons(int flags);
+ void evdev_rumble(unsigned short controller_id, unsigned short low_freq_motor, unsigned short high_freq_motor);
+diff --color -ruN a/src/main.c b/src/main.c
+--- a/src/main.c	2026-10-13 11:56:21.305906782 +0200
++++ b/src/main.c	2026-10-13 11:56:45.254313761 +0200
+@@ -80,12 +80,14 @@
+   #ifdef HAVE_WAYLAND
+   struct wayland_video_stats v;
+   wayland_video_stats(&v);
+-  report("@stats rtt=%d rtt_var=%d width=%d height=%d fps=%d bitrate=%d decoded=%llu presented=%llu skipped=%llu errors=%llu decode_us=%llu latency_us=%llu",
++  report("@stats rtt=%d rtt_var=%d width=%d height=%d fps=%d bitrate=%d decoded=%llu presented=%llu skipped=%llu errors=%llu decode_us=%llu latency_us=%llu bytes=%llu host_latency=%llu host_frames=%llu lost=%llu",
+          have_rtt ? (int) rtt : -1, have_rtt ? (int) rtt_var : -1,
+          config->stream.width, config->stream.height, config->stream.fps, config->stream.bitrate,
+          (unsigned long long) v.decoded, (unsigned long long) v.presented, (unsigned long long) v.skipped,
+          (unsigned long long) v.decode_errors, (unsigned long long) v.decode_us_total,
+-         (unsigned long long) v.receive_to_present_us_total);
++         (unsigned long long) v.receive_to_present_us_total, (unsigned long long) v.bytes_total,
++         (unsigned long long) v.host_latency_total, (unsigned long long) v.host_latency_frames,
++         (unsigned long long) v.lost);
+   #else
+   report("@stats rtt=%d rtt_var=%d width=%d height=%d fps=%d bitrate=%d",
+          have_rtt ? (int) rtt : -1, have_rtt ? (int) rtt_var : -1,
+@@ -115,6 +117,8 @@
+       return LOOP_RETURN;
+     if (strcmp(control_line, "STATS") == 0)
+       report_stats(control_config);
++    if (strncmp(control_line, "BUTTONS ", 8) == 0)
++      evdev_set_extra_buttons((int) strtol(control_line + 8, NULL, 16));
+   }
+   return LOOP_OK;
+ }
+@@ -300,7 +304,7 @@
+   printf("\t-nomouseemulation\t\tDisable gamepad mouse emulation support (long pressing Start button)\n");
+   printf("\t-gamepad <name>\t\tOnly use gamepads with this name, as the player given by their product id\n");
+   printf("\t-noquitcombo\t\tDisable the gamepad quit combo (Play+Back+LeftShoulder+RightShoulder)\n");
+-  printf("\t-control\t\tMachine readable @events on stdout, STATS/QUIT commands on stdin\n");
++  printf("\t-control\t\tMachine readable @events on stdout, STATS/BUTTONS/QUIT commands on stdin\n");
+   #if defined(HAVE_SDL) || defined(HAVE_X11)
+   printf("\n WM options (SDL and X11 only)\n\n");
+   printf("\t-windowed\t\tDisplay screen in a window\n");
+@@ -397,10 +401,11 @@
+ 
+   if (strcmp("status", config.action) == 0) {
+     // name may contain spaces: always the last field
+-    report("@host paired=%d current_game=%d codecs=0x%x version=%s name=%s",
++    report("@host paired=%d current_game=%d codecs=0x%x version=%s mac=%s name=%s",
+            server.paired ? 1 : 0, server.currentGame,
+            server.serverInfo.serverCodecModeSupport,
+            server.serverInfo.serverInfoAppVersion,
++           server.mac ? server.mac : "",
+            server.hostname ? server.hostname : "");
+     if (!control)
+       printf("%s: %s\n", server.hostname ? server.hostname : config.address, server.paired ? "paired" : "not paired");
+diff --color -ruN a/src/video/wayland.c b/src/video/wayland.c
+--- a/src/video/wayland.c	2026-10-13 11:56:21.320423890 +0200
++++ b/src/video/wayland.c	2026-10-13 11:56:45.253707538 +0200
+@@ -125,6 +125,7 @@
+ /* Statistics for the nuubOS control channel. */
+ static pthread_mutex_t stats_lock = PTHREAD_MUTEX_INITIALIZER;
+ static struct wayland_video_stats stats;
++static int last_frame_number;
+ 
+ static uint64_t now_us(void) {
+   struct timespec ts;
+@@ -604,6 +605,7 @@
+   stream_width = width;
+   stream_height = height;
+   memset(&stats, 0, sizeof(stats));
++  last_frame_number = 0;
+   if (decoder_open(videoFormat, width, height) != 0 || wayland_open() != 0) {
+     wayland_close();
+     decoder_close();
+@@ -636,6 +638,17 @@
+   }
+   memset(au_buffer + offset, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+ 
++  pthread_mutex_lock(&stats_lock);
++  stats.bytes_total += offset;
++  if (du->frameHostProcessingLatency) {
++    stats.host_latency_total += du->frameHostProcessingLatency;
++    stats.host_latency_frames++;
++  }
++  if (last_frame_number && du->frameNumber > last_frame_number + 1)
++    stats.lost += (uint64_t) (du->frameNumber - last_frame_number - 1);
++  last_frame_number = du->frameNumber;
++  pthread_mutex_unlock(&stats_lock);
++
+   start = now_us();
+   packet->data = au_buffer;
+   packet->size = (int) offset;
+diff --color -ruN a/src/video/wayland.h b/src/video/wayland.h
+--- a/src/video/wayland.h	2026-10-13 11:56:21.325169653 +0200
++++ b/src/video/wayland.h	2026-10-13 11:56:45.253389495 +0200
+@@ -30,6 +30,10 @@
+   uint64_t decode_errors;
+   uint64_t decode_us_total;
+   uint64_t receive_to_present_us_total;
++  uint64_t bytes_total;
++  uint64_t host_latency_total;  /* 1/10 ms, frames that carry it */
++  uint64_t host_latency_frames;
++  uint64_t lost;                /* frame numbers never received */
+ };
+ 
+ extern DECODER_RENDERER_CALLBACKS decoder_callbacks_wayland;

@@ -1,0 +1,56 @@
+From: nuubOS <dev@nuubos>
+Subject: [PATCH] hwdec_drmprime: also provide a v4l2request device
+
+FFmpeg's stateless V4L2 request hwaccel (Kwiboo v4l2-request series,
+Cedrus on Allwinner H616/H700) asks for an AV_HWDEVICE_TYPE_V4L2REQUEST
+device. The drmprime interop only offered a DRM device, so --hwdec=v4l2request
+could not create its device and fell back to software decoding, whose
+frames dmabuf-wayland cannot show (black video). The decoder output is
+DRM PRIME either way: register a second device of that type with the
+same interop. The type is looked up by name, so builds without the
+series are unaffected.
+
+Upstream-Status: Inappropriate [depends on an out-of-tree FFmpeg hwaccel]
+---
+--- a/video/out/hwdec/hwdec_drmprime.c	2026-10-12 20:51:54.737408469 +0200
++++ b/video/out/hwdec/hwdec_drmprime.c	2026-10-12 20:51:54.753016689 +0200
+@@ -39,6 +39,10 @@
+ 
+ struct priv_owner {
+     struct mp_hwdec_ctx hwctx;
++    /* Stateless V4L2 request decoders (FFmpeg v4l2request hwaccel, e.g.
++     * Allwinner Cedrus) ask for a device of their own type; their frames
++     * are DRM PRIME like the DRM device's, so the same interop maps them. */
++    struct mp_hwdec_ctx v4l2request_ctx;
+     int *formats;
+ 
+     struct dmabuf_interop dmabuf_interop;
+@@ -47,6 +51,9 @@
+ static void uninit(struct ra_hwdec *hw)
+ {
+     struct priv_owner *p = hw->priv;
++    if (p->v4l2request_ctx.driver_name)
++        hwdec_devices_remove(hw->devs, &p->v4l2request_ctx);
++    av_buffer_unref(&p->v4l2request_ctx.av_device_ref);
+     if (p->hwctx.driver_name)
+         hwdec_devices_remove(hw->devs, &p->hwctx);
+     av_buffer_unref(&p->hwctx.av_device_ref);
+@@ -151,6 +158,18 @@
+     p->hwctx.driver_name = hw->driver->name;
+     hwdec_devices_add(hw->devs, &p->hwctx);
+ 
++    enum AVHWDeviceType v4l2request = av_hwdevice_find_type_by_name("v4l2request");
++    if (v4l2request != AV_HWDEVICE_TYPE_NONE &&
++        av_hwdevice_ctx_create(&p->v4l2request_ctx.av_device_ref, v4l2request,
++                               NULL, NULL, 0) == 0)
++    {
++        MP_VERBOSE(hw, "Also providing a v4l2request device.\n");
++        p->v4l2request_ctx.hw_imgfmt = IMGFMT_DRMPRIME;
++        p->v4l2request_ctx.supported_formats = p->formats;
++        p->v4l2request_ctx.driver_name = hw->driver->name;
++        hwdec_devices_add(hw->devs, &p->v4l2request_ctx);
++    }
++
+     return 0;
+ }
+ 

@@ -23,11 +23,20 @@
  * arguments): STATUS and SUBSCRIBE return the snapshot (SUBSCRIBE pushes a
  * new one on every change); DISCOVER, ADD <address>, REMOVE <host>,
  * REFRESH [<host>], PAIR <host>, PAIR_CANCEL, APPS <host>,
- * LAUNCH <host> <app>, QUIT [close], SET <key> <value> reply OK or
- * ERR <reason> at once and report progress in the snapshot; STATS replies
- * "OK key=value..." with the running stream's statistics; PRE_POWER
+ * LAUNCH <host> <app>, QUIT [close], WAKE <host>, BUTTON <home|quick-access>
+ * (Steam Link too, through inputd PADPRESS; there SET overlay toggles Valve's
+ * own statistics with Steam + Y for the session),
+ * SET <key> <value> reply OK or ERR <reason> at once and report progress in
+ * the snapshot; STATS replies "OK key=value..." with the running stream's
+ * statistics; SUBSCRIBE_STATS replies OK, then pushes one "stats
+ * key=value..." line a second while a stream runs with the user's
+ * performance overlay on (sampled only then); PRE_POWER
  * <sleep|restart|poweroff> replies once no stream runs. Outcomes the user
  * must see are typed notifications (EPIC-006).
+ *
+ * Wake-on-LAN: a paired host advertises its MAC address (kept in
+ * hosts.conf); WAKE sends the magic packet and probes the host every few
+ * seconds until it answers or WAKE_TIMEOUT_MS passes.
  *
  * Steam Link (EPIC-026) is the second streaming client: Valve's proprietary
  * application, never part of the image. On the user's request
@@ -48,7 +57,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <ifaddrs.h>
 #include <limits.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -92,6 +103,15 @@
 	"lefttrigger:b6,righttrigger:b7,back:b8,start:b9," \
 	"leftstick:b10,rightstick:b11,leftx:a0,lefty:a1,rightx:a2,righty:a3," \
 	"dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,"
+/* Steam Link's pads also have BTN_MODE (GAMEPADS ON guide), between Start
+ * and the stick clicks in SDL's button order: Valve's app sends it to the
+ * PC as the Steam button. */
+#define STEAMLINK_GAMEPAD_MAPPING \
+	"060000006e7575624f532047616d6500,nuubOS Gamepad," \
+	"a:b0,b:b1,y:b2,x:b3,leftshoulder:b4,rightshoulder:b5," \
+	"lefttrigger:b6,righttrigger:b7,back:b8,start:b9,guide:b10," \
+	"leftstick:b11,rightstick:b12,leftx:a0,lefty:a1,rightx:a2,righty:a3," \
+	"dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,"
 
 /* Steam Link: Valve's build (downloaded), the nuubOS runtime (image). */
 #define STEAMLINK_GET "/usr/lib/nuubos/nuubos-steamlink-get"
@@ -128,6 +148,21 @@
 #define STATS_TIMEOUT_MS 1500
 #define SL_CHECK_TIMEOUT_MS 40000
 #define SL_REMOVE_TIMEOUT_MS 60000
+/* Performance overlay: one statistics sample a second. */
+#define STATS_INTERVAL_MS 1000
+/* A woken PC boots and starts its streaming host within this time. */
+#define WAKE_TIMEOUT_MS 120000
+#define WAKE_PROBE_MS 5000
+/* Gamepad buttons sent to the PC: each step of a sequence lasts this. */
+#define BUTTON_STEP_MS 120
+/* moonlight-common-c button flags */
+#define BUTTON_HOME 0x0400
+#define BUTTON_A 0x1000
+/* nuubos-inputd PADPRESS bits (Steam Link: buttons on the console's own
+ * game gamepad, which Valve's app forwards). */
+#define PADPRESS_MODE 0x1
+#define PADPRESS_SOUTH 0x2
+#define PADPRESS_NORTH 0x4
 
 /* Settings (per user). Defaults live only here. */
 #define DEFAULT_RESOLUTION "auto"
@@ -149,6 +184,10 @@ struct host {
 	bool saved;      /* in hosts.conf (added by hand or paired) */
 	enum online online;
 	bool probing;
+	char mac[18];    /* advertised by the paired host, "" when unknown */
+	bool waking;     /* Wake-on-LAN sent, waiting for the host */
+	long long wake_deadline_ms;
+	long long wake_probe_ms;
 };
 
 struct app {
@@ -190,6 +229,7 @@ struct job {
 struct client {
 	int fd;
 	bool subscribed;
+	bool stats_subscribed; /* SUBSCRIBE_STATS: the performance overlay */
 	bool wants_stats;
 	long long stats_deadline_ms;
 	char buf[MAX_LINE];
@@ -213,6 +253,7 @@ struct stream {
 	char last_stats[384];
 	int power_client;
 	bool steamlink;     /* the session is Steam Link, not a Moonlight stream */
+	bool sl_stats;      /* Valve's statistics toggled on (Steam + Y) */
 };
 
 static volatile sig_atomic_t stop_requested;
@@ -244,6 +285,17 @@ static char setting_audio[8] = "stereo";
 static bool setting_local_audio;
 static bool setting_optimize = true;
 static bool setting_quit_app;
+/* Performance overlay over the stream (user request 2026-10-13), off by
+ * default, toggled from the Quick Menu. */
+static bool setting_overlay;
+static long long stats_next_ms;
+
+/* Gamepad buttons pressed on the PC for the user (BUTTON): the steps of
+ * the sequence, BUTTON_STEP_MS apart, the last one releases. */
+static int button_steps[4];
+static int button_count;
+static int button_index;
+static long long button_next_ms;
 
 static int mdns_fd = -1;
 static long long mdns_deadline_ms;
@@ -447,7 +499,7 @@ static int write_file_atomic(const char *path, const char *data)
 static void save_hosts(void)
 {
 	char path[PATH_MAX];
-	char data[MAX_HOSTS * 192];
+	char data[MAX_HOSTS * 212];
 	size_t used = 0;
 
 	if (!user[0])
@@ -456,9 +508,9 @@ static void save_hosts(void)
 	for (int i = 0; i < host_count; i++) {
 		if (!hosts[i].saved)
 			continue;
-		used += (size_t)snprintf(data + used, sizeof(data) - used, "%s|%s|%s|%d|%d\n",
+		used += (size_t)snprintf(data + used, sizeof(data) - used, "%s|%s|%s|%d|%d|%s\n",
 					 hosts[i].id, hosts[i].name, hosts[i].address,
-					 hosts[i].port, hosts[i].paired ? 1 : 0);
+					 hosts[i].port, hosts[i].paired ? 1 : 0, hosts[i].mac);
 		if (used >= sizeof(data))
 			break;
 	}
@@ -475,9 +527,10 @@ static void save_settings(void)
 	if (!user[0])
 		return;
 	snprintf(data, sizeof(data), "RESOLUTION=%s\nFPS=%d\nCODEC=%s\nBITRATE=%d\nAUDIO=%s\n"
-		 "LOCAL_AUDIO=%d\nOPTIMIZE=%d\nQUIT_APP=%d\n",
+		 "LOCAL_AUDIO=%d\nOPTIMIZE=%d\nQUIT_APP=%d\nOVERLAY=%d\n",
 		 setting_resolution, setting_fps, setting_codec, setting_bitrate, setting_audio,
-		 setting_local_audio ? 1 : 0, setting_optimize ? 1 : 0, setting_quit_app ? 1 : 0);
+		 setting_local_audio ? 1 : 0, setting_optimize ? 1 : 0, setting_quit_app ? 1 : 0,
+		 setting_overlay ? 1 : 0);
 	snprintf(path, sizeof(path), "%s/settings.conf", user_dir);
 	if (mkdir_p(user_dir) != 0 || write_file_atomic(path, data) != 0)
 		log_msg("streamd: could not write %s", path);
@@ -498,6 +551,23 @@ static bool valid_audio(const char *v)
 	return !strcmp(v, "stereo") || !strcmp(v, "5.1") || !strcmp(v, "7.1");
 }
 
+/* "aa:bb:cc:dd:ee:ff"; the all-zero address a host sends over plain HTTP
+ * (not paired) is no address. */
+static bool parse_mac(const char *text, unsigned char out[6])
+{
+	unsigned int v[6];
+	char tail;
+	bool zero = true;
+
+	if (sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x%c", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &tail) != 6)
+		return false;
+	for (int i = 0; i < 6; i++) {
+		out[i] = (unsigned char)v[i];
+		zero = zero && v[i] == 0;
+	}
+	return !zero;
+}
+
 static void load_user_state(void)
 {
 	char path[PATH_MAX];
@@ -516,21 +586,23 @@ static void load_user_state(void)
 	setting_local_audio = false;
 	setting_optimize = true;
 	setting_quit_app = false;
+	setting_overlay = false;
 	if (!user[0])
 		return;
 
 	snprintf(path, sizeof(path), "%s/hosts.conf", user_dir);
 	fp = fopen(path, "r");
 	while (fp && fgets(line, sizeof(line), fp) && host_count < MAX_HOSTS) {
-		char *f[5];
+		char *f[6];
 		char *save = NULL;
 		int n = 0;
 		struct host *h = &hosts[host_count];
+		unsigned char mac[6];
 
 		trim(line);
-		for (char *t = strtok_r(line, "|", &save); t && n < 5; t = strtok_r(NULL, "|", &save))
+		for (char *t = strtok_r(line, "|", &save); t && n < 6; t = strtok_r(NULL, "|", &save))
 			f[n++] = t;
-		if (n != 5 || !valid_address(f[2]))
+		if (n < 5 || !valid_address(f[2]))
 			continue;
 		memset(h, 0, sizeof(*h));
 		copy_text(h->id, sizeof(h->id), f[0]);
@@ -538,6 +610,8 @@ static void load_user_state(void)
 		copy_text(h->address, sizeof(h->address), f[2]);
 		h->port = atoi(f[3]) > 0 ? atoi(f[3]) : DEFAULT_PORT;
 		h->paired = atoi(f[4]) != 0;
+		if (n == 6 && parse_mac(f[5], mac))
+			copy_text(h->mac, sizeof(h->mac), f[5]);
 		h->saved = true;
 		host_count++;
 	}
@@ -564,6 +638,8 @@ static void load_user_state(void)
 			setting_optimize = line[9] != '0';
 		else if (!strncmp(line, "QUIT_APP=", 9))
 			setting_quit_app = line[9] == '1';
+		else if (!strncmp(line, "OVERLAY=", 8))
+			setting_overlay = line[8] == '1';
 	}
 	if (fp)
 		fclose(fp);
@@ -664,17 +740,21 @@ static char *build_status(size_t *len_out)
 	APPEND("local_audio=%d\n", setting_local_audio ? 1 : 0);
 	APPEND("optimize=%d\n", setting_optimize ? 1 : 0);
 	APPEND("quit_app=%d\n", setting_quit_app ? 1 : 0);
+	APPEND("overlay=%d\n", stream.steamlink && stream.state != STREAM_IDLE ?
+	       (stream.sl_stats ? 1 : 0) : (setting_overlay ? 1 : 0));
 	APPEND("discovering=%d\n", mdns_fd >= 0 ? 1 : 0);
 	APPEND("pairing_host=%s\n", pairing_host);
 	APPEND("pairing_pin=%s\n", pairing_pin);
 	APPEND("apps_host=%s\n", apps_host);
 	APPEND("apps_state=%s\n", apps_state);
+	/* host= id name address paired online saved probing wol waking */
 	for (int i = 0; i < host_count; i++)
-		APPEND("host=%s\t%s\t%s\t%d\t%s\t%d\t%d\n", hosts[i].id, hosts[i].name,
+		APPEND("host=%s\t%s\t%s\t%d\t%s\t%d\t%d\t%d\t%d\n", hosts[i].id, hosts[i].name,
 		       hosts[i].address, hosts[i].paired ? 1 : 0,
 		       hosts[i].online == ONLINE_YES ? "online" :
 		       hosts[i].online == ONLINE_NO ? "offline" : "unknown",
-		       hosts[i].saved ? 1 : 0, hosts[i].probing ? 1 : 0);
+		       hosts[i].saved ? 1 : 0, hosts[i].probing ? 1 : 0,
+		       hosts[i].mac[0] ? 1 : 0, hosts[i].waking ? 1 : 0);
 	for (int i = 0; i < app_count; i++)
 		APPEND("app=%d\t%s\n", apps[i].id, apps[i].name);
 	APPEND("end=1\n");
@@ -689,6 +769,7 @@ static void close_client(struct client *c)
 		close(c->fd);
 	c->fd = -1;
 	c->subscribed = false;
+	c->stats_subscribed = false;
 	c->wants_stats = false;
 	c->used = 0;
 	if (stream.power_client >= 0 && &clients[stream.power_client] == c)
@@ -995,15 +1076,16 @@ static int connect_socket(const char *path, int timeout_ms)
 
 /* Game gamepads stay on for as long as this connection is open: if streamd
  * dies, inputd gives the controllers back to the nuubUI by itself. */
-static int input_gamepads_on(void)
+static int input_gamepads_on(bool guide)
 {
+	const char *command = guide ? "GAMEPADS ON guide\n" : "GAMEPADS ON\n";
 	char answer[64];
 	size_t used = 0;
 	int fd = connect_socket(INPUT_SOCKET, 1000);
 
 	if (fd < 0)
 		return -1;
-	if (write_all(fd, "GAMEPADS ON\n", 12) != 0) {
+	if (write_all(fd, command, strlen(command)) != 0) {
 		close(fd);
 		return -1;
 	}
@@ -1024,11 +1106,32 @@ static int input_gamepads_on(void)
 	return fd;
 }
 
+/* Low-latency Wi-Fi (radio power save off) while a stream session runs:
+ * nuubos-wifid watches this directory (battery audit 2026-10-14). */
+#define LOW_LATENCY_MARK RUN_ROOT "/low-latency/streamd"
+
+static void low_latency(bool on)
+{
+	if (on) {
+		int fd;
+
+		(void)mkdir(RUN_ROOT "/low-latency", 0755);
+		fd = open(LOW_LATENCY_MARK, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+		if (fd >= 0)
+			close(fd);
+	} else {
+		(void)unlink(LOW_LATENCY_MARK);
+	}
+}
+
 static void reset_stream(void)
 {
+	low_latency(false);
 	if (stream.input_fd >= 0)
 		close(stream.input_fd);
 	memset(&stream, 0, sizeof(stream));
+	button_count = 0;
+	button_index = 0;
 	stream.state = STREAM_IDLE;
 	stream.job = -1;
 	stream.input_fd = -1;
@@ -1094,7 +1197,7 @@ static const char *launch_stream(const char *host_id, const char *app_name)
 		extra[n++] = (char *)"-quitappafter";
 	extra[n] = NULL;
 
-	stream.input_fd = input_gamepads_on();
+	stream.input_fd = input_gamepads_on(false);
 	if (stream.input_fd < 0)
 		log_msg("streamd: inputd game gamepads unavailable");
 
@@ -1108,6 +1211,7 @@ static const char *launch_stream(const char *host_id, const char *app_name)
 	stream.state = STREAM_STARTING;
 	stream.job = slot;
 	stream.power_client = -1;
+	low_latency(true);
 	stream.terminated_error = 0;
 	copy_text(stream.host, sizeof(stream.host), h->id);
 	copy_text(stream.app, sizeof(stream.app), app_name);
@@ -1161,6 +1265,80 @@ static void answer_stats(const char *line)
 		clients[i].wants_stats = false;
 		reply(&clients[i], text);
 	}
+	snprintf(text, sizeof(text), "stats %s\n", stream.last_stats);
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (clients[i].fd >= 0 && clients[i].stats_subscribed)
+			reply(&clients[i], text);
+}
+
+/* The overlay is shown somewhere: sample the stream once a second. */
+static bool stats_wanted(void)
+{
+	if (stream.state != STREAM_RUNNING || stream.steamlink || !setting_overlay)
+		return false;
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (clients[i].fd >= 0 && clients[i].stats_subscribed)
+			return true;
+	return false;
+}
+
+/* Presses buttons on player 1 of the PC: the Home button that opens
+ * Steam's menu, which the console keeps for its own Quick Menu, or Home + A
+ * (Steam's Quick Access menu). Moonlight sends them in the stream (BUTTONS);
+ * for Steam Link inputd holds them on the game gamepad Valve's app reads
+ * (PADPRESS), and Steam + Y toggles Valve's statistics ("stats"). */
+static bool start_buttons(const char *which)
+{
+	static const int home[] = { BUTTON_HOME, 0 };
+	static const int quick_access[] = { BUTTON_HOME, BUTTON_HOME | BUTTON_A, BUTTON_HOME, 0 };
+	static const int sl_home[] = { PADPRESS_MODE, 0 };
+	static const int sl_quick_access[] = {
+		PADPRESS_MODE, PADPRESS_MODE | PADPRESS_SOUTH, PADPRESS_MODE, 0
+	};
+	static const int sl_stats[] = {
+		PADPRESS_MODE, PADPRESS_MODE | PADPRESS_NORTH, PADPRESS_MODE, 0
+	};
+	const int *steps;
+	int count;
+
+	if (!strcmp(which, "home")) {
+		steps = stream.steamlink ? sl_home : home;
+		count = 2;
+	} else if (!strcmp(which, "quick-access")) {
+		steps = stream.steamlink ? sl_quick_access : quick_access;
+		count = 4;
+	} else if (!strcmp(which, "stats") && stream.steamlink) {
+		steps = sl_stats;
+		count = 4;
+	} else {
+		return false;
+	}
+	memcpy(button_steps, steps, (size_t)count * sizeof(steps[0]));
+	button_count = count;
+	button_index = 0;
+	button_next_ms = monotonic_ms();
+	return true;
+}
+
+static void run_buttons(long long now)
+{
+	char command[32];
+
+	if (button_index >= button_count || now < button_next_ms)
+		return;
+	if (stream.state != STREAM_RUNNING) {
+		button_count = 0;
+		return;
+	}
+	if (stream.steamlink) {
+		snprintf(command, sizeof(command), "PADPRESS %x\n", button_steps[button_index++]);
+		if (stream.input_fd >= 0)
+			(void)write_all(stream.input_fd, command, strlen(command));
+	} else {
+		snprintf(command, sizeof(command), "BUTTONS %x", button_steps[button_index++]);
+		job_command(stream.job, command);
+	}
+	button_next_ms = now + BUTTON_STEP_MS;
 }
 
 static void handle_hotkey(const char *action)
@@ -1179,7 +1357,7 @@ static void process_input_link(void)
 		/* inputd restarted: take the gamepads again. */
 		close(stream.input_fd);
 		stream.input_used = 0;
-		stream.input_fd = input_gamepads_on();
+		stream.input_fd = input_gamepads_on(stream.steamlink);
 		return;
 	}
 	for (ssize_t i = 0; i < n; i++) {
@@ -1373,7 +1551,10 @@ static void steamlink_session_env(void)
 	setenv("QTDIR", STEAMLINK_QT_VALVE, 1);
 	setenv("QT_PLUGIN_PATH", STEAMLINK_QT "/plugins:" STEAMLINK_QT_VALVE "/plugins", 1);
 	setenv("LD_LIBRARY_PATH", STEAMLINK_APP "/lib:" STEAMLINK_QT_VALVE "/lib:" STEAMLINK_QT "/lib", 1);
-	setenv("SDL_GAMECONTROLLERCONFIG", GAMEPAD_MAPPING, 1);
+	setenv("SDL_GAMECONTROLLERCONFIG", STEAMLINK_GAMEPAD_MAPPING, 1);
+	/* The Steam button sequences (PADPRESS) arrive while the Quick Menu
+	 * has the focus; inputd forwards nothing else meanwhile. */
+	setenv("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1", 1);
 	setenv("LANG", "C.UTF-8", 1);
 }
 
@@ -1487,7 +1668,7 @@ static const char *launch_steamlink(void)
 		return "unavailable";
 	copy_text(locale, sizeof(locale), steamlink_locale());
 
-	stream.input_fd = input_gamepads_on();
+	stream.input_fd = input_gamepads_on(true);
 	if (stream.input_fd < 0)
 		log_msg("streamd: inputd game gamepads unavailable");
 	slot = spawn_steamlink_job(JOB_SL_SESSION, argv, -1);
@@ -1503,6 +1684,7 @@ static const char *launch_steamlink(void)
 	stream.steamlink = true;
 	stream.started = true;
 	stream.power_client = -1;
+	low_latency(true);
 	steamlink_session_start_ms = monotonic_ms();
 	log_msg("streamd: steamlink %s locale=%s user=%s", steamlink_version, locale, user);
 	return NULL;
@@ -1535,6 +1717,12 @@ static void handle_job_line(int slot, char *line)
 			j->ok = true;
 			if (field(line, "paired", value, sizeof(value)))
 				h->paired = atoi(value) != 0;
+			{
+				unsigned char mac[6];
+
+				if (field(line, "mac", value, sizeof(value)) && parse_mac(value, mac))
+					copy_text(h->mac, sizeof(h->mac), value);
+			}
 			if (field(line, "name", value, sizeof(value)) && value[0]) {
 				sanitize(value);
 				copy_text(h->name, sizeof(h->name), value);
@@ -1656,6 +1844,10 @@ static void finish_job(int slot, int status)
 		if (h) {
 			h->probing = false;
 			h->online = j->ok ? ONLINE_YES : ONLINE_NO;
+			if (j->ok && h->waking) {
+				h->waking = false;
+				log_msg("streamd: %s woke up", h->address);
+			}
 			if (h->saved)
 				save_hosts();
 		}
@@ -1993,6 +2185,64 @@ static struct host *add_host(const char *address)
 	return h;
 }
 
+/* Wake-on-LAN magic packet (6 x 0xff, then the MAC 16 times) to the
+ * limited broadcast, the broadcast of every IPv4 network the console is on
+ * and the host's last address, on the usual ports 9 and 7. */
+static bool send_wol(const struct host *h)
+{
+	unsigned char mac[6];
+	unsigned char packet[102];
+	struct sockaddr_in to;
+	struct ifaddrs *ifs = NULL;
+	int one = 1;
+	int sent = 0;
+	int fd;
+
+	if (!parse_mac(h->mac, mac))
+		return false;
+	memset(packet, 0xff, 6);
+	for (int i = 0; i < 16; i++)
+		memcpy(packet + 6 + i * 6, mac, 6);
+	fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return false;
+	(void)setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+
+#define SEND_TO(addr) \
+	do { \
+		static const unsigned short ports[] = { 9, 7 }; \
+		for (int _p = 0; _p < 2; _p++) { \
+			memset(&to, 0, sizeof(to)); \
+			to.sin_family = AF_INET; \
+			to.sin_addr = (addr); \
+			to.sin_port = htons(ports[_p]); \
+			if (sendto(fd, packet, sizeof(packet), 0, (struct sockaddr *)&to, sizeof(to)) == (ssize_t)sizeof(packet)) \
+				sent++; \
+		} \
+	} while (0)
+
+	{
+		struct in_addr all = { htonl(INADDR_BROADCAST) };
+		struct in_addr host;
+
+		SEND_TO(all);
+		if (inet_pton(AF_INET, h->address, &host) == 1)
+			SEND_TO(host);
+	}
+	if (getifaddrs(&ifs) == 0) {
+		for (struct ifaddrs *i = ifs; i; i = i->ifa_next) {
+			if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_BROADCAST) ||
+			    (i->ifa_flags & IFF_LOOPBACK) || !i->ifa_broadaddr)
+				continue;
+			SEND_TO(((struct sockaddr_in *)i->ifa_broadaddr)->sin_addr);
+		}
+		freeifaddrs(ifs);
+	}
+#undef SEND_TO
+	close(fd);
+	return sent > 0;
+}
+
 static void remove_host(struct host *h)
 {
 	int index = (int)(h - hosts);
@@ -2082,6 +2332,19 @@ static void handle_command(struct client *c, char *line)
 		 * the host application keeps running for the next stream. */
 		stream.power_client = (int)(c - clients);
 		request_stream_quit(false);
+		return;
+	}
+	if (!strcmp(line, "SUBSCRIBE_STATS")) {
+		c->stats_subscribed = true;
+		reply(c, "OK\n");
+		return;
+	}
+	if (!strcmp(line, "BUTTON") && argc == 1) {
+		if (stream.state != STREAM_RUNNING) {
+			reply(c, "ERR no-stream\n");
+			return;
+		}
+		reply(c, start_buttons(args[0]) ? "OK\n" : "ERR button\n");
 		return;
 	}
 	if (!strcmp(line, "STATS")) {
@@ -2209,6 +2472,28 @@ static void handle_command(struct client *c, char *line)
 				probe_host(&hosts[i]);
 		reply(c, "OK\n");
 		notify_subscribers();
+	} else if (!strcmp(line, "WAKE") && argc == 1) {
+		long long now = monotonic_ms();
+
+		h = find_host(args[0]);
+		if (!h) {
+			reply(c, "ERR host\n");
+			return;
+		}
+		if (!h->mac[0]) {
+			reply(c, "ERR mac\n");
+			return;
+		}
+		if (!send_wol(h)) {
+			reply(c, "ERR network\n");
+			return;
+		}
+		log_msg("streamd: wake-on-lan %s %s", h->address, h->mac);
+		h->waking = true;
+		h->wake_deadline_ms = now + WAKE_TIMEOUT_MS;
+		h->wake_probe_ms = now + WAKE_PROBE_MS;
+		reply(c, "OK\n");
+		notify_subscribers();
 	} else if (!strcmp(line, "PAIR") && argc == 1) {
 		h = find_host(args[0]);
 		if (!h) {
@@ -2288,6 +2573,18 @@ static void handle_command(struct client *c, char *line)
 			setting_optimize = strcmp(args[1], "0") != 0;
 		else if (!strcmp(args[0], "quit_app"))
 			setting_quit_app = !strcmp(args[1], "1");
+		else if (!strcmp(args[0], "overlay") && stream.steamlink &&
+			 stream.state == STREAM_RUNNING) {
+			/* Steam Link: Valve's own statistics, for this session. */
+			bool on = !strcmp(args[1], "1");
+
+			if (on != stream.sl_stats && start_buttons("stats"))
+				stream.sl_stats = on;
+			reply(c, "OK\n");
+			notify_subscribers();
+			return;
+		} else if (!strcmp(args[0], "overlay"))
+			setting_overlay = !strcmp(args[1], "1");
 		else {
 			reply(c, "ERR setting\n");
 			return;
@@ -2377,6 +2674,22 @@ static int next_timeout_ms(void)
 			CONSIDER(clients[i].stats_deadline_ms);
 	if (mdns_fd >= 0)
 		CONSIDER(mdns_deadline_ms);
+	if (stats_wanted()) {
+		if (stats_next_ms <= 0)
+			stats_next_ms = now;
+		CONSIDER(stats_next_ms);
+	} else {
+		stats_next_ms = 0;
+	}
+	if (button_index < button_count)
+		CONSIDER(button_next_ms);
+	for (int i = 0; i < host_count; i++) {
+		if (!hosts[i].waking)
+			continue;
+		CONSIDER(hosts[i].wake_deadline_ms);
+		if (!hosts[i].probing)
+			CONSIDER(hosts[i].wake_probe_ms);
+	}
 #undef CONSIDER
 	if (deadline < 0)
 		return -1;
@@ -2415,6 +2728,30 @@ static void run_timers(void)
 	if (mdns_fd >= 0 && now >= mdns_deadline_ms) {
 		mdns_stop();
 		notify_subscribers();
+	}
+	if (stats_next_ms > 0 && now >= stats_next_ms && stats_wanted()) {
+		job_command(stream.job, "STATS");
+		stats_next_ms = now + STATS_INTERVAL_MS;
+	}
+	run_buttons(now);
+	for (int i = 0; i < host_count; i++) {
+		struct host *h = &hosts[i];
+
+		if (!h->waking)
+			continue;
+		if (now >= h->wake_deadline_ms) {
+			h->waking = false;
+			log_msg("streamd: %s did not wake up", h->address);
+			notify_event("stream.wake.failed", "name", h->name);
+			notify_subscribers();
+		} else if (!h->probing && now >= h->wake_probe_ms) {
+			/* The packet again (a PC may miss the first while its
+			 * network link comes up), then ask the host. */
+			(void)send_wol(h);
+			h->wake_probe_ms = now + WAKE_PROBE_MS;
+			probe_host(h);
+			notify_subscribers();
+		}
 	}
 }
 

@@ -71,26 +71,22 @@ zones="${zones:-0}"; trips="${trips:-0}"; cooling="${cooling:-0}"
 ((trips > 0)) && pass "thermal trips present ($trips)" || fail "thermal trips missing"
 ((cooling > 0)) && pass "cooling devices present ($cooling)" || fail "cooling devices missing"
 
+# CPU power-down idle state (kernel patch 0107, TF-A native PSCI
+# CPU_SUSPEND 0x00010000; battery audit 2026-10-14).
 idle_driver="$(remote 'cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null' || true)"
-[[ "$idle_driver" == "none" ]] \
-    && pass "cpuidle has no registered runtime driver" \
-    || fail "cpuidle driver '${idle_driver:-missing}', expected none"
+[[ "$idle_driver" == "psci_idle" ]] \
+    && pass "cpuidle driver psci_idle" \
+    || fail "cpuidle driver '${idle_driver:-missing}', expected psci_idle"
 
 idle_governor="$(remote 'cat /sys/devices/system/cpu/cpuidle/current_governor 2>/dev/null' || true)"
 [[ "$idle_governor" == "menu" ]] \
     && pass "cpuidle governor menu" \
     || fail "cpuidle governor '${idle_governor:-missing}', expected menu"
 
-if remote '! find /sys/devices/system/cpu/cpu*/cpuidle -maxdepth 1 -name "state*" 2>/dev/null | grep -q .'; then
-    pass "no cpuidle state directories exposed"
+if remote 'test -e /proc/device-tree/cpus/idle-states/cpu-sleep-0 && grep -qx cpu-sleep-0 /sys/devices/system/cpu/cpu0/cpuidle/state1/name'; then
+    pass "cpu-sleep-0 power-down idle state exposed"
 else
-    fail "unexpected cpuidle state directory exposed"
-fi
-
-if remote 'test ! -e /proc/device-tree/cpus/idle-states/cpu-sleep-0'; then
-    pass "no deep cpu-sleep-0 device-tree state"
-else
-    fail "unexpected deep cpu-sleep-0 device-tree state"
+    fail "cpu-sleep-0 idle state missing"
 fi
 
 if remote 'dmesg | grep -qi PSCI'; then

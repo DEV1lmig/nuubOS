@@ -69,6 +69,12 @@ const NOTIFY_SOCKET: &str = "/run/nuubos/notifyd.sock";
 const EMULATION_SOCKET: &str = "/run/nuubos/emud.sock";
 const STREAM_SOCKET: &str = "/run/nuubos/streamd.sock";
 const WEB_SOCKET: &str = "/run/nuubos/webd.sock";
+const MEDIA_SOCKET: &str = "/run/nuubos/mediad.sock";
+const CAST_SOCKET: &str = "/run/nuubos/castd.sock";
+/* Cast Screen row (DISPLAY & AUDIO). */
+const CAST_ROW: i32 = 39;
+/* Media Screen Off (nuubos-displayctl): the menu turns the screen back on. */
+const SCREEN_OFF_FILE: &str = "/run/nuubos/screen-off";
 const REGIONAL_SOCKET: &str = "/run/nuubos/regionald.sock";
 /* Web Mode keyboard sheet height (logical px, full output width). */
 const KEYBOARD_SURFACE_HEIGHT: u32 = 270;
@@ -114,7 +120,7 @@ impl UiWindow {
 }
 
 /* Hands out one window per component, in creation order:
- * QuickMenuWindow, NotificationWindow. */
+ * QuickMenuWindow, NotificationWindow, StreamHudWindow. */
 struct QuickPlatform {
     windows: RefCell<VecDeque<Rc<dyn WindowAdapter>>>,
     started: Instant,
@@ -184,6 +190,9 @@ const OSD_SURFACE_MARGIN_BOTTOM: i32 = 52;
 const TOAST_SURFACE_WIDTH: u32 = 416;
 const TOAST_SURFACE_HEIGHT: u32 = 88;
 const TOAST_SURFACE_MARGIN: i32 = 6;
+/* Stream performance overlay: a bottom strip for two lines in a pill
+ * (StreamHudWindow). */
+const HUD_SURFACE_HEIGHT: u32 = 58;
 
 /* Layer surface variants. Passive surfaces (volume OSD, notification) are
  * sized to their card so an update costs a few KB of rendering. The
@@ -194,6 +203,7 @@ enum SurfaceKind {
     Volume,
     Toast,
     Keyboard,
+    StreamHud,
 }
 
 impl SurfaceKind {
@@ -308,10 +318,10 @@ impl WaylandState {
             &surface,
             None,
             Layer::Overlay,
-            if kind == SurfaceKind::Toast {
-                "nuubOS Notification".into()
-            } else {
-                "nuubOS Quick Menu".into()
+            match kind {
+                SurfaceKind::Toast => "nuubOS Notification".into(),
+                SurfaceKind::StreamHud => "nuubOS Stream Overlay".into(),
+                _ => "nuubOS Quick Menu".into(),
             },
             qh,
             (),
@@ -329,6 +339,10 @@ impl WaylandState {
                 layer_surface.set_size(TOAST_SURFACE_WIDTH, TOAST_SURFACE_HEIGHT);
                 layer_surface.set_anchor(Anchor::Top | Anchor::Right);
                 layer_surface.set_margin(TOAST_SURFACE_MARGIN, TOAST_SURFACE_MARGIN, 0, 0);
+            }
+            SurfaceKind::StreamHud => {
+                layer_surface.set_size(0, HUD_SURFACE_HEIGHT);
+                layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
             }
             SurfaceKind::Keyboard => {
                 /* The Web Mode keyboard: a full-width bottom sheet over the
@@ -1039,6 +1053,7 @@ struct AudioSnapshot {
     system_volume: i32,
     home_music_volume: i32,
     home_music_playing: bool,
+    applications_volume: i32,
 }
 
 impl Default for AudioSnapshot {
@@ -1054,6 +1069,7 @@ impl Default for AudioSnapshot {
             system_volume: 60,
             home_music_volume: 60,
             home_music_playing: false,
+            applications_volume: 100,
         }
     }
 }
@@ -1104,11 +1120,13 @@ fn parse_audio_snapshot(reply: &str) -> AudioSnapshot {
                 snapshot.home_music_volume = value.parse::<i32>().unwrap_or(60);
             }
             "home_music.playing" => snapshot.home_music_playing = value == "1",
+            "volume.applications" => snapshot.applications_volume = value.parse::<i32>().unwrap_or(100),
             _ => {}
         }
     }
 
-    snapshot.volume_supported = snapshot.selected != "hdmi";
+    /* The TV owns the volume on HDMI and while casting with sound. */
+    snapshot.volume_supported = snapshot.selected != "hdmi" && snapshot.selected != "cast";
     snapshot
 }
 
@@ -1125,6 +1143,7 @@ fn audio_output_name(ui: &QuickMenuWindow, output: &str) -> String {
         "analog" => tr(ui, 332, "Analog Audio"),
         "headphones" => tr(ui, 330, "Headphones"),
         "hdmi" => "HDMI".to_owned(),
+        "cast" => tr(ui, 1202, "Screen Cast"),
         "speaker" => tr(ui, 240, "Speaker"),
         _ => tr(ui, 235, "Audio"),
     }
@@ -1143,20 +1162,25 @@ fn apply_audio_snapshot(ui: &QuickMenuWindow, snapshot: &AudioSnapshot) {
         snapshot.system_volume.clamp(0, 100) as f32 / 100.0,
     );
     ui.set_home_music_playing(snapshot.home_music_playing);
+    ui.set_game_volume(snapshot.applications_volume.clamp(0, 100));
 
     if snapshot.volume_supported {
         let volume = snapshot.volume.clamp(0, 100);
-        ui.set_audio_output_label(format!("{selected_name} • {volume}%").into());
-        ui.set_audio_volume_label(format!("{volume}%").into());
+        /* 0% is audiod's hard mute (ToggleMute). */
+        let level = if volume == 0 { tr(ui, 812, "Muted") } else { format!("{volume}%") };
+        ui.set_audio_output_label(format!("{selected_name} • {level}").into());
+        ui.set_audio_volume_label(level.into());
         ui.set_audio_volume_fraction(volume as f32 / 100.0);
         ui.set_volume_osd_detail(format!("{volume}%").into());
         ui.set_volume_osd_fraction(volume as f32 / 100.0);
+        ui.set_volume_osd_muted(volume == 0);
     } else {
         ui.set_audio_output_label(format!("{selected_name} • TV").into());
         ui.set_audio_volume_label(tr(ui, 272, "TV").into());
         ui.set_audio_volume_fraction(0.0);
         ui.set_volume_osd_detail(tr(ui, 273, "Volume controlled by TV / receiver").into());
         ui.set_volume_osd_fraction(0.0);
+        ui.set_volume_osd_muted(false);
     }
 }
 
@@ -1390,8 +1414,10 @@ enum AppEvent {
     /* Emulation Service session snapshot (nuubos-emud). */
     Game(GameSnapshot),
     /* PC Game Streaming Service: a stream runs (nuubos-streamd). */
-    /* running, Steam Link session */
-    Stream(bool, bool),
+    Stream(StreamState),
+    /* One statistics sample of the stream for the performance overlay
+     * (streamd SUBSCRIBE_STATS, key=value fields). */
+    StreamStats(String),
     StatusChanged,
     /* The output device changed its own volume (Bluetooth headset buttons). */
     DeviceVolume,
@@ -1400,6 +1426,19 @@ enum AppEvent {
     Web(bool, i32),
     /* Input method: a text field of the page has the focus or not. */
     Ime(ime::ImeState),
+    /* Media music (nuubos-mediad): the MUSIC section. */
+    Media(MediaState),
+    /* Screen Casting Service (nuubos-castd): the Cast Screen row. */
+    Cast(CastState),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct MediaState {
+    music: bool,
+    playing: bool,
+    title: String,
+    artist: String,
+    volume: i32,
 }
 
 impl From<ime::ImeState> for AppEvent {
@@ -1699,6 +1738,48 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
             -1,
         ),
         "media.failed" => (ICON_FAILED, SEVERITY_WARNING, tr(ui, 667, "The media could not be played"), String::new(), -1),
+        "cast.started" => (
+            ICON_DONE,
+            SEVERITY_SUCCESS,
+            format_arg(&tr(ui, 1203, "Casting to {0}"), n.text("name")),
+            if n.text("delay") == "high" {
+                tr(ui, 1204, "The picture reaches the TV a few seconds late")
+            } else {
+                String::new()
+            },
+            -1,
+        ),
+        "cast.ended" => (
+            if n.text("reason") == "network" { ICON_FAILED } else { ICON_DONE },
+            if n.text("reason") == "network" { SEVERITY_WARNING } else { SEVERITY_INFO },
+            if n.text("reason") == "network" {
+                tr(ui, 1206, "Casting connection lost")
+            } else {
+                tr(ui, 1205, "Casting ended")
+            },
+            n.text("name").to_owned(),
+            -1,
+        ),
+        "cast.failed" => (
+            ICON_FAILED,
+            SEVERITY_ERROR,
+            tr(ui, 1207, "Casting could not start"),
+            match n.text("reason") {
+                "unreachable" => tr(ui, 1208, "The receiver could not be reached"),
+                "refused" => tr(ui, 1209, "The receiver refused the connection"),
+                "unsupported" => tr(ui, 1210, "The receiver cannot show this stream"),
+                _ => n.text("name").to_owned(),
+            },
+            -1,
+        ),
+        "cast.encoder.installed" => (ICON_DONE, SEVERITY_SUCCESS, tr(ui, 1211, "Miracast encoder installed"), String::new(), -1),
+        "cast.encoder.failed" => (
+            ICON_FAILED,
+            SEVERITY_WARNING,
+            tr(ui, 1212, "The Miracast encoder could not be downloaded"),
+            String::new(),
+            -1,
+        ),
         "web.failed" => (
             ICON_FAILED,
             SEVERITY_ERROR,
@@ -1730,6 +1811,8 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
                 "update-download" => tr(ui, 660, "Downloading update"),
                 "update-install" => tr(ui, 984, "Installing update"),
                 "scrape-game" | "scrape-bulk" => tr(ui, 571, "Getting metadata"),
+                "core-install" => tr(ui, 1254, "Downloading emulator"),
+                "cheats-update" => tr(ui, 1242, "Downloading cheats"),
                 "sd2-backup" => tr(ui, 982, "Backup"),
                 "sd2-restore" => tr(ui, 1017, "Restore from Backup"),
                 "sd2-format" => tr(ui, 969, "Formatting SD2"),
@@ -1831,6 +1914,13 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
             SEVERITY_ERROR,
             tr(ui, 463, "Pairing failed"),
             n.text("name").to_owned(),
+            -1,
+        ),
+        "stream.wake.failed" => (
+            ICON_FAILED,
+            SEVERITY_WARNING,
+            format_arg(&tr(ui, 1188, "{0} did not wake up"), n.text("name")),
+            tr(ui, 1189, "Check that Wake-on-LAN is enabled on the PC"),
             -1,
         ),
         "stream.steamlink.installed" => (
@@ -2574,6 +2664,12 @@ struct GameSnapshot {
     fps: f32,
     /* RetroAchievements hardcore: no save states (EPIC-017). */
     hardcore: bool,
+    /* Cheats turned on; netplay (off|starting|host|client), players
+     * connected, the other side's name. */
+    cheats_on: i32,
+    netplay: String,
+    net_peers: i32,
+    net_peer: String,
 }
 
 fn parse_game_snapshot(reply: &str) -> GameSnapshot {
@@ -2588,6 +2684,10 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
             Some(("overlay_items", value)) => snapshot.overlay_items = value.to_owned(),
             Some(("fps", value)) => snapshot.fps = value.parse().unwrap_or(0.0),
             Some(("hardcore", value)) => snapshot.hardcore = value == "1",
+            Some(("cheats_on", value)) => snapshot.cheats_on = value.parse().unwrap_or(0),
+            Some(("netplay", value)) => snapshot.netplay = value.to_owned(),
+            Some(("netplay_peers", value)) => snapshot.net_peers = value.parse().unwrap_or(0),
+            Some(("netplay_peer", value)) => snapshot.net_peer = value.to_owned(),
             _ => {}
         }
     }
@@ -2743,7 +2843,8 @@ fn system_perf() -> String {
 
 fn emulation_command(command: &str) -> std::io::Result<String> {
     let mut stream = UnixStream::connect(EMULATION_SOCKET)?;
-    stream.set_read_timeout(Some(Duration::from_millis(700)))?;
+    /* CHEATS may first extract the game's lists from the collection. */
+    stream.set_read_timeout(Some(Duration::from_millis(if command == "CHEATS" { 5000 } else { 700 })))?;
     stream.write_all(command.as_bytes())?;
     stream.write_all(b"\n")?;
     let mut reader = BufReader::new(stream);
@@ -2753,7 +2854,9 @@ fn emulation_command(command: &str) -> std::io::Result<String> {
         if reader.read_line(&mut line)? == 0 {
             break;
         }
-        let done = (command != "STATUS" && command != "STATES") || line.trim_end() == "end=1";
+        let done = (command != "STATUS" && command != "STATES" && command != "CHEATS")
+            || line.trim_end() == "end=1"
+            || line.starts_with("ERR");
         reply.push_str(&line);
         if done {
             break;
@@ -2793,6 +2896,272 @@ fn apply_game_snapshot(ui: &QuickMenuWindow, snapshot: &GameSnapshot) {
     ui.set_game_slot_label(
         format_arg(&tr(ui, 423, "Slot {0}"), &snapshot.slot.to_string()).into(),
     );
+    ui.set_game_cheats_value(cheats_value(ui, snapshot).into());
+    ui.set_game_net_value(net_value(ui, snapshot).into());
+    if !snapshot.running {
+        ui.set_game_sheet_open(false);
+    } else if ui.get_game_sheet_open() && ui.get_game_sheet_row() == NET_ROW {
+        /* The netplay state changed under the open sheet. */
+        let index = ui.get_game_sheet_index();
+        show_game_sheet(ui, NET_ROW, netplay_rows(ui, snapshot), index);
+    }
+}
+
+/* ---------------------------------------------------------------- */
+/* GAME → Cheats (40) and Netplay (41): nuubos-emud CHEATS, CHEAT_SET,  */
+/* CHEAT_FILE, NETPLAY_HOST, NETPLAY_STOP. Neither in hardcore mode;    */
+/* no cheats with netplay (the rows say why).                           */
+/* ---------------------------------------------------------------- */
+
+const CHEATS_ROW: i32 = 40;
+const NET_ROW: i32 = 41;
+/* Game sheet row kinds (game-sheet-kinds). */
+const SHEET_ACTION: i32 = 0;
+const SHEET_OFF: i32 = 1;
+const SHEET_ON: i32 = 2;
+const SHEET_INFO: i32 = 3;
+
+#[derive(Default)]
+struct GameSheet {
+    /* Row keys: "info", "lists", "cheat:<k>", "file:<path>", "download",
+     * "host", "stop". */
+    keys: Vec<String>,
+    /* Cheats: the list picker is open. */
+    picking: bool,
+}
+
+thread_local! {
+    static GAME_SHEET: RefCell<GameSheet> = RefCell::new(GameSheet::default());
+}
+
+fn cheats_value(ui: &QuickMenuWindow, game: &GameSnapshot) -> String {
+    if game.hardcore {
+        tr(ui, 910, "Not available in Hardcore Mode")
+    } else if game.netplay != "off" && !game.netplay.is_empty() {
+        tr(ui, 1245, "Not available during netplay")
+    } else if game.cheats_on > 0 {
+        format_arg(&tr(ui, 1244, "{0} on"), &game.cheats_on.to_string())
+    } else {
+        String::new()
+    }
+}
+
+fn net_value(ui: &QuickMenuWindow, game: &GameSnapshot) -> String {
+    match game.netplay.as_str() {
+        _ if game.hardcore => tr(ui, 910, "Not available in Hardcore Mode"),
+        "host" if game.net_peers == 0 => tr(ui, 1251, "Waiting for players…"),
+        "host" => format_arg(&tr(ui, 1249, "Hosting • {0} connected"), &game.net_peers.to_string()),
+        "client" => format_arg(&tr(ui, 1250, "Connected to {0}"), &game.net_peer),
+        "starting" => tr(ui, 1273, "Starting netplay…"),
+        _ => String::new(),
+    }
+}
+
+type SheetRow = (String, String, String, i32);
+
+fn info_row(title: String) -> SheetRow {
+    ("info".into(), title, String::new(), SHEET_INFO)
+}
+
+fn netplay_rows(ui: &QuickMenuWindow, game: &GameSnapshot) -> Vec<SheetRow> {
+    if game.hardcore {
+        return vec![info_row(tr(ui, 910, "Not available in Hardcore Mode"))];
+    }
+    match game.netplay.as_str() {
+        "host" | "starting" => vec![
+            info_row(net_value(ui, game)),
+            ("stop".into(), tr(ui, 1247, "Stop Hosting"), String::new(), SHEET_ACTION),
+        ],
+        "client" => vec![
+            info_row(net_value(ui, game)),
+            ("stop".into(), tr(ui, 1248, "Leave Game"), String::new(), SHEET_ACTION),
+        ],
+        _ => vec![
+            info_row(tr(ui, 1271, "The game restarts from this point as a host")),
+            ("host".into(), tr(ui, 1246, "Host Game"), String::new(), SHEET_ACTION),
+        ],
+    }
+}
+
+/* The running game's cheats (emud CHEATS), or the list picker. */
+fn cheat_rows(ui: &QuickMenuWindow, picking: bool) -> Vec<SheetRow> {
+    let reply = emulation_command("CHEATS").unwrap_or_default();
+    let get = |k: &str| reply.lines().find_map(|l| l.strip_prefix(k).and_then(|r| r.strip_prefix('='))).unwrap_or("");
+    match get("reason") {
+        "hardcore" => return vec![info_row(tr(ui, 910, "Not available in Hardcore Mode"))],
+        "netplay" => return vec![info_row(tr(ui, 1245, "Not available during netplay"))],
+        _ => {}
+    }
+    let file = get("file").to_owned();
+    let lists: Vec<(String, String)> = reply
+        .lines()
+        .filter_map(|l| l.strip_prefix("list="))
+        .filter_map(|v| v.split_once('\t'))
+        .map(|(p, n)| (p.to_owned(), n.to_owned()))
+        .collect();
+    if picking {
+        return lists
+            .into_iter()
+            .map(|(path, name)| {
+                let mark = if path == file { tr(ui, 222, "On") } else { String::new() };
+                (format!("file:{path}"), name, mark, SHEET_ACTION)
+            })
+            .collect();
+    }
+    if lists.is_empty() {
+        let mut rows = vec![info_row(tr(ui, 1240, "No cheats for this game"))];
+        /* Without the collection, offer it (a job; its Live Notification
+         * shows the download). */
+        let status = Command::new("/usr/bin/nuubos-libretroctl")
+            .args(["cheats", "status"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        if !status.lines().any(|l| l == "cheats=1") {
+            rows.push(("download".into(), tr(ui, 1241, "Download Cheats"), String::new(), SHEET_ACTION));
+        }
+        return rows;
+    }
+    let current = lists.iter().find(|(p, _)| *p == file).map(|(_, n)| n.clone()).unwrap_or_default();
+    let mut rows: Vec<SheetRow> = vec![(
+        "lists".into(),
+        tr(ui, 1243, "Cheat List"),
+        current,
+        if lists.len() > 1 { SHEET_ACTION } else { SHEET_INFO },
+    )];
+    let mut cheats: Vec<(i32, bool, String)> = reply
+        .lines()
+        .filter_map(|l| l.strip_prefix("cheat="))
+        .filter_map(|v| {
+            let f: Vec<&str> = v.splitn(3, '\t').collect();
+            Some((f.first()?.parse().ok()?, *f.get(1)? == "1", f.get(2).unwrap_or(&"").to_string()))
+        })
+        .collect();
+    cheats.sort_by_key(|c| c.0);
+    for (k, on, desc) in cheats {
+        let title = if desc.trim().is_empty() { format_arg(&tr(ui, 1252, "Cheat {0}"), &(k + 1).to_string()) } else { desc };
+        rows.push((format!("cheat:{k}"), title, String::new(), if on { SHEET_ON } else { SHEET_OFF }));
+    }
+    rows
+}
+
+/* Shows rows in the sheet; the focus goes to index, else to the first
+ * row that is not information. */
+fn show_game_sheet(ui: &QuickMenuWindow, row: i32, rows: Vec<SheetRow>, index: i32) {
+    let count = rows.len() as i32;
+    let focusable = |i: i32| rows.get(i as usize).map(|r| r.3 != SHEET_INFO).unwrap_or(false);
+    let index = if focusable(index) { index } else { (0..count).find(|i| focusable(*i)).unwrap_or(0) };
+    let visible = ui.get_audio_output_dropdown_visible_rows().max(1);
+    let scroll = ui.get_game_sheet_scroll().clamp((index - visible + 1).max(0), index.max(0)).min((count - visible).max(0));
+    GAME_SHEET.with(|g| g.borrow_mut().keys = rows.iter().map(|r| r.0.clone()).collect());
+    ui.set_game_sheet_row(row);
+    ui.set_game_sheet_title(if row == NET_ROW { tr(ui, 1239, "Netplay") } else { tr(ui, 1238, "Cheats") }.into());
+    ui.set_game_sheet_titles(ModelRc::new(Rc::new(VecModel::from(rows.iter().map(|r| SharedString::from(r.1.as_str())).collect::<Vec<_>>()))));
+    ui.set_game_sheet_values(ModelRc::new(Rc::new(VecModel::from(rows.iter().map(|r| SharedString::from(r.2.as_str())).collect::<Vec<_>>()))));
+    ui.set_game_sheet_kinds(ModelRc::new(Rc::new(VecModel::from(rows.iter().map(|r| r.3).collect::<Vec<_>>()))));
+    ui.set_game_sheet_index(index);
+    ui.set_game_sheet_scroll(scroll);
+    ui.set_game_sheet_open(count > 0);
+}
+
+fn open_game_sheet(ui: &QuickMenuWindow, row: i32) {
+    GAME_SHEET.with(|g| g.borrow_mut().picking = false);
+    ui.set_game_sheet_scroll(0);
+    let rows = if row == NET_ROW { netplay_rows(ui, &read_game_snapshot()) } else { cheat_rows(ui, false) };
+    show_game_sheet(ui, row, rows, -1);
+}
+
+fn move_game_sheet(ui: &QuickMenuWindow, delta: i32) {
+    let kinds: Vec<i32> = ui.get_game_sheet_kinds().iter().collect();
+    let count = kinds.len() as i32;
+    if count == 0 {
+        return;
+    }
+    let mut next = ui.get_game_sheet_index();
+    for _ in 0..count {
+        next = (next + delta).rem_euclid(count);
+        if kinds[next as usize] != SHEET_INFO {
+            break;
+        }
+    }
+    if kinds[next as usize] == SHEET_INFO {
+        return;
+    }
+    ui.set_game_sheet_index(next);
+    let visible = ui.get_audio_output_dropdown_visible_rows().max(1);
+    let mut scroll = ui.get_game_sheet_scroll();
+    if next < scroll {
+        scroll = next;
+    } else if next >= scroll + visible {
+        scroll = next - visible + 1;
+    }
+    ui.set_game_sheet_scroll(scroll.clamp(0, (count - visible).max(0)));
+}
+
+/* Confirm in the sheet; true when the menu must close (Host Game: the
+ * game restarts). */
+fn confirm_game_sheet(ui: &QuickMenuWindow) -> bool {
+    let index = ui.get_game_sheet_index();
+    let key = GAME_SHEET.with(|g| g.borrow().keys.get(index.max(0) as usize).cloned().unwrap_or_default());
+    let kinds: Vec<i32> = ui.get_game_sheet_kinds().iter().collect();
+    match key.as_str() {
+        "host" => {
+            game_action("NETPLAY_HOST");
+            ui.set_game_sheet_open(false);
+            return true;
+        }
+        "stop" => {
+            game_action("NETPLAY_STOP");
+            ui.set_game_sheet_open(false);
+        }
+        "download" => {
+            let ok = Command::new("/usr/bin/nuubos-jobctl")
+                .args(["submit", "cheats-update"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            append_action_log(&format!("cheats-update submitted={ok}"));
+            ui.set_game_sheet_open(false);
+        }
+        "lists" => {
+            GAME_SHEET.with(|g| g.borrow_mut().picking = true);
+            ui.set_game_sheet_scroll(0);
+            show_game_sheet(ui, CHEATS_ROW, cheat_rows(ui, true), -1);
+        }
+        k if k.starts_with("file:") => {
+            if let Err(error) = emulation_command(&format!("CHEAT_FILE\t{}", &k[5..])) {
+                eprintln!("quick-menu: cheat list failed={error}");
+            }
+            GAME_SHEET.with(|g| g.borrow_mut().picking = false);
+            ui.set_game_sheet_scroll(0);
+            show_game_sheet(ui, CHEATS_ROW, cheat_rows(ui, false), -1);
+        }
+        k if k.starts_with("cheat:") => {
+            let on = kinds.get(index as usize) == Some(&SHEET_ON);
+            if let Err(error) = emulation_command(&format!("CHEAT_SET\t{}\t{}", &k[6..], if on { 0 } else { 1 })) {
+                eprintln!("quick-menu: cheat failed={error}");
+            }
+            show_game_sheet(ui, CHEATS_ROW, cheat_rows(ui, false), index);
+            apply_game_snapshot(ui, &read_game_snapshot());
+        }
+        _ => {}
+    }
+    false
+}
+
+fn back_game_sheet(ui: &QuickMenuWindow) {
+    let picking = GAME_SHEET.with(|g| std::mem::take(&mut g.borrow_mut().picking));
+    if picking && ui.get_game_sheet_row() == CHEATS_ROW {
+        ui.set_game_sheet_scroll(0);
+        show_game_sheet(ui, CHEATS_ROW, cheat_rows(ui, false), 0);
+    } else {
+        ui.set_game_sheet_open(false);
+    }
 }
 
 fn start_game_subscription(tx: Sender<AppEvent>) {
@@ -2837,17 +3206,30 @@ fn stream_command(command: &str, timeout: Duration) -> std::io::Result<String> {
     Ok(reply)
 }
 
-/* (a stream or Steam Link session runs, it is Steam Link) */
-fn stream_state_from(reply: &str) -> (bool, bool) {
-    let running = reply.lines().any(|line| matches!(line, "state=streaming" | "state=starting"));
-    (running, running && reply.lines().any(|line| line == "stream_client=steamlink"))
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct StreamState {
+    /* a stream or Steam Link session runs */
+    running: bool,
+    steamlink: bool,
+    /* the user's performance overlay (Moonlight; Steam Link: Valve's
+     * statistics, for the session) */
+    overlay: bool,
 }
 
-fn read_stream_state() -> (bool, bool) {
-    let Ok(mut stream) = UnixStream::connect(STREAM_SOCKET) else { return (false, false) };
+fn stream_state_from(reply: &str) -> StreamState {
+    let running = reply.lines().any(|line| matches!(line, "state=streaming" | "state=starting"));
+    StreamState {
+        running,
+        steamlink: running && reply.lines().any(|line| line == "stream_client=steamlink"),
+        overlay: reply.lines().any(|line| line == "overlay=1"),
+    }
+}
+
+fn read_stream_state() -> StreamState {
+    let Ok(mut stream) = UnixStream::connect(STREAM_SOCKET) else { return StreamState::default() };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
     if stream.write_all(b"STATUS\n").is_err() {
-        return (false, false);
+        return StreamState::default();
     }
     let mut reply = String::new();
     for line in BufReader::new(stream).lines() {
@@ -2861,13 +3243,21 @@ fn read_stream_state() -> (bool, bool) {
     stream_state_from(&reply)
 }
 
-fn apply_stream_running(ui: &QuickMenuWindow, running: bool, steamlink: bool) {
-    if (!running || steamlink) && (if running { 17 } else { 15 }..TASK_ROW).contains(&ui.get_selected_index()) {
+fn apply_stream_running(ui: &QuickMenuWindow, stream: StreamState) {
+    let (running, steamlink) = (stream.running, stream.steamlink);
+    let index = ui.get_selected_index();
+    let hidden = if running {
+        steamlink && (17..TASK_ROW).contains(&index)
+    } else {
+        (15..TASK_ROW).contains(&index) || (36..=38).contains(&index)
+    };
+    if hidden {
         ui.set_selected_index(if running { 15 } else { 3 });
         ui.set_game_confirm_index(-1);
     }
     ui.set_stream_steamlink(steamlink);
     ui.set_stream_section_visible(running);
+    ui.set_stream_overlay_on(stream.overlay);
 }
 
 /* One sample of the stream statistics when the menu opens (they only
@@ -2918,9 +3308,9 @@ fn start_stream_subscription(tx: Sender<AppEvent>) {
                         Ok(_) => {
                             block.push_str(&line);
                             if line.trim_end() == "end=1" {
-                                let (running, steamlink) = stream_state_from(&block);
+                                let state = stream_state_from(&block);
                                 block.clear();
-                                if tx.send(AppEvent::Stream(running, steamlink)).is_err() {
+                                if tx.send(AppEvent::Stream(state)).is_err() {
                                     return;
                                 }
                             }
@@ -2934,6 +3324,197 @@ fn start_stream_subscription(tx: Sender<AppEvent>) {
     });
 }
 
+
+/* Statistics samples for the performance overlay: streamd pushes one a
+ * second only while a stream runs with the overlay on. */
+fn start_stream_stats_subscription(tx: Sender<AppEvent>) {
+    thread::spawn(move || loop {
+        if let Ok(mut stream) = UnixStream::connect(STREAM_SOCKET) {
+            if stream.write_all(b"SUBSCRIBE_STATS\n").is_ok() {
+                for line in BufReader::new(stream).lines() {
+                    let Ok(line) = line else { break };
+                    if let Some(fields) = line.strip_prefix("stats ") {
+                        if tx.send(AppEvent::StreamStats(fields.to_owned())).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        /* Only reached while streamd is absent or restarting. */
+        thread::sleep(Duration::from_secs(1));
+    });
+}
+
+/* Cumulative counters of one moonlight @stats sample. */
+#[derive(Clone, Copy, Default)]
+struct StreamSample {
+    rtt: i64,
+    rtt_var: i64,
+    width: i64,
+    height: i64,
+    decoded: i64,
+    decode_us: i64,
+    bytes: i64,
+    host_latency: i64,
+    host_frames: i64,
+    lost: i64,
+}
+
+impl StreamSample {
+    fn parse(fields: &str) -> Self {
+        let value = |key: &str| -> i64 {
+            fields
+                .split(' ')
+                .find_map(|kv| kv.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(-1)
+        };
+        StreamSample {
+            rtt: value("rtt"),
+            rtt_var: value("rtt_var"),
+            width: value("width"),
+            height: value("height"),
+            decoded: value("decoded"),
+            decode_us: value("decode_us"),
+            bytes: value("bytes"),
+            host_latency: value("host_latency"),
+            host_frames: value("host_frames"),
+            lost: value("lost"),
+        }
+    }
+}
+
+/*
+ * Performance overlay over a Moonlight stream: its own passive surface
+ * (StreamHudWindow), like the notification. Rates and averages are taken
+ * over the second between two samples: clock and battery, video size,
+ * received frame rate and bitrate | network round trip, decode time, host
+ * processing time, frames lost on the network.
+ */
+struct StreamHud {
+    card: StreamHudWindow,
+    state: WaylandState,
+    queue: EventQueue<WaylandState>,
+    qh: QueueHandle<WaylandState>,
+    mapped: bool,
+    last: Option<(Instant, StreamSample)>,
+}
+
+impl StreamHud {
+    fn sample(&mut self, ui: &QuickMenuWindow, fields: &str) {
+        let now = Instant::now();
+        let cur = StreamSample::parse(fields);
+        /* A new stream starts its counters again. */
+        let prev = self.last.filter(|(_, p)| p.decoded >= 0 && p.decoded <= cur.decoded).map(|(t, p)| (now.duration_since(t).as_secs_f64(), p));
+        self.last = Some((now, cur));
+
+        let mut one: Vec<String> = Vec::new();
+        let clock = ui.get_clock_label().to_string();
+        if !clock.is_empty() {
+            one.push(clock);
+        }
+        if ui.get_battery_percent() >= 0 {
+            one.push(format!("BAT {}%", ui.get_battery_percent()));
+        }
+        if cur.width > 0 && cur.height > 0 {
+            one.push(format!("{}×{}", cur.width, cur.height));
+        }
+        let mut two: Vec<String> = Vec::new();
+        if cur.rtt >= 0 {
+            two.push(if cur.rtt_var > 0 {
+                format!("{} {} ms ±{}", tr(ui, 1190, "Net"), cur.rtt, cur.rtt_var)
+            } else {
+                format!("{} {} ms", tr(ui, 1190, "Net"), cur.rtt)
+            });
+        }
+        /* Over the last second; the first sample of a stream uses the
+         * totals so far. */
+        let (frames, decode_us, host, host_frames, lost) = match prev {
+            Some((_, p)) => (
+                cur.decoded - p.decoded,
+                cur.decode_us - p.decode_us,
+                cur.host_latency - p.host_latency,
+                cur.host_frames - p.host_frames,
+                cur.lost - p.lost,
+            ),
+            None => (cur.decoded, cur.decode_us, cur.host_latency, cur.host_frames, cur.lost),
+        };
+        if let Some((seconds, p)) = prev.filter(|(seconds, _)| *seconds > 0.2) {
+            one.push(format_arg(&tr(ui, 460, "{0} fps"), &format!("{:.0}", frames as f64 / seconds)));
+            if cur.bytes >= 0 && p.bytes >= 0 {
+                let mbps = (cur.bytes - p.bytes) as f64 * 8.0 / seconds / 1_000_000.0;
+                one.push(format_arg(&tr(ui, 461, "{0} Mbps"), &format!("{mbps:.1}")));
+            }
+        }
+        if frames > 0 && decode_us >= 0 {
+            two.push(format!("{} {:.1} ms", tr(ui, 1191, "Decode"), decode_us as f64 / frames as f64 / 1000.0));
+        }
+        if host_frames > 0 && host >= 0 {
+            two.push(format!("{} {:.1} ms", tr(ui, 1192, "Host"), host as f64 / host_frames as f64 / 10.0));
+        }
+        if lost >= 0 && frames + lost > 0 {
+            two.push(format!("{} {:.1}%", tr(ui, 1193, "Lost"), lost as f64 * 100.0 / (frames + lost) as f64));
+        }
+        self.card.set_line_one(one.join("   ").into());
+        self.card.set_line_two(two.join("   ").into());
+    }
+
+    fn redraw(&mut self, conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+        self.state.render_and_commit(self.card.window(), &self.qh, conn)?;
+        self.queue.roundtrip(&mut self.state)?;
+        if self.state.needs_rescale() {
+            self.state.render_and_commit(self.card.window(), &self.qh, conn)?;
+            self.queue.roundtrip(&mut self.state)?;
+        }
+        Ok(())
+    }
+
+    fn unmap(&mut self, conn: &Connection) {
+        if self.state.commit_unmap() {
+            let _ = conn.flush();
+            let _ = self.queue.roundtrip(&mut self.state);
+        }
+        self.state.destroy_overlay();
+        let _ = self.card.hide();
+        self.mapped = false;
+        eprintln!("quick-menu: unmapped stream overlay surface");
+    }
+
+    /* Shown over a running Moonlight stream with the overlay on, never
+     * over the menu or the lifecycle curtain; redrawn when `changed`. */
+    fn sync(&mut self, conn: &Connection, want: bool, changed: bool) {
+        let want = want && !self.card.get_line_one().is_empty();
+        if !want {
+            if self.mapped {
+                self.unmap(conn);
+            }
+            return;
+        }
+        let result = if !self.mapped {
+            (|| -> Result<(), Box<dyn std::error::Error>> {
+                self.state.create_overlay(&self.qh, SurfaceKind::StreamHud)?;
+                conn.flush()?;
+                let _ = wait_for_configure(&mut self.queue, &mut self.state)?;
+                self.card.show()?;
+                self.redraw(conn)?;
+                eprintln!("quick-menu: mapped stream overlay surface capture=0");
+                Ok(())
+            })()
+        } else if changed {
+            self.redraw(conn)
+        } else {
+            Ok(())
+        };
+        match result {
+            Ok(()) => self.mapped = true,
+            Err(error) => {
+                eprintln!("quick-menu: stream overlay failed={error}");
+                self.unmap(conn);
+            }
+        }
+    }
+}
 
 /* Web Mode (EPIC-030). The page stays live under the menu. */
 fn web_command(command: &str) {
@@ -2989,6 +3570,352 @@ fn apply_web_state(ui: &QuickMenuWindow, running: bool, zoom: i32) {
     }
     ui.set_web_section_visible(running);
     ui.set_web_zoom_label(format!("{zoom}%").into());
+}
+
+/* MUSIC (user request 2026-10-12): the Media app's music, with its own
+ * controls and, over a game, the mixer (Music volume in nuubos-mediad,
+ * Game volume = Applications in nuubos-audiod). */
+fn media_command(command: String) {
+    thread::spawn(move || {
+        let Ok(mut stream) = UnixStream::connect(MEDIA_SOCKET) else { return };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
+        let _ = stream.write_all(command.as_bytes());
+        let _ = stream.write_all(b"\n");
+        let mut reply = String::new();
+        let _ = BufReader::new(stream).read_line(&mut reply);
+    });
+}
+
+fn media_state_from(block: &str) -> MediaState {
+    let get = |k: &str| block.lines().find_map(|l| l.strip_prefix(k).and_then(|r| r.strip_prefix('='))).unwrap_or("");
+    let state = get("state");
+    MediaState {
+        music: (state == "playing" || state == "paused") && get("kind") == "audio",
+        playing: state == "playing",
+        title: get("title").to_owned(),
+        artist: get("artist").to_owned(),
+        volume: get("volume").parse().unwrap_or(80),
+    }
+}
+
+fn start_media_subscription(tx: Sender<AppEvent>) {
+    thread::spawn(move || loop {
+        if let Ok(mut stream) = UnixStream::connect(MEDIA_SOCKET) {
+            if stream.write_all(b"SUBSCRIBE\n").is_ok() {
+                let mut reader = BufReader::new(stream);
+                let mut block = String::new();
+                let mut line = String::new();
+                let mut last = MediaState::default();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            block.push_str(&line);
+                            if line.trim_end() == "end=1" {
+                                let state = media_state_from(&block);
+                                block.clear();
+                                /* Position updates publish too: forward
+                                 * only what the menu shows. */
+                                if state != last {
+                                    last = state.clone();
+                                    if tx.send(AppEvent::Media(state)).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let _ = tx.send(AppEvent::Media(MediaState::default()));
+        /* Only reached while mediad is absent or restarting. */
+        thread::sleep(Duration::from_secs(1));
+    });
+}
+
+fn apply_media_state(ui: &QuickMenuWindow, state: &MediaState) {
+    if !state.music && (31..=35).contains(&ui.get_selected_index()) {
+        ui.set_selected_index(first_selectable_index_without_music(ui));
+    }
+    ui.set_music_section_visible(state.music);
+    ui.set_music_playing(state.playing);
+    ui.set_music_title(if state.artist.is_empty() { state.title.clone() } else { format!("{} • {}", state.title, state.artist) }.into());
+    ui.set_music_volume(state.volume.clamp(0, 100));
+}
+
+/* Cast Screen (EPIC-029): nuubos-castd owns discovery and the session; the
+ * menu shows its snapshot (SUBSCRIBE, no polling) and sends START/STOP.
+ * Over a game or a PC stream only low-delay receivers are offered (product
+ * decision: games get mirroring only where the latency is acceptable). */
+#[derive(Debug, Clone, Default, PartialEq)]
+struct CastReceiver {
+    id: String,
+    name: String,
+    protocol: String,
+    low_delay: bool,
+    ready: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct CastState {
+    available: bool,
+    state: String,
+    receiver_name: String,
+    waiting_tv: bool,
+    discovering: bool,
+    receivers: Vec<CastReceiver>,
+}
+
+#[derive(Clone, PartialEq)]
+enum CastEntry {
+    Stop,
+    Receiver(String),
+    Placeholder,
+}
+
+thread_local! {
+    static CAST: RefCell<(CastState, Vec<CastEntry>)> = RefCell::new((CastState::default(), Vec::new()));
+}
+
+fn cast_state_from(block: &str) -> CastState {
+    let mut s = CastState { available: true, ..CastState::default() };
+    let mut user = false;
+    for line in block.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k {
+            "state" => s.state = v.to_owned(),
+            "receiver_name" => s.receiver_name = v.to_owned(),
+            "waiting_tv" => s.waiting_tv = v == "1",
+            "discovering" => s.discovering = v == "1",
+            "user" => user = v == "1",
+            "rx" => {
+                let f: Vec<&str> = v.split('\t').collect();
+                if f.len() >= 6 {
+                    s.receivers.push(CastReceiver {
+                        id: f[0].to_owned(),
+                        name: f[1].to_owned(),
+                        protocol: f[2].to_owned(),
+                        low_delay: f[3] == "low",
+                        ready: f[5] == "1",
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    s.available = user;
+    s
+}
+
+fn cast_command(command: String) {
+    thread::spawn(move || {
+        let reply = cast_request(&command);
+        if !reply.starts_with("OK") {
+            eprintln!("quick-menu: cast {} -> {}", command.replace('\t', " "), reply.trim());
+        }
+    });
+}
+
+fn start_cast_subscription(tx: Sender<AppEvent>) {
+    thread::spawn(move || loop {
+        if let Ok(mut stream) = UnixStream::connect(CAST_SOCKET) {
+            if stream.write_all(b"SUBSCRIBE\n").is_ok() {
+                let mut reader = BufReader::new(stream);
+                let mut block = String::new();
+                let mut line = String::new();
+                let mut last = CastState::default();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            block.push_str(&line);
+                            if line.trim_end() == "end=1" {
+                                let state = cast_state_from(&block);
+                                block.clear();
+                                if state != last {
+                                    last = state.clone();
+                                    if tx.send(AppEvent::Cast(state)).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let _ = tx.send(AppEvent::Cast(CastState::default()));
+        /* Only reached while castd is absent or restarting. */
+        thread::sleep(Duration::from_secs(2));
+    });
+}
+
+fn cast_protocol_label(ui: &QuickMenuWindow, protocol: &str) -> String {
+    match protocol {
+        "cast" => tr(ui, 1198, "Google Cast"),
+        "mice" => tr(ui, 1199, "Miracast"),
+        _ => tr(ui, 1200, "DLNA • with delay"),
+    }
+}
+
+fn cast_options(ui: &QuickMenuWindow, state: &CastState) -> Vec<(CastEntry, String)> {
+    let playing = ui.get_game_section_visible() || ui.get_stream_section_visible();
+    let mut options = Vec::new();
+    if state.state != "idle" && !state.state.is_empty() {
+        options.push((CastEntry::Stop, tr(ui, 1195, "Stop Casting")));
+    }
+    for rx in &state.receivers {
+        /* Miracast without Cisco's encoder: Settings offers the download. */
+        if !rx.ready || (playing && !rx.low_delay) {
+            continue;
+        }
+        options.push((CastEntry::Receiver(rx.id.clone()), format!("{} • {}", rx.name, cast_protocol_label(ui, &rx.protocol))));
+    }
+    if options.iter().all(|(e, _)| *e == CastEntry::Stop) {
+        let text = if state.discovering {
+            tr(ui, 1196, "Searching for TVs and receivers…")
+        } else {
+            tr(ui, 1197, "No receivers found")
+        };
+        options.push((CastEntry::Placeholder, text));
+    }
+    options
+}
+
+fn show_cast_options(ui: &QuickMenuWindow) {
+    let options = CAST.with(|c| cast_options(ui, &c.borrow().0));
+    let labels: Vec<SharedString> = options.iter().map(|(_, l)| l.as_str().into()).collect();
+    let count = labels.len() as i32;
+    let index = ui.get_cast_dropdown_index().clamp(0, (count - 1).max(0));
+    ui.set_cast_options(ModelRc::new(Rc::new(VecModel::from(labels))));
+    ui.set_cast_dropdown_index(index);
+    let visible = ui.get_audio_output_dropdown_visible_rows().max(1);
+    ui.set_cast_dropdown_scroll(ui.get_cast_dropdown_scroll().clamp((index - visible + 1).max(0), index.min((count - visible).max(0))));
+    CAST.with(|c| c.borrow_mut().1 = options.into_iter().map(|(e, _)| e).collect());
+}
+
+fn apply_cast_state(ui: &QuickMenuWindow, state: CastState) {
+    let label = match state.state.as_str() {
+        "connecting" if state.waiting_tv => tr(ui, 1201, "Allow the cast on the TV"),
+        "connecting" => format_arg(&tr(ui, 254, "Connecting to {0}…"), &state.receiver_name),
+        "casting" | "stopping" => state.receiver_name.clone(),
+        _ => tr(ui, 54, "Off"),
+    };
+    if !state.available && ui.get_selected_index() == CAST_ROW {
+        ui.set_selected_index(3);
+    }
+    ui.set_cast_row_visible(state.available);
+    ui.set_cast_active(state.state == "casting");
+    ui.set_cast_label(label.into());
+    if !state.available {
+        ui.set_cast_dropdown_open(false);
+    }
+    CAST.with(|c| c.borrow_mut().0 = state);
+    if ui.get_cast_dropdown_open() {
+        show_cast_options(ui);
+    }
+}
+
+/* Opening the list looks for receivers again: TVs come and go. */
+fn open_cast_dropdown(ui: &QuickMenuWindow) {
+    cast_command("DISCOVER".into());
+    ui.set_cast_dropdown_index(0);
+    ui.set_cast_dropdown_scroll(0);
+    show_cast_options(ui);
+    ui.set_cast_dropdown_open(true);
+}
+
+fn move_cast_dropdown(ui: &QuickMenuWindow, delta: i32) {
+    let count = ui.get_cast_options().row_count() as i32;
+    if count <= 0 {
+        return;
+    }
+    let next = (ui.get_cast_dropdown_index() + delta).rem_euclid(count);
+    ui.set_cast_dropdown_index(next);
+    let visible = ui.get_audio_output_dropdown_visible_rows().max(1);
+    let mut scroll = ui.get_cast_dropdown_scroll();
+    if next < scroll {
+        scroll = next;
+    } else if next >= scroll + visible {
+        scroll = next - visible + 1;
+    }
+    ui.set_cast_dropdown_scroll(scroll.clamp(0, (count - visible).max(0)));
+}
+
+fn confirm_cast_dropdown(ui: &QuickMenuWindow) {
+    let index = ui.get_cast_dropdown_index().max(0) as usize;
+    let entry = CAST.with(|c| c.borrow().1.get(index).cloned());
+    match entry {
+        Some(CastEntry::Stop) => cast_command("STOP".into()),
+        /* A cast already running is replaced. */
+        Some(CastEntry::Receiver(id)) => {
+            let busy = CAST.with(|c| {
+                let s = &c.borrow().0;
+                !s.state.is_empty() && s.state != "idle"
+            });
+            thread::spawn(move || {
+                if busy {
+                    let _ = cast_request("STOP");
+                    for _ in 0..50 {
+                        if cast_request("STATUS").lines().any(|l| l == "state=idle") {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                let reply = cast_request(&format!("START\t{id}"));
+                if !reply.starts_with("OK") {
+                    eprintln!("quick-menu: cast start -> {}", reply.trim());
+                }
+            });
+        }
+        _ => return,
+    }
+    /* The menu stays open: the row shows the connection, then the TV. */
+    ui.set_cast_dropdown_open(false);
+}
+
+fn cast_request(command: &str) -> String {
+    let Ok(mut stream) = UnixStream::connect(CAST_SOCKET) else { return String::new() };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+    let _ = stream.write_all(command.as_bytes());
+    let _ = stream.write_all(b"\n");
+    let mut reply = String::new();
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                reply.push_str(&line);
+                if command != "STATUS" || line.trim_end() == "end=1" {
+                    break;
+                }
+            }
+        }
+    }
+    reply
+}
+
+fn adjust_game_volume(ui: &QuickMenuWindow, delta: i32) {
+    let v = (ui.get_game_volume() + delta).clamp(0, 100);
+    ui.set_game_volume(v);
+    thread::spawn(move || {
+        if let Err(error) = audio_command(&format!("APPLICATIONS VOLUME SET {v}")) {
+            eprintln!("quick-menu: game volume failed={error}");
+        }
+    });
+}
+
+fn wake_screen() {
+    if fs::metadata(SCREEN_OFF_FILE).is_ok() {
+        thread::spawn(|| {
+            let _ = Command::new(DISPLAYCTL).args(["screen", "on"]).status();
+        });
+    }
 }
 
 fn start_web_subscription(tx: Sender<AppEvent>) {
@@ -3310,13 +4237,20 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
         if ui.get_players_visible() {
             indices.push(PLAYERS_ROW);
         }
-        indices.extend_from_slice(&[12, 13, 18, 28, 14]);
+        indices.extend_from_slice(&[12, CHEATS_ROW, NET_ROW, 13, 18, 28, 14]);
     }
     if ui.get_stream_section_visible() {
-        indices.extend_from_slice(if ui.get_stream_steamlink() { &[15, 16] } else { &[15, 16, 17] });
+        indices.extend_from_slice(if ui.get_stream_steamlink() { &[15, 36, 37, 38, 16] } else { &[15, 36, 37, 38, 16, 17] });
     }
     if ui.get_web_section_visible() {
         indices.extend_from_slice(&[20, 27, 21, 22, 23, 24, 25, 26]);
+    }
+    if ui.get_music_section_visible() {
+        indices.extend_from_slice(&[31, 32, 33]);
+        if ui.get_game_section_visible() {
+            indices.push(34);
+        }
+        indices.push(35);
     }
     if ui.get_context_section_visible() {
         indices.push(TASK_ROW);
@@ -3324,6 +4258,9 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
     indices.push(3);
     if ui.get_brightness_visible() {
         indices.push(5);
+    }
+    if ui.get_cast_row_visible() {
+        indices.push(CAST_ROW);
     }
     if ui.get_home_music_playing() {
         indices.push(7);
@@ -3338,6 +4275,20 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
 fn first_selectable_index(ui: &QuickMenuWindow) -> i32 {
     /* Resume is the safest default over a game; otherwise the single Audio
      * control, the first Display/Audio row. */
+    if ui.get_game_section_visible() {
+        8
+    } else if ui.get_stream_section_visible() {
+        15
+    } else if ui.get_web_section_visible() {
+        20
+    } else if ui.get_music_section_visible() {
+        31
+    } else {
+        3
+    }
+}
+
+fn first_selectable_index_without_music(ui: &QuickMenuWindow) -> i32 {
     if ui.get_game_section_visible() {
         8
     } else if ui.get_stream_section_visible() {
@@ -3746,8 +4697,9 @@ fn map_overlay(
     if game.running {
         game_action("PAUSE");
     }
-    let (streaming, steamlink) = read_stream_state();
-    apply_stream_running(ui, streaming, steamlink);
+    let stream = read_stream_state();
+    let (streaming, steamlink) = (stream.running, stream.steamlink);
+    apply_stream_running(ui, stream);
     if streaming && !steamlink {
         refresh_stream_stats(ui);
     }
@@ -4033,6 +4985,8 @@ fn unmap_overlay(
     let _ = ui.hide();
     ui.set_game_slot_dropdown_open(false);
     ui.set_players_dropdown_open(false);
+    ui.set_cast_dropdown_open(false);
+    ui.set_game_sheet_open(false);
     ui.set_power_osd_open(false);
     ui.set_power_osd_confirm(false);
     set_menu_capture(false);
@@ -4139,6 +5093,8 @@ fn open_power_osd(
     ui.set_power_osd_open(true);
     ui.set_game_slot_dropdown_open(false);
     ui.set_audio_output_dropdown_open(false);
+    ui.set_cast_dropdown_open(false);
+    ui.set_game_sheet_open(false);
     ui.set_game_confirm_index(-1);
     if *mapped {
         ui.set_menu_panel_visible(false);
@@ -4192,8 +5148,11 @@ fn handle_power_osd(
     redraw_overlay(ui, queue, state, qh, conn)
 }
 
-/* STREAM rows: 15 Resume, 16 Quit Stream (the application keeps running
- * on the PC), 17 Quit and Close Application (second press). */
+/* STREAM rows: 15 Resume, 36 PC Home Button, 37 Steam Quick Access (the
+ * menu closes, then the PC sees the buttons), 38 Performance Overlay (the
+ * user's switch; the menu stays open), 16 Quit Stream (the application
+ * keeps running on the PC), 17 Quit and Close Application (second
+ * press). */
 fn activate_stream_row(
     ui: &QuickMenuWindow,
     mapped: &mut bool,
@@ -4208,17 +5167,30 @@ fn activate_stream_row(
         ui.set_game_confirm_index(index);
         return redraw_overlay(ui, queue, state, qh, conn);
     }
+    if index == 38 {
+        let value = if ui.get_stream_overlay_on() { "0" } else { "1" };
+        match stream_command(&format!("SET\toverlay\t{value}"), Duration::from_millis(700)) {
+            Ok(reply) if reply.starts_with("OK") => ui.set_stream_overlay_on(value == "1"),
+            Ok(reply) => eprintln!("quick-menu: stream overlay {value} refused={}", reply.trim()),
+            Err(error) => eprintln!("quick-menu: stream overlay {value} failed={error}"),
+        }
+        return redraw_overlay(ui, queue, state, qh, conn);
+    }
     let command = match index {
         15 => None,
         16 => Some("QUIT"),
         17 => Some("QUIT\tclose"),
+        36 => Some("BUTTON\thome"),
+        37 => Some("BUTTON\tquick-access"),
         _ => return Ok(()),
     };
     if let Some(command) = command {
         if let Err(error) = stream_command(command, Duration::from_millis(700)) {
             eprintln!("quick-menu: stream {command} failed={error}");
         }
-        ui.set_stream_section_visible(false);
+        if index == 16 || index == 17 {
+            ui.set_stream_section_visible(false);
+        }
     }
     flush_brightness(ui, brightness_dirty)?;
     unmap_overlay(ui, queue, state, conn);
@@ -4226,8 +5198,8 @@ fn activate_stream_row(
     Ok(())
 }
 
-/* GAME rows (8 Resume .. 13 RetroArch Advanced, 18 Screenshot,
- * 28 Performance Overlay, 14 Quit).
+/* GAME rows (8 Resume .. 12 Restart, 40 Cheats, 41 Netplay, 13 RetroArch
+ * Advanced, 18 Screenshot, 28 Performance Overlay, 14 Quit).
  * The screenshot is RetroArch's own rendering, so the menu is not in it.
  * Load State, Restart Game and Quit Game
  * lose unsaved progress and take a second press (EPIC-005 safety rules). */
@@ -4259,6 +5231,10 @@ fn activate_game_row(
             return redraw_overlay(ui, queue, state, qh, conn);
         }
         12 => game_action("RESET"),
+        CHEATS_ROW | NET_ROW => {
+            open_game_sheet(ui, index);
+            return redraw_overlay(ui, queue, state, qh, conn);
+        }
         13 => {
             /* RetroArch's own menu takes over; it pauses the game. */
             game_action("ADVANCED");
@@ -4380,6 +5356,14 @@ fn handle_event(
         }
     }
 
+    /* Media Screen Off, like Sleep (user request 2026-10-13): Power turns
+     * the screen back on and does nothing else; the menu does not open. */
+    if fs::metadata(SCREEN_OFF_FILE).is_ok() {
+        if event.action == "power" {
+            wake_screen();
+        }
+        return Ok(());
+    }
     if event.action == "power" {
         if ui.get_lifecycle_active() {
             return Ok(());
@@ -4411,12 +5395,45 @@ fn handle_event(
         return Ok(());
     }
 
+    if *mapped && ui.get_game_sheet_open() {
+        let mut close = false;
+        match event.action.as_str() {
+            "menu_up" => move_game_sheet(ui, -1),
+            "menu_down" => move_game_sheet(ui, 1),
+            "menu_confirm" => close = confirm_game_sheet(ui),
+            "menu_back" => back_game_sheet(ui),
+            _ => {}
+        }
+        if close {
+            /* Host Game: the game closes and starts again as a host. */
+            ui.set_game_section_visible(false);
+            flush_brightness(ui, brightness_dirty)?;
+            unmap_overlay(ui, queue, state, conn);
+            *mapped = false;
+            return Ok(());
+        }
+        redraw_overlay(ui, queue, state, qh, conn)?;
+        return Ok(());
+    }
+
     if *mapped && ui.get_players_dropdown_open() {
         match event.action.as_str() {
             "menu_up" => move_players_dropdown(ui, -1),
             "menu_down" => move_players_dropdown(ui, 1),
             "menu_confirm" => confirm_players_dropdown(ui),
             "menu_back" => back_players_dropdown(ui),
+            _ => {}
+        }
+        redraw_overlay(ui, queue, state, qh, conn)?;
+        return Ok(());
+    }
+
+    if *mapped && ui.get_cast_dropdown_open() {
+        match event.action.as_str() {
+            "menu_up" => move_cast_dropdown(ui, -1),
+            "menu_down" => move_cast_dropdown(ui, 1),
+            "menu_confirm" => confirm_cast_dropdown(ui),
+            "menu_back" => ui.set_cast_dropdown_open(false),
             _ => {}
         }
         redraw_overlay(ui, queue, state, qh, conn)?;
@@ -4451,6 +5468,15 @@ fn handle_event(
             unmap_overlay(ui, queue, state, conn);
             *mapped = false;
         }
+        /* Before the section arms: GAME/STREAM/WEB take every index >= 8/15/20. */
+        "menu_confirm" if *mapped
+            && !ui.get_lifecycle_active()
+            && ui.get_cast_row_visible()
+            && ui.get_selected_index() == CAST_ROW =>
+        {
+            open_cast_dropdown(ui);
+            redraw_overlay(ui, queue, state, qh, conn)?;
+        }
         "menu_confirm" if *mapped
             && !ui.get_lifecycle_active()
             && ui.get_context_section_visible()
@@ -4462,6 +5488,32 @@ fn handle_event(
                 ui.set_game_confirm_index(-1);
                 stop_task(&mut notifier.toasts);
                 apply_task_section(ui, &notifier.toasts);
+            }
+            redraw_overlay(ui, queue, state, qh, conn)?;
+        }
+        "menu_confirm" | "menu_left" | "menu_right" if *mapped
+            && !ui.get_lifecycle_active()
+            && ui.get_music_section_visible()
+            && (31..=35).contains(&ui.get_selected_index()) =>
+        {
+            let left = event.action == "menu_left";
+            let right = event.action == "menu_right";
+            match ui.get_selected_index() {
+                31 if left => media_command("PREV".into()),
+                31 if right => media_command("NEXT".into()),
+                31 => {
+                    ui.set_music_playing(!ui.get_music_playing());
+                    media_command("PAUSE".into());
+                }
+                32 if !left && !right => media_command("NEXT".into()),
+                33 if left || right => {
+                    let v = (ui.get_music_volume() + if left { -5 } else { 5 }).clamp(0, 100);
+                    ui.set_music_volume(v);
+                    media_command(format!("VOLUME\t{v}"));
+                }
+                34 if left || right => adjust_game_volume(ui, if left { -5 } else { 5 }),
+                35 if !left && !right => media_command("STOP".into()),
+                _ => {}
             }
             redraw_overlay(ui, queue, state, qh, conn)?;
         }
@@ -4629,6 +5681,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let render_window = UiWindow::new(egl.as_ref());
     let card_render_window = UiWindow::new(egl.as_ref());
+    let hud_render_window = UiWindow::new(egl.as_ref());
     eprintln!(
         "quick-menu: renderer={}",
         if matches!(render_window, UiWindow::Gpu(_)) { "gpu" } else { "software" }
@@ -4638,12 +5691,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         windows: RefCell::new(VecDeque::from([
             render_window.adapter(),
             card_render_window.adapter(),
+            hud_render_window.adapter(),
         ])),
         started: Instant::now(),
     }))?;
 
     let ui = QuickMenuWindow::new()?;
     let card = NotificationWindow::new()?;
+    let hud_card = StreamHudWindow::new()?;
     refresh_theme(&ui);
 
     let mut queue = conn.new_event_queue::<WaylandState>();
@@ -4663,7 +5718,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     conn.display().get_registry(&notify_qh, ());
     notify_queue.roundtrip(&mut notify_state)?;
 
-    if !state.globals_ready() || !notify_state.globals_ready() {
+    /* The stream overlay likewise. */
+    let mut hud_queue = conn.new_event_queue::<WaylandState>();
+    let hud_qh = hud_queue.handle();
+    let mut hud_state = WaylandState::new(false, "hud");
+    hud_state.slint_window = Some(hud_render_window);
+    conn.display().get_registry(&hud_qh, ());
+    hud_queue.roundtrip(&mut hud_state)?;
+
+    if !state.globals_ready() || !notify_state.globals_ready() || !hud_state.globals_ready() {
         return Err(
             "Labwc does not advertise required wl_compositor/wl_shm/zwlr_layer_shell_v1 globals"
                 .into(),
@@ -4681,7 +5744,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     start_audio_subscription(tx.clone());
     start_game_subscription(tx.clone());
     start_stream_subscription(tx.clone());
+    start_stream_stats_subscription(tx.clone());
     start_web_subscription(tx.clone());
+    start_media_subscription(tx.clone());
+    start_cast_subscription(tx.clone());
     let mut keyboard = WebKeyboard { ime: ime::start(tx.clone()), ..WebKeyboard::default() };
     refresh_i18n(&ui);
 
@@ -4697,6 +5763,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         qh: notify_qh,
         mapped: false,
     };
+    let mut hud = StreamHud {
+        card: hud_card,
+        state: hud_state,
+        queue: hud_queue,
+        qh: hud_qh,
+        mapped: false,
+        last: None,
+    };
+    let mut stream = StreamState::default();
     let mut perf = PerfOverlay::default();
     /* Last game snapshot and the overlay line built from it. */
     let mut game = GameSnapshot::default();
@@ -4730,6 +5805,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
          * notification surface. */
         let mut dirty = false;
         let mut toast_dirty = false;
+        let mut hud_dirty = false;
 
         if let Some(event) = event {
             match event {
@@ -4837,6 +5913,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                AppEvent::Media(media) => {
+                    apply_media_state(&ui, &media);
+                    if mapped {
+                        dirty = true;
+                    }
+                }
+                AppEvent::Cast(cast) => {
+                    apply_cast_state(&ui, cast);
+                    if mapped {
+                        dirty = true;
+                    }
+                }
                 AppEvent::Web(running, zoom) => {
                     apply_web_state(&ui, running, zoom);
                     if !running && keyboard.visible {
@@ -4865,14 +5953,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     dirty = true;
                 }
-                AppEvent::Stream(running, steamlink) => {
-                    apply_stream_running(&ui, running, steamlink);
+                AppEvent::Stream(state) => {
+                    let running = state.running;
+                    apply_stream_running(&ui, state);
+                    if !running {
+                        hud.last = None;
+                        hud.card.set_line_one("".into());
+                        hud.card.set_line_two("".into());
+                    }
+                    stream = state;
                     if mapped {
                         if !running {
                             ui.set_switch_user_visible(switch_user_available());
                         }
                         dirty = true;
                     }
+                }
+                AppEvent::StreamStats(fields) => {
+                    hud.sample(&ui, &fields);
+                    hud_dirty = true;
                 }
                 AppEvent::Game(snapshot) => {
                     apply_game_snapshot(&ui, &snapshot);
@@ -5009,6 +6108,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             notifier.sync(&conn, ui.get_lifecycle_active() || operation_screen());
         }
 
+        /* Stream performance overlay, same rule. */
+        hud.sync(
+            &conn,
+            stream.running && !stream.steamlink && stream.overlay && !mapped
+                && !ui.get_lifecycle_active() && !operation_screen(),
+            hud_dirty,
+        );
+
         /* Performance overlay: over a running game, never over the menu
          * or the lifecycle curtain. */
         perf.sync(
@@ -5036,6 +6143,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if notifier.mapped {
         notifier.unmap(&conn);
+    }
+    if hud.mapped {
+        hud.unmap(&conn);
     }
 
     let _ = fs::remove_file(PIDFILE);

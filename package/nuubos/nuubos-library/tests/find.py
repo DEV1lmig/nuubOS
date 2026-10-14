@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Host test: libraryd SEARCH / FILTERS / previews / MIGRATE_FAVORITES.
+# Host test: libraryd SEARCH / FILTERS / previews / tags / MIGRATE_FAVORITES.
 # Run: python3 package/nuubos/nuubos-library/tests/find.py
 import os, socket, subprocess, sys, tempfile, time
 
@@ -94,6 +94,26 @@ st = cmd('STATUS')
 snes = [l for l in st.splitlines() if l.startswith('system=snes')][0].split('\t')
 check('system previews: played first', snes[6:] == [ud + '/library/covers/snes/Zelda.png', ud + '/library/covers/snes/Mario Kart.png'])
 check('no favorites collection', 'collection=favorites' not in st)
+
+# Tags: per user, one status at a time, searchable, in the game line.
+check('tag unknown', cmd('TAG_SET\t' + zid + '\tshiny').startswith('ERR'))
+check('tag set', cmd('TAG_SET\t' + zid + '\tplaying') == 'OK\n')
+check('tag in line', [l for l in cmd('SEARCH\tq=zelda').splitlines() if l.startswith('game=')][0].endswith('\tplaying'))
+cmd('TAG_SET\t' + zid + '\tbroken')
+cmd('TAG_SET\t' + zid + '\tcompleted')
+zline = [l for l in cmd('SEARCH\tq=zelda').splitlines() if l.startswith('game=')][0]
+check('status replaces status', zline.split('\t')[12] == 'completed,broken')
+check('tag search', titles(cmd('SEARCH\ttag=completed')) == ['Zelda'] and titles(cmd('SEARCH\ttag=playing')) == [])
+check('tag unknown search', titles(cmd('SEARCH\ttag=nope')) == [])
+check('tag filters', 'tag=completed\t1' in cmd('FILTERS') and 'tag=playing' not in cmd('FILTERS'))
+check('tag file', open(ud + '/users/' + user + '/library/tags.tsv').read().endswith(zid + '\tcompleted,broken\n'))
+check('tag clear', cmd('TAG_CLEAR\t' + zid + '\tbroken') == 'OK\n' and titles(cmd('SEARCH\ttag=broken')) == [])
+proc.kill(); proc.wait()
+proc = start()
+time.sleep(0.3)
+check('tag reloaded', titles(cmd('SEARCH\ttag=completed')) == ['Zelda'])
+cmd('TAG_CLEAR\t' + zid + '\tcompleted')
+check('tag file emptied', zid not in open(ud + '/users/' + user + '/library/tags.tsv').read())
 
 # Migration of an older favorites list.
 proc.kill(); proc.wait()

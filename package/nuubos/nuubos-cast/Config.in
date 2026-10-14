@@ -1,0 +1,20 @@
+config BR2_PACKAGE_NUUBOS_CAST
+	bool "nuubOS screen casting service"
+	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL # libvpx
+	depends on BR2_INSTALL_LIBSTDCPP # libvpx VP8 encoder
+	depends on BR2_PACKAGE_WAYLAND
+	depends on BR2_PACKAGE_PIPEWIRE
+	depends on BR2_PACKAGE_FFMPEG_SWSCALE
+	select BR2_PACKAGE_NUUBOS_NOTIFY
+	select BR2_PACKAGE_CJSON
+	select BR2_PACKAGE_LIBCURL # OpenH264 download
+	select BR2_PACKAGE_OPENSSL # Cast TLS, AES, digests
+	select BR2_PACKAGE_LIBVPX # VP8 (Google Cast)
+	select BR2_PACKAGE_OPUS # Opus (Google Cast)
+	help
+	  Screen casting (EPIC-029): the console's screen and sound on a
+	  TV or computer over the network. Google Cast (Cast Streaming
+	  mirroring, Default Media Receiver fallback), Miracast over
+	  Infrastructure (MS-MICE, with Cisco's OpenH264 downloaded on
+	  request) and DLNA renderers. Needs FFmpeg with the mpeg2video,
+	  mp2 and aac encoders and the mpegts, adts and webm muxers.

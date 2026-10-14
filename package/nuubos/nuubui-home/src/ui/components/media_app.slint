@@ -1,0 +1,891 @@
+import { Theme, Shape } from "../theme.slint";
+import { MarqueeText } from "marquee.slint";
+
+/* Media application (EPIC-027/028), redesigned 2026-10-12 on user request:
+ * an entertainment app, not a file list. Shelves of artwork (Continue
+ * Watching, Videos, Recordings, Music, Jellyfin libraries, Browse), grids,
+ * an album page and Now Playing for music that keeps playing behind nuubUI
+ * and games. mediaui.rs owns the state; this file only lays it out. */
+
+/* kind: 0 video, 1 folder / series, 2 album, 3 library, 4 action,
+ * 5 song, 6 storage location, 7 info (not selectable), 8 artist,
+ * 9 shuffle all. */
+export struct MediaTile {
+    title: string,
+    subtitle: string,
+    art: image,
+    has-art: bool,
+    kind: int,
+    /* Resume position 0..1, below 0 = none. */
+    progress: float,
+    badge: string,
+    tint: color,
+}
+
+/* shape: 0 poster 2:3, 1 square, 2 wide 16:9. */
+export struct MediaShelf {
+    title: string,
+    tiles: [MediaTile],
+    shape: int,
+}
+
+export struct MediaTrack {
+    number: string,
+    title: string,
+    detail: string,
+    current: bool,
+}
+
+component MediaGlyph inherits Image {
+    /* 0 film, 1 folder, 2 disc, 3 tv, 4 plus, 5 music, 6 drive, 7 info,
+     * 10 play, 11 pause, 12 next, 13 previous, 14 shuffle, 15 repeat,
+     * 16 list, 17 clock, 18 volume, 19 server, 20 user, 22 sliders */
+    in property <int> glyph;
+    in property <color> ink: Theme.text;
+    source: root.glyph == 0 ? @image-url("../assets/icons/film.svg")
+        : root.glyph == 1 ? @image-url("../assets/icons/folder.svg")
+        : root.glyph == 2 ? @image-url("../assets/icons/compact-disc.svg")
+        : root.glyph == 3 ? @image-url("../assets/icons/tv.svg")
+        : root.glyph == 4 ? @image-url("../assets/icons/plus.svg")
+        : root.glyph == 5 ? @image-url("../assets/icons/music.svg")
+        : root.glyph == 6 ? @image-url("../assets/icons/hard-drive.svg")
+        : root.glyph == 7 ? @image-url("../assets/icons/circle-info.svg")
+        : root.glyph == 10 ? @image-url("../assets/icons/play.svg")
+        : root.glyph == 11 ? @image-url("../assets/icons/pause.svg")
+        : root.glyph == 12 ? @image-url("../assets/icons/forward-step.svg")
+        : root.glyph == 13 ? @image-url("../assets/icons/backward-step.svg")
+        : root.glyph == 14 ? @image-url("../assets/icons/shuffle.svg")
+        : root.glyph == 15 ? @image-url("../assets/icons/repeat.svg")
+        : root.glyph == 16 ? @image-url("../assets/icons/list.svg")
+        : root.glyph == 17 ? @image-url("../assets/icons/clock-rotate-left.svg")
+        : root.glyph == 18 ? @image-url("../assets/icons/headphones.svg")
+        : root.glyph == 20 ? @image-url("../assets/icons/user.svg")
+        : root.glyph == 22 ? @image-url("../assets/icons/sliders.svg")
+        : @image-url("../assets/icons/server.svg");
+    colorize: root.ink;
+    image-fit: contain;
+}
+
+/* One piece of artwork. Without art the tile is drawn: tint, glyph and
+ * the title inside (local files rarely have posters). */
+component MediaTileView inherits Rectangle {
+    in property <MediaTile> tile;
+    in property <bool> focused;
+    in property <float> s: 1.0;
+
+    property <int> glyph: root.tile.kind == 0 ? 0 : root.tile.kind == 1 ? 1 : root.tile.kind == 2 ? 2
+        : root.tile.kind == 3 ? 3 : root.tile.kind == 4 ? 4 : root.tile.kind == 5 ? 5
+        : root.tile.kind == 6 ? 6 : root.tile.kind == 8 ? 20 : root.tile.kind == 9 ? 14 : 7;
+
+    border-radius: 10px * root.s;
+    clip: true;
+    background: root.tile.has-art ? Theme.surface-container-high
+        : @linear-gradient(150deg, root.tile.tint.mix(Theme.background, 0.62) 0%, root.tile.tint.mix(Theme.background, 0.22) 100%);
+    drop-shadow-blur: root.focused ? 18px * root.s : 0px;
+    drop-shadow-offset-y: root.focused ? 6px * root.s : 0px;
+    drop-shadow-color: #000000a0;
+    opacity: root.tile.kind == 7 ? 0.7 : 1.0;
+
+    if root.tile.has-art: Image {
+        width: parent.width; height: parent.height;
+        source: root.tile.art;
+        image-fit: cover;
+    }
+    if !root.tile.has-art: MediaGlyph {
+        x: (parent.width - self.width) / 2;
+        y: root.tile.title != "" ? parent.height * 0.22 : (parent.height - self.height) / 2;
+        width: min(parent.width, parent.height) * 0.3; height: self.width;
+        glyph: root.glyph;
+        ink: #ffffffb0;
+    }
+    if !root.tile.has-art && root.tile.title != "": Text {
+        x: 10px * root.s; y: parent.height * 0.52;
+        width: parent.width - 20px * root.s; height: parent.height * 0.44;
+        text: root.tile.title;
+        color: #ffffff;
+        font-size: 15px * root.s;
+        font-weight: 600;
+        wrap: word-wrap;
+        overflow: elide;
+        horizontal-alignment: center;
+        vertical-alignment: top;
+    }
+    if root.tile.badge != "": Rectangle {
+        x: parent.width - self.width - 6px * root.s; y: 6px * root.s;
+        width: badge-text.preferred-width + 12px * root.s; height: 20px * root.s;
+        border-radius: self.height / 2;
+        background: #000000b0;
+        badge-text := Text {
+            x: 6px * root.s; height: parent.height;
+            text: root.tile.badge;
+            color: #ffffff;
+            font-size: 11px * root.s;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+    if root.tile.progress >= 0: Rectangle {
+        x: 0; y: parent.height - self.height; width: parent.width; height: 4px * root.s;
+        background: #00000090;
+        Rectangle {
+            x: 0; height: parent.height;
+            width: parent.width * max(0.03, min(1.0, root.tile.progress));
+            background: Theme.accent;
+        }
+    }
+    /* Focus: a bright ring inside the edge. */
+    Rectangle {
+        width: parent.width; height: parent.height;
+        border-radius: parent.border-radius;
+        border-width: root.focused ? 3px * root.s : 0px;
+        border-color: Theme.accent-light;
+    }
+}
+
+/* Width of a tile of `shape` for a tile height. */
+component MediaShelfView inherits Rectangle {
+    in property <MediaShelf> shelf;
+    /* Focused tile (kept apart so a move does not touch the tile models). */
+    in property <int> index;
+    in property <bool> active;
+    in property <float> s: 1.0;
+    in property <length> tile-h;
+    in property <length> pad;
+
+    /* 16:9 tiles: at least two whole ones across (one wide tile and a
+     * cut second one ran off the right edge at 640x480). */
+    property <length> art-h: root.shelf.shape == 2
+        ? min(root.tile-h, (root.width - 2 * root.pad - 12px * root.s) / 2 * 9 / 16) : root.tile-h;
+    property <length> tile-w: root.shelf.shape == 0 ? root.art-h * 2 / 3
+        : root.shelf.shape == 1 ? root.art-h : root.art-h * 16 / 9;
+    property <length> gap: 12px * root.s;
+    property <length> step: root.tile-w + root.gap;
+    /* The previous tile peeks in from the left. */
+    property <length> scroll: max(0px, min((root.index - 1) * root.step,
+        root.shelf.tiles.length * root.step - root.gap - (root.width - 2 * root.pad)));
+
+    Text {
+        x: root.pad; y: 0; height: 24px * root.s;
+        text: root.shelf.title;
+        color: root.active ? Theme.text : Theme.text-secondary;
+        font-size: 17px * root.s;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: 0; y: 28px * root.s; width: parent.width; height: root.tile-h + 24px * root.s;
+        clip: true;
+        Rectangle {
+            x: -root.scroll; y: 6px * root.s;
+            width: root.shelf.tiles.length * root.step; height: root.art-h;
+            animate x { duration: 220ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
+            for tile[j] in root.shelf.tiles: Rectangle {
+                x: root.pad + j * root.step; y: 0;
+                width: root.tile-w; height: root.art-h;
+                if abs(j - root.index) <= ceil(root.width / root.step) + 2: MediaTileView {
+                    width: parent.width; height: parent.height;
+                    tile: tile;
+                    focused: root.active && j == root.index;
+                    s: root.s;
+                }
+            }
+        }
+    }
+}
+
+component MediaControl inherits Rectangle {
+    in property <int> glyph;
+    in property <bool> focused;
+    in property <bool> on: false;
+    in property <bool> big: false;
+    in property <float> s: 1.0;
+    in property <string> badge;
+    /* Diameter of a small control; the big one is 1.4x. */
+    in property <length> size: 68px * root.s;
+
+    width: root.big ? root.size * 1.4 : root.size;
+    height: self.width;
+    border-radius: self.width / 2;
+    background: root.big ? (root.focused ? Theme.accent-light : Theme.text)
+        : root.focused ? Theme.surface-container-highest : #00000000;
+    animate background { duration: 120ms; }
+    MediaGlyph {
+        x: (parent.width - self.width) / 2 + (root.glyph == 10 ? 2px * root.s : 0px);
+        y: (parent.height - self.height) / 2;
+        width: parent.width * 0.4; height: self.width;
+        glyph: root.glyph;
+        ink: root.big ? Theme.background : root.on ? Theme.accent-light : root.focused ? Theme.text : Theme.text-secondary;
+    }
+    if root.badge != "": Text {
+        x: parent.width * 0.62; y: parent.height * 0.56;
+        text: root.badge;
+        color: Theme.accent-light;
+        font-size: 12px * root.s;
+        font-weight: 800;
+    }
+    Rectangle {
+        width: parent.width; height: parent.height;
+        border-radius: parent.border-radius;
+        border-width: root.focused && !root.big ? 2px * root.s : 0px;
+        border-color: Theme.accent-light;
+    }
+}
+
+component MediaTrackRow inherits Rectangle {
+    in property <MediaTrack> track;
+    in property <bool> focused;
+    in property <float> s: 1.0;
+
+    border-radius: Shape.medium;
+    background: root.focused ? Theme.secondary-container : #00000000;
+    Rectangle {
+        x: 6px * root.s; y: 0; width: 34px * root.s; height: parent.height;
+        if root.track.current: MediaGlyph {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            width: 15px * root.s; height: self.width;
+            glyph: 5; ink: Theme.accent-light;
+        }
+        if !root.track.current: Text {
+            width: parent.width; height: parent.height;
+            text: root.track.number;
+            color: Theme.text-dim;
+            font-size: 14px * root.s;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    MarqueeText {
+        x: 46px * root.s; y: 0; width: parent.width - self.x - detail.preferred-width - 18px * root.s;
+        height: parent.height;
+        label: root.track.title;
+        text-color: root.track.current ? Theme.accent-light : root.focused ? Theme.on-secondary-container : Theme.text;
+        text-size: 16px * root.s;
+        text-weight: root.track.current ? 700 : 500;
+        active: root.focused;
+    }
+    detail := Text {
+        x: parent.width - self.preferred-width - 10px * root.s; height: parent.height;
+        text: root.track.detail;
+        color: Theme.text-dim;
+        font-size: 14px * root.s;
+        vertical-alignment: center;
+    }
+}
+
+component MediaPill inherits Rectangle {
+    in property <int> glyph;
+    in property <string> label;
+    in property <bool> focused;
+    in property <bool> primary;
+    in property <float> s: 1.0;
+
+    height: 44px * root.s;
+    width: pill-text.preferred-width + 60px * root.s;
+    border-radius: self.height / 2;
+    background: root.primary ? (root.focused ? Theme.accent-light : Theme.accent.mix(Theme.background, 0.75))
+        : root.focused ? Theme.surface-container-highest : Theme.surface-container-high;
+    MediaGlyph {
+        x: 18px * root.s; y: (parent.height - self.height) / 2;
+        width: 16px * root.s; height: self.width;
+        glyph: root.glyph;
+        ink: root.primary && root.focused ? Theme.background : Theme.text;
+    }
+    pill-text := Text {
+        x: 44px * root.s; y: 0; height: parent.height;
+        text: root.label;
+        color: root.primary && root.focused ? Theme.background : Theme.text;
+        font-size: 16px * root.s;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        width: parent.width; height: parent.height;
+        border-radius: parent.border-radius;
+        border-width: root.focused && !root.primary ? 2px * root.s : 0px;
+        border-color: Theme.accent-light;
+    }
+}
+
+component MediaProgress inherits Rectangle {
+    in property <float> position;
+    in property <float> duration;
+    in property <string> elapsed;
+    in property <string> total;
+    in property <bool> focused;
+    in property <float> s: 1.0;
+
+    height: 40px * root.s;
+    Rectangle {
+        x: 0; y: 6px * root.s; width: parent.width; height: (root.focused ? 8px : 6px) * root.s;
+        border-radius: self.height / 2;
+        background: Theme.surface-container-highest;
+        Rectangle {
+            x: 0; height: parent.height;
+            width: root.duration > 0 ? parent.width * max(0, min(1, root.position / root.duration)) : 0px;
+            border-radius: parent.border-radius;
+            background: root.focused ? Theme.accent-light : Theme.text;
+        }
+        if root.focused: Rectangle {
+            x: (root.duration > 0 ? parent.width * max(0, min(1, root.position / root.duration)) : 0px) - self.width / 2;
+            y: (parent.height - self.height) / 2;
+            width: 18px * root.s; height: self.width; border-radius: self.width / 2;
+            background: Theme.accent-light;
+        }
+    }
+    Text {
+        x: 0; y: 20px * root.s; text: root.elapsed;
+        color: Theme.text-secondary; font-size: 14px * root.s;
+    }
+    Text {
+        x: parent.width - self.preferred-width; y: 20px * root.s; text: root.total;
+        color: Theme.text-secondary; font-size: 14px * root.s;
+    }
+}
+
+/* A shoulder/trigger keycap (L2, R2) for the section tabs. */
+component MediaKeycap inherits Rectangle {
+    in property <string> label;
+    in property <float> s: 1.0;
+    width: cap.preferred-width + 16px * root.s;
+    height: 26px * root.s;
+    border-radius: 6px * root.s;
+    background: Theme.surface-container-highest;
+    cap := Text {
+        x: 8px * root.s; y: 0; height: parent.height;
+        text: root.label;
+        color: Theme.text;
+        font-size: 13px * root.s;
+        font-weight: 800;
+        vertical-alignment: center;
+    }
+}
+
+/* One section tab: glyph and name; the current one is a filled pill. */
+component MediaTab inherits Rectangle {
+    in property <string> label;
+    in property <int> glyph;
+    in property <bool> current;
+    in property <float> s: 1.0;
+    width: tab-text.preferred-width + 58px * root.s;
+    height: 38px * root.s;
+    border-radius: self.height / 2;
+    background: root.current ? Theme.accent.mix(Theme.background, 0.7) : #00000000;
+    MediaGlyph {
+        x: 16px * root.s; y: (parent.height - self.height) / 2;
+        width: 16px * root.s; height: self.width;
+        glyph: root.glyph;
+        ink: root.current ? Theme.accent-text : Theme.text-secondary;
+    }
+    tab-text := Text {
+        x: 40px * root.s; y: 0; height: parent.height;
+        text: root.label;
+        color: root.current ? Theme.text : Theme.text-secondary;
+        font-size: 17px * root.s;
+        font-weight: root.current ? 800 : 600;
+        vertical-alignment: center;
+    }
+}
+
+/* Screens: 0 home shelves, 1 grid, 2 album, 3 now playing. */
+export component MediaApp inherits Rectangle {
+    in property <float> s: 1.0;
+    in property <int> screen;
+    in property <image> backdrop;
+    in property <bool> has-backdrop;
+    in property <string> notice;
+    in property <string> kicker;
+    /* Home section: 0 Music, 1 Video, 2 Settings (L2/R2). */
+    in property <int> section;
+    in property <string> tab-music;
+    in property <string> tab-video;
+    in property <string> tab-settings;
+    /* Focused item (home, grid). */
+    in property <string> hero-title;
+    in property <string> hero-subtitle;
+    in property <string> empty-text;
+
+    in property <[MediaShelf]> shelves;
+    in property <[int]> shelf-indices;
+    in property <int> shelf-index;
+
+    in property <string> grid-title;
+    in property <[MediaTile]> grid-tiles;
+    in property <int> grid-index;
+    in property <int> grid-shape;
+
+    in property <string> album-title;
+    in property <string> album-artist;
+    in property <string> album-meta;
+    in property <image> album-art;
+    in property <bool> album-has-art;
+    in property <[MediaTrack]> album-tracks;
+    /* -2 Play, -1 Shuffle, >= 0 a track. */
+    in property <int> album-index;
+    in property <string> play-label;
+    in property <string> shuffle-label;
+
+    /* Now Playing (also the mini player). */
+    in property <bool> np-active;
+    in property <bool> np-playing;
+    in property <string> np-title;
+    in property <string> np-artist;
+    in property <string> np-album;
+    in property <image> np-art;
+    in property <bool> np-has-art;
+    in property <float> np-position;
+    in property <float> np-duration;
+    in property <string> np-elapsed;
+    in property <string> np-total;
+    in property <bool> np-shuffle;
+    /* 0 off, 1 all, 2 one */
+    in property <int> np-repeat;
+    in property <string> np-up-next;
+    in property <string> np-kicker;
+    in property <[MediaTrack]> np-queue;
+    /* 0 progress, 1 controls, 3 queue (2 was the volume) */
+    in property <int> np-zone: 1;
+    in property <int> np-control: 2;
+    in property <int> np-queue-index;
+
+    property <length> pad: 18px * root.s;
+    property <bool> mini: root.np-active && root.screen != 3;
+    property <length> mini-h: root.mini ? 56px * root.s : 0px;
+    property <length> body-h: root.height - root.mini-h;
+
+    background: Theme.background;
+    clip: true;
+
+    /* Cinematic backdrop: the focused artwork, tiny and stretched (a cheap
+     * blur), darkened towards the content. */
+    if root.has-backdrop && !(root.screen == 0 && root.section == 2): Image {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        source: root.backdrop;
+        image-fit: cover;
+        opacity: 0.55;
+    }
+    Rectangle {
+        width: parent.width; height: parent.height;
+        background: @linear-gradient(180deg, Theme.background.transparentize(0.45) 0%, Theme.background.transparentize(0.08) 45%, Theme.background 100%);
+    }
+
+    /* ---------------- Home: shelves ---------------- */
+    if root.screen == 0: home := Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: root.body-h;
+        /* Tabs on top, then the focused item, then the shelves. */
+        property <length> tabs-h: 50px * root.s;
+        property <length> hero-h: self.tabs-h + 70px * root.s;
+        property <length> area-h: self.height - self.hero-h;
+        /* The focused shelf fills the area; the next one's title peeks. */
+        property <length> tile-h: max(80px * root.s, min(190px * root.s, self.area-h - 84px * root.s));
+        property <length> shelf-step: self.tile-h + 52px * root.s;
+
+        HorizontalLayout {
+            x: (parent.width - self.preferred-width) / 2; y: 8px * root.s;
+            width: self.preferred-width; height: 38px * root.s;
+            spacing: 10px * root.s;
+            VerticalLayout { alignment: center; MediaKeycap { label: "L2"; s: root.s; } }
+            MediaTab { label: root.tab-music; glyph: 5; current: root.section == 0; s: root.s; }
+            MediaTab { label: root.tab-video; glyph: 0; current: root.section == 1; s: root.s; }
+            MediaTab { label: root.tab-settings; glyph: 22; current: root.section == 2; s: root.s; }
+            VerticalLayout { alignment: center; MediaKeycap { label: "R2"; s: root.s; } }
+        }
+        Rectangle {
+            x: root.pad; y: home.tabs-h + 2px * root.s; width: parent.width - 2 * root.pad; height: 1px;
+            background: Theme.surface-container-highest;
+        }
+        /* Settings (2): rows drawn by home.slint (SettingsSelectableRow,
+         * like Moonlight's Stream Settings). */
+        MarqueeText {
+            x: root.pad; y: home.tabs-h + 10px * root.s; width: parent.width - 2 * root.pad; height: 32px * root.s;
+            visible: root.section != 2;
+            label: root.hero-title;
+            text-color: Theme.text;
+            text-size: 26px * root.s;
+            text-weight: 700;
+            active: true;
+        }
+        Text {
+            x: root.pad; y: home.tabs-h + 44px * root.s; width: parent.width - 2 * root.pad;
+            visible: root.section != 2;
+            text: root.hero-subtitle;
+            color: Theme.text-secondary;
+            font-size: 15px * root.s;
+            overflow: elide;
+        }
+        Rectangle {
+            y: home.hero-h; width: parent.width; height: home.area-h;
+            visible: root.section != 2;
+            clip: true;
+            for shelf[i] in root.shelves: MediaShelfView {
+                x: 0;
+                y: (i - root.shelf-index) * home.shelf-step;
+                width: parent.width; height: home.shelf-step;
+                animate y { duration: 260ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
+                visible: i >= root.shelf-index - 1 && i <= root.shelf-index + 3;
+                shelf: shelf;
+                index: root.shelf-indices[i];
+                active: i == root.shelf-index;
+                s: root.s;
+                tile-h: home.tile-h;
+                pad: root.pad;
+                opacity: i < root.shelf-index ? 0 : 1;
+            }
+        }
+        if root.shelves.length == 0 && root.section != 2: Text {
+            x: root.pad; y: home.hero-h + 20px * root.s; width: parent.width - 2 * root.pad;
+            text: root.empty-text;
+            color: Theme.text-secondary;
+            font-size: 15px * root.s;
+            wrap: word-wrap;
+        }
+    }
+
+    /* ---------------- Grid ---------------- */
+    if root.screen == 1: grid := Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: root.body-h;
+        property <length> head-h: 78px * root.s;
+        property <length> gap: 12px * root.s;
+        property <length> area-h: self.height - self.head-h;
+        /* No taller than most of the area (640x480 with the mini player). */
+        property <length> target-w: min(root.grid-shape == 2 ? 200px * root.s : root.grid-shape == 1 ? 130px * root.s : 112px * root.s,
+            (self.area-h * 0.78) * (root.grid-shape == 0 ? 2 / 3 : root.grid-shape == 1 ? 1 : 16 / 9));
+        property <int> cols: max(2, floor((self.width - 2 * root.pad + self.gap) / (self.target-w + self.gap)));
+        property <length> tile-w: min((self.width - 2 * root.pad - (self.cols - 1) * self.gap) / self.cols,
+            (self.area-h * 0.8) * (root.grid-shape == 0 ? 2 / 3 : root.grid-shape == 1 ? 1 : 16 / 9));
+        /* Narrower tiles than the width allows: the grid is centred. */
+        property <length> left: (self.width - self.cols * self.tile-w - (self.cols - 1) * self.gap) / 2;
+        property <length> tile-h: root.grid-shape == 0 ? self.tile-w * 3 / 2 : root.grid-shape == 1 ? self.tile-w : self.tile-w * 9 / 16;
+        property <length> row-step: self.tile-h + self.gap;
+        property <int> focus-row: floor(root.grid-index / self.cols);
+        property <length> scroll: max(0px, min(self.focus-row * self.row-step - (self.area-h - self.tile-h) / 2,
+            ceil(root.grid-tiles.length / self.cols) * self.row-step - self.gap - self.area-h + 12px * root.s));
+
+        Text {
+            x: root.pad; y: 10px * root.s;
+            text: root.grid-title;
+            color: Theme.accent-light;
+            font-size: 11px * root.s;
+            font-weight: 800;
+            letter-spacing: 1.5px * root.s;
+        }
+        MarqueeText {
+            x: root.pad; y: 24px * root.s; width: parent.width - 2 * root.pad; height: 32px * root.s;
+            label: root.hero-title;
+            text-color: Theme.text;
+            text-size: 26px * root.s;
+            text-weight: 700;
+            active: true;
+        }
+        Text {
+            x: root.pad; y: 58px * root.s; width: parent.width - 2 * root.pad;
+            text: root.hero-subtitle;
+            color: Theme.text-secondary;
+            font-size: 15px * root.s;
+            overflow: elide;
+        }
+        Rectangle {
+            y: grid.head-h; width: parent.width; height: grid.area-h;
+            clip: true;
+            Rectangle {
+                y: 6px * root.s - grid.scroll;
+                width: parent.width; height: ceil(root.grid-tiles.length / grid.cols) * grid.row-step;
+                animate y { duration: 240ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
+                for tile[i] in root.grid-tiles: Rectangle {
+                    x: grid.left + mod(i, grid.cols) * (grid.tile-w + grid.gap);
+                    y: floor(i / grid.cols) * grid.row-step;
+                    width: grid.tile-w; height: grid.tile-h;
+                    if abs(floor(i / grid.cols) - grid.focus-row) <= 4: MediaTileView {
+                        width: parent.width; height: parent.height;
+                        tile: tile;
+                        focused: i == root.grid-index;
+                        s: root.s;
+                    }
+                }
+            }
+        }
+        if root.grid-tiles.length == 0: Text {
+            x: root.pad; y: grid.head-h + 20px * root.s; width: parent.width - 2 * root.pad;
+            text: root.empty-text;
+            color: Theme.text-secondary;
+            font-size: 15px * root.s;
+            wrap: word-wrap;
+        }
+    }
+
+    /* ---------------- Album ---------------- */
+    /* Wide screens: artwork left, tracks right. Square screens (CubeXX):
+     * artwork and title on top, tracks across the whole width below. */
+    if root.screen == 2: album := Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: root.body-h;
+        property <bool> stacked: self.height > self.width * 0.8;
+        property <length> art: self.stacked ? min(self.width * 0.38, self.height * 0.32)
+            : min(self.height - 2 * root.pad - 58px * root.s, self.width * 0.38);
+        property <length> info-x: root.pad * 2 + self.art;
+        property <length> info-w: self.width - self.info-x - root.pad;
+        property <length> list-x: self.stacked ? root.pad : self.info-x - 8px * root.s;
+        property <length> list-y: self.stacked ? root.pad + self.art + 16px * root.s : root.pad + 104px * root.s;
+        property <length> list-w: self.width - self.list-x - root.pad / 2;
+        property <length> row-h: 46px * root.s;
+        property <length> list-h: self.height - self.list-y - 6px * root.s;
+        property <length> scroll: root.album-index < 0 ? 0px
+            : max(0px, min(root.album-index * self.row-h - (self.list-h - self.row-h) / 2,
+                           root.album-tracks.length * self.row-h - self.list-h));
+
+        Rectangle {
+            x: root.pad; y: root.pad; width: album.art; height: album.art;
+            border-radius: 12px * root.s;
+            clip: true;
+            background: @linear-gradient(150deg, Theme.accent.mix(Theme.background, 0.5) 0%, Theme.surface-container-high 100%);
+            drop-shadow-blur: 22px * root.s;
+            drop-shadow-offset-y: 8px * root.s;
+            drop-shadow-color: #000000b0;
+            if root.album-has-art: Image {
+                width: parent.width; height: parent.height;
+                source: root.album-art; image-fit: cover;
+            }
+            if !root.album-has-art: MediaGlyph {
+                x: parent.width * 0.32; y: parent.height * 0.32;
+                width: parent.width * 0.36; height: self.width;
+                glyph: 2; ink: #ffffffa0;
+            }
+        }
+        HorizontalLayout {
+            x: album.stacked ? album.info-x : root.pad;
+            y: album.stacked ? root.pad + album.art - 44px * root.s : root.pad + album.art + 14px * root.s;
+            width: self.preferred-width; height: 44px * root.s;
+            spacing: 10px * root.s;
+            MediaPill { glyph: 10; label: root.play-label; primary: true; focused: root.album-index == -2; s: root.s; }
+            MediaPill { glyph: 14; label: root.shuffle-label; primary: false; focused: root.album-index == -1; s: root.s; }
+        }
+        MarqueeText {
+            x: album.info-x; y: root.pad; width: album.info-w; height: 38px * root.s;
+            label: root.album-title;
+            text-color: Theme.text;
+            text-size: 28px * root.s;
+            text-weight: 700;
+            active: true;
+        }
+        Text {
+            x: album.info-x; y: root.pad + 40px * root.s; width: album.info-w;
+            text: root.album-artist;
+            color: Theme.accent-light;
+            font-size: 18px * root.s;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            x: album.info-x; y: root.pad + 66px * root.s; width: album.info-w;
+            text: root.album-meta;
+            color: Theme.text-secondary;
+            font-size: 14px * root.s;
+            overflow: elide;
+        }
+        Rectangle {
+            x: album.list-x; y: album.list-y; width: album.list-w; height: album.list-h;
+            clip: true;
+            for track[i] in root.album-tracks: MediaTrackRow {
+                x: 0; y: i * album.row-h - album.scroll;
+                width: parent.width; height: album.row-h - 2px * root.s;
+                visible: self.y > -album.row-h && self.y < parent.height;
+                track: track;
+                focused: i == root.album-index;
+                s: root.s;
+            }
+        }
+    }
+
+    /* ---------------- Now Playing ---------------- */
+    /* Wide: artwork left, the player and the queue right. Square: big
+     * artwork on top, the player centred below, the next track only. */
+    if root.screen == 3: np := Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: parent.height;
+        property <bool> stacked: self.height > self.width * 0.8;
+        property <length> art: self.stacked ? min(self.width * 0.6, self.height * 0.38) : min(self.height - 2 * root.pad, self.width * 0.42);
+        property <length> col-x: self.stacked ? root.pad * 2 : root.pad * 2 + self.art;
+        property <length> col-w: self.stacked ? self.width - 4 * root.pad : min(self.width - self.col-x - root.pad, 560px * root.s);
+        property <length> text-y: self.stacked ? root.pad + self.art + 12px * root.s : root.pad + 18px * root.s;
+        property <length> progress-y: self.text-y + 96px * root.s;
+        property <length> controls-y: self.progress-y + 44px * root.s;
+        /* Large controls (user request 2026-10-14), five in the column:
+         * 4 small + 1 big (1.4x) take 5.4 diameters, plus gaps. */
+        property <length> ctl: min(68px * root.s, self.col-w / 6);
+        property <length> queue-y: self.controls-y + self.ctl * 1.4 + 18px * root.s;
+        property <length> row-h: 42px * root.s;
+        property <length> queue-h: self.height - self.queue-y - 22px * root.s - 6px * root.s;
+        property <length> scroll: max(0px, min(root.np-queue-index * self.row-h - (self.queue-h - self.row-h) / 2,
+            root.np-queue.length * self.row-h - self.queue-h));
+
+        Rectangle {
+            x: np.stacked ? (parent.width - np.art) / 2 : root.pad;
+            y: np.stacked ? root.pad : (parent.height - np.art) / 2;
+            width: np.art; height: np.art;
+            border-radius: 14px * root.s;
+            clip: true;
+            background: @linear-gradient(150deg, Theme.accent.mix(Theme.background, 0.45) 0%, Theme.surface-container-high 100%);
+            drop-shadow-blur: 28px * root.s;
+            drop-shadow-offset-y: 10px * root.s;
+            drop-shadow-color: #000000c0;
+            if root.np-has-art: Image {
+                width: parent.width; height: parent.height;
+                source: root.np-art; image-fit: cover;
+            }
+            if !root.np-has-art: MediaGlyph {
+                x: parent.width * 0.32; y: parent.height * 0.32;
+                width: parent.width * 0.36; height: self.width;
+                glyph: 5; ink: #ffffffa0;
+            }
+        }
+        if !np.stacked: Text {
+            x: np.col-x; y: root.pad;
+            text: root.np-kicker;
+            color: Theme.accent-light;
+            font-size: 12px * root.s;
+            font-weight: 800;
+            letter-spacing: 1.5px * root.s;
+        }
+        MarqueeText {
+            x: np.col-x; y: np.text-y; width: np.col-w; height: 40px * root.s;
+            label: root.np-title;
+            text-color: Theme.text;
+            text-size: 30px * root.s;
+            text-weight: 700;
+            align-center: np.stacked;
+            active: true;
+        }
+        Text {
+            x: np.col-x; y: np.text-y + 42px * root.s; width: np.col-w;
+            text: root.np-artist;
+            color: Theme.text;
+            font-size: 19px * root.s;
+            font-weight: 600;
+            overflow: elide;
+            horizontal-alignment: np.stacked ? center : left;
+        }
+        Text {
+            x: np.col-x; y: np.text-y + 68px * root.s; width: np.col-w;
+            text: root.np-album;
+            color: Theme.text-secondary;
+            font-size: 15px * root.s;
+            overflow: elide;
+            horizontal-alignment: np.stacked ? center : left;
+        }
+        MediaProgress {
+            x: np.col-x; y: np.progress-y; width: np.col-w;
+            position: root.np-position; duration: root.np-duration;
+            elapsed: root.np-elapsed; total: root.np-total;
+            focused: root.np-zone == 0;
+            s: root.s;
+        }
+        HorizontalLayout {
+            x: np.col-x; y: np.controls-y; width: np.col-w; height: np.ctl * 1.4;
+            alignment: space-around;
+            VerticalLayout { alignment: center; MediaControl { glyph: 14; on: root.np-shuffle; focused: root.np-zone == 1 && root.np-control == 0; s: root.s; size: np.ctl; } }
+            VerticalLayout { alignment: center; MediaControl { glyph: 13; focused: root.np-zone == 1 && root.np-control == 1; s: root.s; size: np.ctl; } }
+            MediaControl { glyph: root.np-playing ? 11 : 10; big: true; focused: root.np-zone == 1 && root.np-control == 2; s: root.s; size: np.ctl; }
+            VerticalLayout { alignment: center; MediaControl { glyph: 12; focused: root.np-zone == 1 && root.np-control == 3; s: root.s; size: np.ctl; } }
+            VerticalLayout { alignment: center; MediaControl {
+                glyph: 15; on: root.np-repeat > 0; badge: root.np-repeat == 2 ? "1" : "";
+                focused: root.np-zone == 1 && root.np-control == 4; s: root.s; size: np.ctl;
+            } }
+        }
+        /* Square screens: just the next track. */
+        if np.stacked && root.np-queue.length > root.np-queue-index + 1 && np.queue-h > 10px: Text {
+            x: np.col-x; y: np.queue-y; width: np.col-w;
+            text: root.np-up-next + "  " + root.np-queue[root.np-queue-index + 1].title;
+            color: Theme.text-secondary;
+            font-size: 14px * root.s;
+            overflow: elide;
+            horizontal-alignment: center;
+        }
+        if !np.stacked && np.queue-h > np.row-h * 1.5: Text {
+            x: np.col-x; y: np.queue-y;
+            text: root.np-up-next;
+            color: Theme.text-secondary;
+            font-size: 12px * root.s;
+            font-weight: 800;
+            letter-spacing: 1.2px * root.s;
+        }
+        if !np.stacked && np.queue-h > np.row-h * 1.5: Rectangle {
+            x: np.col-x; y: np.queue-y + 22px * root.s; width: np.col-w; height: np.queue-h;
+            clip: true;
+            for track[i] in root.np-queue: MediaTrackRow {
+                x: 0; y: i * np.row-h - np.scroll;
+                width: parent.width; height: np.row-h - 2px * root.s;
+                visible: self.y > -np.row-h && self.y < parent.height;
+                track: track;
+                focused: root.np-zone == 3 && i == root.np-queue-index;
+                s: root.s;
+            }
+        }
+    }
+
+    /* Mini player: music keeps playing while browsing. */
+    if root.mini: Rectangle {
+        x: 0; y: parent.height - root.mini-h; width: parent.width; height: root.mini-h;
+        background: Theme.surface-container-high;
+        Rectangle {
+            x: 0; y: 0; width: parent.width; height: 2px * root.s;
+            background: Theme.surface-container-highest;
+            Rectangle {
+                x: 0; y: 0; height: parent.height;
+                width: root.np-duration > 0 ? parent.width * max(0, min(1, root.np-position / root.np-duration)) : 0px;
+                background: Theme.accent;
+            }
+        }
+        Rectangle {
+            x: root.pad; y: 8px * root.s; width: 40px * root.s; height: self.width;
+            border-radius: 5px * root.s;
+            clip: true;
+            background: Theme.accent.mix(Theme.background, 0.5);
+            if root.np-has-art: Image { width: parent.width; height: parent.height; source: root.np-art; image-fit: cover; }
+            if !root.np-has-art: MediaGlyph {
+                x: parent.width * 0.28; y: parent.height * 0.28; width: parent.width * 0.44; height: self.width;
+                glyph: 5; ink: #ffffffc0;
+            }
+        }
+        MarqueeText {
+            x: root.pad + 52px * root.s; y: 6px * root.s;
+            width: parent.width - self.x - 60px * root.s; height: 24px * root.s;
+            label: root.np-title;
+            text-color: Theme.text;
+            text-size: 16px * root.s;
+            text-weight: 700;
+            active: false;
+        }
+        Text {
+            x: root.pad + 52px * root.s; y: 30px * root.s;
+            width: parent.width - self.x - 60px * root.s;
+            text: root.np-artist;
+            color: Theme.text-secondary;
+            font-size: 14px * root.s;
+            overflow: elide;
+        }
+        MediaGlyph {
+            x: parent.width - root.pad - self.width; y: (parent.height - self.height) / 2;
+            width: 20px * root.s; height: self.width;
+            glyph: root.np-playing ? 11 : 10;
+            ink: Theme.text;
+        }
+    }
+
+    if root.notice != "": Rectangle {
+        x: (parent.width - self.width) / 2; y: parent.height - root.mini-h - self.height - 12px * root.s;
+        width: min(parent.width - 2 * root.pad, notice-text.preferred-width + 32px * root.s);
+        height: 34px * root.s;
+        border-radius: self.height / 2;
+        background: Theme.surface-container-highest;
+        notice-text := Text {
+            x: 16px * root.s; width: parent.width - 32px * root.s; height: parent.height;
+            text: root.notice;
+            color: Theme.text;
+            font-size: 13px * root.s;
+            overflow: elide;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}

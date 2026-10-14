@@ -244,6 +244,7 @@ prepare_layout()
         "$MOUNT_DIR/bios" \
         "$MOUNT_DIR/themes" \
         "$MOUNT_DIR/music" \
+        "$MOUNT_DIR/videos" \
         "$MOUNT_DIR/applications" \
         "$MOUNT_DIR/ports" \
         "$MOUNT_DIR/cheats" \

@@ -22,6 +22,9 @@ export WLR_NO_HARDWARE_CURSORS=1
 # display engine scales them up 1.5x at scan-out, as for games (user request
 # 2026-10-09: render 720p, upscale to 1080p). HDMI only.
 export NUUBOS_CLIENT_MAX_LINES=720
+# Exempt from that cap (wlroots patch 0002): the media video player (mpv,
+# app_id set by nuubos-mediad) draws at the output's native resolution.
+export NUUBOS_CLIENT_FULL_SCALE_APP_IDS=nuubos-video
 export XCURSOR_THEME=nuubos-hidden
 export XCURSOR_SIZE=1
 

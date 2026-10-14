@@ -45,7 +45,7 @@
 #pragma parameter BEZEL_B "Bezel blue" 0.90 0.0 1.0 0.01
 #pragma parameter BEZEL_STYLE "Bezel style (0 TV, 1 handheld)" 0.0 0.0 1.0 1.0
 #pragma parameter HAS_ICON "System icon available" 0.0 0.0 1.0 1.0
-#pragma parameter OVERSCAN_X "Crop the sides to fill the height" 0.0 0.0 1.0 1.0
+#pragma parameter OVERSCAN_X "Crop the sides to fill the height (max % of the width)" 0.0 0.0 49.0 1.0
 #pragma parameter MOOD_BG_R "Mood background red" 0.051 0.0 1.0 0.01
 #pragma parameter MOOD_BG_G "Mood background green" 0.055 0.0 1.0 0.01
 #pragma parameter MOOD_BG_B "Mood background blue" 0.063 0.0 1.0 0.01
@@ -92,10 +92,11 @@ vec4 placement(vec2 screen)
     float wide = floor(screen.y * aspect + 0.5);
     if (OVERSCAN_X > 0.5 && wide > screen.x) {
         /* TV systems on a square screen (RetroArch patch 0006): the full
-         * height as far as at most 8 % of the width is cropped. */
+         * height as far as at most OVERSCAN_X % of the width is cropped. */
+        float keep = 1.0 - OVERSCAN_X / 100.0;
         size = vec2(wide, screen.y);
-        if (wide * 0.92 > screen.x) {
-            size.x = floor(screen.x / 0.92 + 0.5);
+        if (wide * keep > screen.x) {
+            size.x = floor(screen.x / keep + 0.5);
             size.y = floor(size.x / aspect + 0.5);
         }
     } else if (one.x > screen.x || one.y > screen.y) {

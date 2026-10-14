@@ -1,0 +1,70 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] GL: pass the index range of indexed draws to the driver
+
+Without a range Mesa's Panfrost (Mali) finds the vertex range of every
+indexed draw by scanning the index buffer on the CPU, reading the
+uncached GPU mapping of a push buffer that is new every frame, so its
+min/max cache never hits: perf on God of War: Chains of Olympus (Mali-G31,
+Cortex-A53 at 1.4 GHz) put 59 % of the GL thread on one instruction of
+u_vbuf_get_minmax_index_mapped(). The draw engine knows how many
+vertices it decoded, so indexed draws now go through glDrawRangeElements
+(GLES 3) with that bound; Panfrost then skips the scan.
+
+Upstream-Status: Pending
+---
+--- a/Common/GPU/OpenGL/GLQueueRunner.cpp
++++ b/Common/GPU/OpenGL/GLQueueRunner.cpp
+@@ -1233,7 +1233,10 @@
+ 					glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf);
+ 					curElemArrayBuffer = buf;
+ 				}
+-				if (c.draw.instances == 1) {
++				if (c.draw.instances == 1 && c.draw.first >= 0 && gl_extensions.GLES3) {
++					// first = the largest index (DrawIndexed maxIndex).
++					glDrawRangeElements(c.draw.mode, 0, c.draw.first, c.draw.count, c.draw.indexType, (void *)(intptr_t)c.draw.indexOffset);
++				} else if (c.draw.instances == 1) {
+ 					glDrawElements(c.draw.mode, c.draw.count, c.draw.indexType, (void *)(intptr_t)c.draw.indexOffset);
+ 				} else {
+ 					glDrawElementsInstanced(c.draw.mode, c.draw.count, c.draw.indexType, (void *)(intptr_t)c.draw.indexOffset, c.draw.instances);
+--- a/Common/GPU/OpenGL/GLRenderManager.h
++++ b/Common/GPU/OpenGL/GLRenderManager.h
+@@ -766,7 +766,10 @@
+ 	}
+ 
+ 	// Would really love to have a basevertex parameter, but impossible in unextended GLES, without glDrawElementsBaseVertex, unfortunately.
+-	void DrawIndexed(GLRInputLayout *inputLayout, GLRBuffer *vertexBuffer, uint32_t vertexOffset, GLRBuffer *indexBuffer, uint32_t indexOffset, GLenum mode, int count, GLenum indexType, int instances = 1) {
++	// maxIndex >= 0: no index is larger (glDrawRangeElements). Without it
++	// Mesa Panfrost scans every index buffer on the CPU, from uncached GPU
++	// memory, to find the vertex range (nuubOS).
++	void DrawIndexed(GLRInputLayout *inputLayout, GLRBuffer *vertexBuffer, uint32_t vertexOffset, GLRBuffer *indexBuffer, uint32_t indexOffset, GLenum mode, int count, GLenum indexType, int instances = 1, int maxIndex = -1) {
+ 		_dbg_assert_(vertexBuffer && indexBuffer && curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+ 		GLRRenderData &data = curRenderStep_->commands.push_uninitialized();
+ 		data.cmd = GLRRenderCommand::DRAW;
+@@ -779,6 +782,7 @@
+ 		data.draw.count = count;
+ 		data.draw.indexType = indexType;
+ 		data.draw.instances = instances;
++		data.draw.first = maxIndex;  // unused otherwise for indexed draws
+ 	}
+ 
+ 	enum { MAX_INFLIGHT_FRAMES = 3 };
+--- a/GPU/GLES/DrawEngineGLES.cpp
++++ b/GPU/GLES/DrawEngineGLES.cpp
+@@ -309,7 +309,7 @@
+ 			render_->DrawIndexed(inputLayout,
+ 				vertexBuffer, vertexBufferOffset,
+ 				indexBuffer, indexBufferOffset,
+-				glprim[prim], vertexCount, GL_UNSIGNED_SHORT);
++				glprim[prim], vertexCount, GL_UNSIGNED_SHORT, 1, maxIndex - 1);  // maxIndex = decoded vertex count
+ 		} else {
+ 			render_->Draw(
+ 				inputLayout, vertexBuffer, vertexBufferOffset,
+@@ -427,7 +427,7 @@
+ 			indexBufferOffset = (uint32_t)frameData.pushIndex->Push(inds, sizeof(uint16_t) * result.drawNumTrans, 2, &indexBuffer);
+ 			render_->DrawIndexed(
+ 				softwareInputLayout_, vertexBuffer, vertexBufferOffset, indexBuffer, indexBufferOffset,
+-				glprim[prim], result.drawNumTrans, GL_UNSIGNED_SHORT);
++				glprim[prim], result.drawNumTrans, GL_UNSIGNED_SHORT, 1, numDecodedVerts_ - 1);
+ 		} else if (result.action == SW_CLEAR) {
+ 			u32 clearColor = result.color;
+ 			float clearDepth = result.depth;

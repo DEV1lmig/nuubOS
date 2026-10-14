@@ -1,0 +1,9 @@
+config BR2_PACKAGE_LIBSMB2
+	bool "libsmb2"
+	help
+	  Client library for SMB2/SMB3 (Ronnie Sahlberg). nuubOS uses it
+	  to list the shared folders of a server (srvsvc
+	  NetShareEnumAll) when adding a network location (EPIC-036);
+	  mounting stays the kernel CIFS client.
+
+	  https://github.com/sahlberg/libsmb2

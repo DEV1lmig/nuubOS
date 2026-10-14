@@ -15,6 +15,15 @@
  *            over the effect: an accent gauge with a breathing head, or a
  *            slow comet when the progress is unknown (user request
  *            2026-10-09). Its completion plays the tasks signal.
+ *   Media    while music or a video plays (nuubos-mediad SUBSCRIBE) and
+ *            the user's media option is on, the ring is a gauge of the
+ *            track's position in the accent colour, the LED at the edge
+ *            partly lit; dimmed while paused (user request 2026-10-14).
+ *            Off = the effect as usual. The gauge moves slowly: frames
+ *            every MEDIA_FRAME_MS, not at 30 fps.
+ *   Screen   while the screen is off (/run/nuubos/screen-off, Media's
+ *            Screen Off) the ring is dark except the lifecycle shapes,
+ *            unless the user keeps it on (per user, Media app option).
  *   Signals  short system animations over the effect, grouped in five
  *            per-user categories: power (boot, sleep, wake, restart, power off),
  *            battery, connections, games, tasks. Their sources are the
@@ -31,6 +40,10 @@
  *   SetEffect(s) SetColor(s "theme"|"rrggbb") SetBrightness(i) SetSpeed(s)
  *   SetSignal(s category, b enabled)   enabling plays the category's signal
  *   PreviewSignal(s category)
+ *   GetMediaProgress() -> b / SetMediaProgress(b)   the Media layer (per
+ *            user, default on; set from the Media app)
+ *   GetScreenOffLighting() -> b / SetScreenOffLighting(b)   keep the ring
+ *            on while the screen is off (per user, default off = dark)
  *   Preview(s effect, s color) / EndPreview()   live, never persisted
  *   Lifecycle(s "sleep"|"wake"|"shutdown"|"boot"|"restart"|"reboot"|"poweroff")
  *            sleep replies once dark; boot/restart/poweroff are the LED
@@ -77,6 +90,10 @@
 #define STATUS_STATE RUNTIME_DIR "/statusd.state"
 #define NOTIFY_SOCKET RUNTIME_DIR "/notifyd.sock"
 #define EMU_SOCKET RUNTIME_DIR "/emud.sock"
+#define MEDIA_SOCKET RUNTIME_DIR "/mediad.sock"
+#define SCREEN_OFF_NAME "screen-off"
+/* Present while the effective power profile is Battery Saver (power.sh). */
+#define BATTERY_SAVER_NAME "battery-saver"
 #define BOOT_MARKER RUNTIME_DIR "/lighting-welcomed"
 #define USER_DIR RUNTIME_DIR "/user"
 #define ACTIVE_USER USER_DIR "/active"
@@ -103,6 +120,16 @@
 #define MAX_ZONES 4
 #define MAX_TASKS 8
 #define FRAME_MS 33
+#define MEDIA_FRAME_MS 250
+/* Frame period of an effect alone (no signal, crossfade or task shown):
+ * slow effects look the same at 15-20 fps on the diffused rings and every
+ * frame is a UART transfer to the MCU plus a few wakeups. */
+#define SLOW_EFFECT_FRAME_MS 66
+#define BREATHE_FRAME_MS 50
+/* Battery Saver: at most 10 fps and half the brightness (user request
+ * 2026-10-14, battery audit). */
+#define SAVER_FRAME_MS 100
+#define SAVER_GAIN 0.5f
 #define CROSSFADE_MS 350
 #define DEFAULT_BRIGHTNESS 50
 
@@ -173,6 +200,8 @@ struct prefs {
 	int brightness;
 	char speed[8];
 	unsigned int signals;
+	bool media;
+	bool screen_off_lit;
 };
 
 enum phase { PHASE_AWAKE, PHASE_SLEEP, PHASE_SHUTDOWN };
@@ -207,6 +236,17 @@ static bool battery_charging;
 static bool game_running;
 static struct rgb game_color;
 static bool game_color_known;
+/* nuubos-mediad: playing or paused, position at media_at_ms. */
+static bool media_active;
+static bool media_playing;
+static double media_position;
+static double media_duration;
+static long long media_at_ms;
+static bool screen_off;
+static bool battery_saver;
+
+/* The screen is off and the user wants the ring dark meanwhile. */
+static bool screen_dark(void);
 
 /* Rendering. */
 static enum phase phase = PHASE_AWAKE;
@@ -230,6 +270,7 @@ static DBusConnection *bus;
 static struct stream status_stream = { .fd = -1 };
 static struct stream notify_stream = { .fd = -1 };
 static struct stream emu_stream = { .fd = -1 };
+static struct stream media_stream = { .fd = -1 };
 
 static const char introspection_xml[] =
 	"<node>"
@@ -258,6 +299,10 @@ static const char introspection_xml[] =
 	"</method>"
 	"<method name='EndPreview'/>"
 	"<method name='Lifecycle'><arg name='phase' type='s' direction='in'/></method>"
+	"<method name='GetMediaProgress'><arg name='enabled' type='b' direction='out'/></method>"
+	"<method name='SetMediaProgress'><arg name='enabled' type='b' direction='in'/></method>"
+	"<method name='GetScreenOffLighting'><arg name='enabled' type='b' direction='out'/></method>"
+	"<method name='SetScreenOffLighting'><arg name='enabled' type='b' direction='in'/></method>"
 	"<signal name='StateChanged'>"
 	"<arg name='supported' type='b'/>"
 	"<arg name='effect' type='s'/>"
@@ -434,6 +479,8 @@ static void default_prefs(struct prefs *p)
 	p->brightness = DEFAULT_BRIGHTNESS;
 	snprintf(p->speed, sizeof(p->speed), "normal");
 	p->signals = SIG_ALL;
+	p->media = true;
+	p->screen_off_lit = false;
 }
 
 static unsigned int parse_signals(const char *list)
@@ -514,6 +561,10 @@ static void load_prefs(void)
 			snprintf(prefs.speed, sizeof(prefs.speed), "%s", value);
 		else if (strcmp(key, "SIGNALS") == 0)
 			prefs.signals = parse_signals(value);
+		else if (strcmp(key, "MEDIA") == 0)
+			prefs.media = atoi(value) != 0;
+		else if (strcmp(key, "SCREEN_OFF") == 0)
+			prefs.screen_off_lit = strcmp(value, "keep") == 0;
 		else if (strcmp(key, "BRIGHTNESS") == 0 && sscanf(value, "%d", &n) == 1)
 			prefs.brightness = clamp_brightness(n);
 		else if (strcmp(key, "MODE") == 0)
@@ -561,8 +612,9 @@ static int save_prefs(void)
 	if (!fp)
 		return -1;
 	if (fprintf(fp,
-		    "FORMAT=2\nEFFECT=%s\nCOLOR=%s\nBRIGHTNESS=%d\nSPEED=%s\nSIGNALS=%s\n",
-		    prefs.effect, prefs.color, prefs.brightness, prefs.speed, list) < 0 ||
+		    "FORMAT=2\nEFFECT=%s\nCOLOR=%s\nBRIGHTNESS=%d\nSPEED=%s\nSIGNALS=%s\nMEDIA=%d\nSCREEN_OFF=%s\n",
+		    prefs.effect, prefs.color, prefs.brightness, prefs.speed, list,
+		    prefs.media ? 1 : 0, prefs.screen_off_lit ? "keep" : "off") < 0 ||
 	    fflush(fp) != 0 || fsync(fileno(fp)) != 0 || fclose(fp) != 0) {
 		unlink(tmp);
 		return -1;
@@ -1106,6 +1158,42 @@ static struct rgb task_pixel(float u, int i, int n, float t)
 	}
 }
 
+static bool media_shown(void)
+{
+	return media_active && prefs.media && phase == PHASE_AWAKE && !tasks_shown();
+}
+
+/* Track position as a gauge from position 0 round the ring; the LED at
+ * the edge is lit by its share, so the ring follows the track smoothly. */
+static struct rgb media_pixel(int i, int n, long long now)
+{
+	double pos = media_position;
+	float fill;
+
+	if (media_playing)
+		pos += (now - media_at_ms) / 1000.0;
+	fill = media_duration > 0 ? clamp01((float)(pos / media_duration)) * n : 0.0f;
+	{
+		struct rgb c = scale(accent(), media_playing ? 1.0f : 0.45f);
+		float level = clamp01(fill - i);
+
+		return mix(scale(c, 0.06f), c, level);
+	}
+}
+
+static bool screen_dark(void)
+{
+	return screen_off && !prefs.screen_off_lit;
+}
+
+/* Lifecycle shapes still show with the screen off (sleep, power off). */
+static bool lifecycle_shape(void)
+{
+	return sig.shape == SHAPE_SLEEP || sig.shape == SHAPE_FAREWELL || sig.shape == SHAPE_BOOT ||
+	       sig.shape == SHAPE_RESTART || sig.shape == SHAPE_POWEROFF || sig.shape == SHAPE_WAKE ||
+	       sig.shape == SHAPE_WELCOME;
+}
+
 static void schedule_crossfade(void);
 
 static int task_index(const char *id)
@@ -1162,11 +1250,23 @@ static bool crossfading(long long now)
 	return fade_start_ms >= 0 && now - fade_start_ms < CROSSFADE_MS;
 }
 
+/* Only the slow media gauge moves: a few frames a second suffice. */
+static bool media_frames_only(void)
+{
+	return !signal_active() && !crossfading(now_ms()) && !tasks_shown() &&
+	       (screen_dark() || media_shown());
+}
+
 static bool needs_frames(void)
 {
-	return supported && phase != PHASE_SHUTDOWN &&
-	       (signal_active() || crossfading(now_ms()) || tasks_shown() ||
-		(phase == PHASE_AWAKE && effect_animated()));
+	if (!supported || phase == PHASE_SHUTDOWN)
+		return false;
+	if (screen_dark() && !(signal_active() && lifecycle_shape()))
+		return false;
+	if (media_frames_only())
+		return media_shown() && media_playing;
+	return signal_active() || crossfading(now_ms()) || tasks_shown() ||
+	       (phase == PHASE_AWAKE && effect_animated());
 }
 
 static uint8_t to_byte(float v, float gain)
@@ -1184,7 +1284,7 @@ static void render(void)
 	long long now = now_ms();
 	float t = (now - effect_epoch_ms) / 1000.0f;
 	float s = signal_active() ? (now - sig.start_ms) / 1000.0f : 0.0f;
-	float gain = powf(prefs.brightness / 100.0f, 2.2f);
+	float gain = powf(prefs.brightness / 100.0f, 2.2f) * (battery_saver ? SAVER_GAIN : 1.0f);
 	bool effect_off = strcmp(current_effect(), "off") == 0;
 	bool lit = false;
 	char command[MAX_LEDS * 12 + 16];
@@ -1226,10 +1326,14 @@ static void render(void)
 				px = BLACK;
 			if (tasks_shown())
 				px = task_pixel(u, i, n, (now - task_epoch_ms) / 1000.0f);
+			else if (media_shown())
+				px = media_pixel(i, n, now);
 			if (crossfading(now))
 				px = mix(fade_from[j], px, smooth((now - fade_start_ms) / (float)CROSSFADE_MS));
 			if (signal_active())
 				px = signal_pixel(px, u, i, n, s);
+			if (screen_dark() && !(signal_active() && lifecycle_shape()))
+				px = BLACK;
 			last_out[j] = px;
 			bytes[j * 3 + 0] = to_byte(px.r, gain);
 			bytes[j * 3 + 1] = to_byte(px.g, gain);
@@ -1242,8 +1346,8 @@ static void render(void)
 		fade_start_ms = -1;
 
 	/* Nothing to show: power the MCU and LED rail down. */
-	if (!lit && !signal_active() && !crossfading(now) &&
-	    (effect_off || phase != PHASE_AWAKE)) {
+	if (!lit && !signal_active() &&
+	    ((!crossfading(now) && (effect_off || phase != PHASE_AWAKE)) || screen_dark())) {
 		if (!hardware_off)
 			hardware_off_now();
 		return;
@@ -1607,6 +1711,31 @@ static void emu_line(const char *line)
 	}
 }
 
+static void media_line(const char *line)
+{
+	static bool snap_active, snap_playing;
+	static double snap_position, snap_duration;
+
+	if (strncmp(line, "state=", 6) == 0) {
+		snap_playing = strcmp(line + 6, "playing") == 0;
+		snap_active = snap_playing || strcmp(line + 6, "paused") == 0;
+	} else if (strncmp(line, "position=", 9) == 0) {
+		snap_position = atof(line + 9);
+	} else if (strncmp(line, "duration=", 9) == 0) {
+		snap_duration = atof(line + 9);
+	} else if (strcmp(line, "end=1") == 0) {
+		bool was_shown = media_shown();
+
+		media_active = snap_active;
+		media_playing = snap_playing;
+		media_position = snap_position;
+		media_duration = snap_duration;
+		media_at_ms = now_ms();
+		if (media_shown() != was_shown)
+			schedule_crossfade();
+	}
+}
+
 static void status_line(const char *line)
 {
 	if (strcmp(line, "changed") == 0)
@@ -1687,6 +1816,10 @@ static void connect_sources(void)
 		stream_open(&notify_stream, NOTIFY_SOCKET, "SUBSCRIBE\n");
 	}
 	stream_open(&emu_stream, EMU_SOCKET, "SUBSCRIBE\n");
+	if (media_stream.fd < 0) {
+		media_active = false;
+		stream_open(&media_stream, MEDIA_SOCKET, "SUBSCRIBE\n");
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -1779,6 +1912,52 @@ static DBusHandlerResult handle_message(DBusConnection *conn, DBusMessage *m, vo
 		if (reply)
 			append_state(reply);
 		send_reply(reply);
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+
+	if (dbus_message_is_method_call(m, INTERFACE_NAME, "GetMediaProgress")) {
+		DBusMessage *reply = dbus_message_new_method_return(m);
+		dbus_bool_t enabled = prefs.media;
+
+		if (reply)
+			dbus_message_append_args(reply, DBUS_TYPE_BOOLEAN, &enabled, DBUS_TYPE_INVALID);
+		send_reply(reply);
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+
+	if (dbus_message_is_method_call(m, INTERFACE_NAME, "SetMediaProgress")) {
+		dbus_bool_t enabled = FALSE;
+		bool was_shown = media_shown();
+
+		if (!dbus_message_get_args(m, NULL, DBUS_TYPE_BOOLEAN, &enabled, DBUS_TYPE_INVALID)) {
+			invalid(m, "Expected a boolean");
+		} else {
+			prefs.media = enabled;
+			committed(m, media_shown() != was_shown);
+		}
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+
+	if (dbus_message_is_method_call(m, INTERFACE_NAME, "GetScreenOffLighting")) {
+		DBusMessage *reply = dbus_message_new_method_return(m);
+		dbus_bool_t enabled = prefs.screen_off_lit;
+
+		if (reply)
+			dbus_message_append_args(reply, DBUS_TYPE_BOOLEAN, &enabled, DBUS_TYPE_INVALID);
+		send_reply(reply);
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+
+	if (dbus_message_is_method_call(m, INTERFACE_NAME, "SetScreenOffLighting")) {
+		dbus_bool_t enabled = FALSE;
+
+		if (!dbus_message_get_args(m, NULL, DBUS_TYPE_BOOLEAN, &enabled, DBUS_TYPE_INVALID)) {
+			invalid(m, "Expected a boolean");
+		} else {
+			prefs.screen_off_lit = enabled;
+			/* Fade back in only when the ring lights up again. */
+			committed(m, screen_off && enabled);
+		}
 		return DBUS_HANDLER_RESULT_HANDLED;
 	}
 
@@ -1923,20 +2102,37 @@ static DBusObjectPathVTable object_vtable = {
 /* Main loop                                                           */
 /* ------------------------------------------------------------------ */
 
-static void sync_frame_timer(int fd, bool *armed)
+/* Frame period while frames are needed. */
+static int frame_period_ms(void)
+{
+	const char *e = current_effect();
+	int ms = FRAME_MS;
+
+	if (media_frames_only())
+		return MEDIA_FRAME_MS;
+	if (!signal_active() && !crossfading(now_ms()) && !tasks_shown()) {
+		if (!strcmp(e, "aurora") || !strcmp(e, "spectrum") || !strcmp(e, "battery"))
+			ms = SLOW_EFFECT_FRAME_MS;
+		else if (!strcmp(e, "breathe"))
+			ms = BREATHE_FRAME_MS;
+		if (battery_saver && ms < SAVER_FRAME_MS)
+			ms = SAVER_FRAME_MS;
+	}
+	return ms;
+}
+
+static void sync_frame_timer(int fd, int *armed_ms)
 {
 	struct itimerspec spec;
-	bool want = needs_frames();
+	int want = !needs_frames() ? 0 : frame_period_ms();
 
-	if (fd < 0 || want == *armed)
+	if (fd < 0 || want == *armed_ms)
 		return;
 	memset(&spec, 0, sizeof(spec));
-	if (want) {
-		spec.it_value.tv_nsec = FRAME_MS * 1000000L;
-		spec.it_interval.tv_nsec = FRAME_MS * 1000000L;
-	}
+	spec.it_value.tv_nsec = want * 1000000L;
+	spec.it_interval.tv_nsec = want * 1000000L;
 	if (timerfd_settime(fd, 0, &spec, NULL) == 0)
-		*armed = want;
+		*armed_ms = want;
 }
 
 static int watch_user_state(int inotify_fd, int old_watch)
@@ -1974,7 +2170,7 @@ int main(void)
 	int user_watch = -1;
 	int state_watch = -1;
 	int timer_fd;
-	bool timer_armed = false;
+	int timer_armed = 0;
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = signal_handler;
@@ -2002,21 +2198,23 @@ int main(void)
 
 	inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (inotify_fd >= 0) {
-		runtime_watch = inotify_add_watch(inotify_fd, RUNTIME_DIR, IN_CREATE | IN_MOVED_TO);
+		runtime_watch = inotify_add_watch(inotify_fd, RUNTIME_DIR, IN_CREATE | IN_MOVED_TO | IN_DELETE);
 		user_watch = inotify_add_watch(inotify_fd, USER_DIR,
 			IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM | IN_CLOSE_WRITE);
 		state_watch = watch_user_state(inotify_fd, -1);
 	}
 	timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
 
+	screen_off = access(RUNTIME_DIR "/" SCREEN_OFF_NAME, F_OK) == 0;
+	battery_saver = access(RUNTIME_DIR "/" BATTERY_SAVER_NAME, F_OK) == 0;
 	connect_sources();
 	/* The boot greeting is Lifecycle("boot"), sent by nuubUI when its boot
 	 * splash animation starts (once per boot, BOOT_MARKER). */
 	render();
 
 	while (running) {
-		struct pollfd fds[6];
-		int kinds[6];
+		struct pollfd fds[7];
+		int kinds[7];
 		nfds_t count = 0;
 
 		sync_frame_timer(timer_fd, &timer_armed);
@@ -2044,6 +2242,10 @@ int main(void)
 			fds[count] = (struct pollfd){ .fd = emu_stream.fd, .events = POLLIN };
 			kinds[count++] = 6;
 		}
+		if (media_stream.fd >= 0) {
+			fds[count] = (struct pollfd){ .fd = media_stream.fd, .events = POLLIN };
+			kinds[count++] = 7;
+		}
 
 		if (poll(fds, count, -1) < 0) {
 			if (errno == EINTR)
@@ -2065,6 +2267,8 @@ int main(void)
 				bool user_changed = false;
 				bool theme_changed = false;
 				bool sockets = false;
+				bool screen_changed = false;
+				bool saver_changed = false;
 				ssize_t n;
 
 				while ((n = read(inotify_fd, buf, sizeof(buf))) > 0) {
@@ -2074,7 +2278,13 @@ int main(void)
 						if (ev->wd == user_watch)
 							user_changed = true;
 						else if (ev->wd == runtime_watch && ev->len &&
-							 strstr(ev->name, ".sock"))
+							 strcmp(ev->name, SCREEN_OFF_NAME) == 0)
+							screen_changed = true;
+						else if (ev->wd == runtime_watch && ev->len &&
+							 strcmp(ev->name, BATTERY_SAVER_NAME) == 0)
+							saver_changed = true;
+						else if (ev->wd == runtime_watch && ev->len &&
+							 strstr(ev->name, ".sock") && !(ev->mask & IN_DELETE))
 							sockets = true;
 						else if (ev->wd == state_watch && ev->len &&
 							 strcmp(ev->name, "settings.conf") == 0)
@@ -2088,6 +2298,19 @@ int main(void)
 				} else if (theme_changed) {
 					load_theme_accent();
 					schedule_crossfade();
+				}
+				if (screen_changed) {
+					screen_off = access(RUNTIME_DIR "/" SCREEN_OFF_NAME, F_OK) == 0;
+					if (!screen_off)
+						schedule_crossfade();
+				}
+				if (saver_changed) {
+					bool saver = access(RUNTIME_DIR "/" BATTERY_SAVER_NAME, F_OK) == 0;
+
+					if (saver != battery_saver) {
+						battery_saver = saver;
+						schedule_crossfade();
+					}
 				}
 				if (sockets)
 					connect_sources();
@@ -2109,6 +2332,9 @@ int main(void)
 			case 6:
 				stream_read(&emu_stream, emu_line);
 				break;
+			case 7:
+				stream_read(&media_stream, media_line);
+				break;
 			}
 		}
 		render();
@@ -2119,6 +2345,7 @@ int main(void)
 	stream_close(&status_stream);
 	stream_close(&notify_stream);
 	stream_close(&emu_stream);
+	stream_close(&media_stream);
 	rgb_disconnect();
 	if (timer_fd >= 0)
 		close(timer_fd);

@@ -23,6 +23,13 @@ mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
     modprobe sun8i_mixer 2>&1 || true
     modprobe panfrost 2>&1 || true
 
+    echo
+    echo "=== DMA-BUF HEAPS MODPROBE ==="
+    # /dev/dma_heap/{system,reserved}: Steam Link's Wayland video output
+    # allocates from them and crashes without them (streaming-media.md).
+    modprobe system_heap 2>&1 || true
+    modprobe cma_heap 2>&1 || true
+
     sleep 2
 
     echo

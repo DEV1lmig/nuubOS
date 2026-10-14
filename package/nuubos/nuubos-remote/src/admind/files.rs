@@ -8,6 +8,7 @@
 use crate::http::{self, Request, Response};
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
@@ -87,9 +88,12 @@ fn is_image(path: &Path) -> bool {
 }
 
 fn send_file(w: &mut UnixStream, path: &Path, attachment: bool) -> io::Result<()> {
+    send_with(w, path, attachment, Vec::new())
+}
+
+fn send_with(w: &mut UnixStream, path: &Path, attachment: bool, mut extra: Vec<(String, String)>) -> io::Result<()> {
     let mut f = fs::File::open(path)?;
     let len = f.metadata()?.len();
-    let mut extra = Vec::new();
     if attachment {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let ascii: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' }).collect();
@@ -109,16 +113,28 @@ fn encode(s: &str) -> String {
         .collect()
 }
 
-/* GET /api/img?p=ABS */
+/* GET /api/img?p=ABS[&w=WIDTH]: the image, or a scaled copy of it no
+ * wider than WIDTH (thumbs.rs). Pages show the same images again at every
+ * refresh: they may keep them, and ask again with the validator. */
 pub fn image(req: &mut Request) -> Option<Response> {
     let Some(p) = inside(req.q("p"), &image_roots(), false).filter(|p| p.is_file() && is_image(p)) else {
         return Some(Response::error(404, "path"));
     };
-    match send_file(req.stream(), &p, false) {
+    let w = crate::thumbs::width(req.q("w"));
+    let tag = fs::metadata(&p).ok().map(|m| format!("\"{:x}-{:x}-{}\"", m.len(), m.mtime(), w.unwrap_or(0)));
+    if tag.is_some() && req.header("if-none-match") == tag.as_deref() {
+        let _ = http::head(req.stream(), 304, "image/*", None, &[("Cache-Control".into(), CACHE_IMAGES.into()), ("ETag".into(), tag.unwrap_or_default())]);
+        return None;
+    }
+    let file = w.and_then(|w| crate::thumbs::get(&p, w)).unwrap_or(p);
+    let extra = vec![("Cache-Control".into(), CACHE_IMAGES.into()), ("ETag".into(), tag.unwrap_or_default())];
+    match send_with(req.stream(), &file, false, extra) {
         Ok(()) => None,
         Err(_) => Some(Response::error(404, "path")),
     }
 }
+
+const CACHE_IMAGES: &str = "private, max-age=300";
 
 /* GET /api/download?p=ABS */
 pub fn download(req: &mut Request) -> Option<Response> {

@@ -51,12 +51,28 @@ PW2="$(ctl credential show)"
 ck "regenerate changes it" '[ "$PW2" != "$PW" ]'
 ck "regenerate updates root password" '[ "$(head -n1 "$R/etc/shadow")" = "root:$(hash_of "$PW2"):::::::" ]'
 
-# Keys no longer sign in: an authorized_keys file does not enable SSH.
+# An authorized_keys file does not turn SSH on.
 R2="$T/root2"; mkdir -p "$R2/etc" "$R2/state/ssh/root"
 printf 'root::::::::\n' > "$R2/etc/shadow"; echo "ssh-ed25519 AAAA dev" > "$R2/state/ssh/root/authorized_keys"
 NUUBOS_ROOT="$R2" NUUBOS_REMOTE_NO_DAEMONS=1 sh "$CTL" start
 ck "SSH off by default even with keys" 'NUUBOS_ROOT="$R2" NUUBOS_REMOTE_NO_DAEMONS=1 sh "$CTL" status | grep -q "^ssh=0"'
 ck "two devices, two credentials" '[ "$(NUUBOS_ROOT="$R2" NUUBOS_REMOTE_NO_DAEMONS=1 sh "$CTL" credential show)" != "$PW2" ]'
+
+# Public keys (EPIC-039): checked, fingerprinted like ssh-keygen, root-only.
+ssh-keygen -q -t ed25519 -N '' -C 'laptop key' -f "$T/k1" && ssh-keygen -q -t rsa -b 2048 -N '' -f "$T/k2" -C ''
+fp_of() { ssh-keygen -lf "$1" | cut -d' ' -f2; }
+ck "add ed25519 key" '[ "$(ctl keys add < "$T/k1.pub")" = "OK $(fp_of "$T/k1.pub")" ]'
+ck "add rsa key" 'ctl keys add < "$T/k2.pub" | grep -q "^OK SHA256:"'
+ck "comment control characters dropped" '[ "$(ctl keys list | grep -c "laptop key$")" = 1 ]'
+ck "list: fingerprint, type, comment" 'ctl keys list | grep -q "^key=$(fp_of "$T/k1.pub")	ssh-ed25519	laptop key$"'
+ck "same key twice refused" '[ "$(ctl keys add < "$T/k1.pub")" = "ERR exists" ]'
+ck "not a key refused" '[ "$(echo "ssh-ed25519 notakey" | ctl keys add)" = "ERR key" ]'
+ck "options refused" '[ "$(printf "command=\"sh\" %s\n" "$(cat "$T/k1.pub")" | ctl keys add)" = "ERR type" ]'
+ck "type must match the blob" '[ "$(cut -d" " -f2 "$T/k1.pub" | sed "s/^/ssh-rsa /" | ctl keys add)" = "ERR key" ]'
+ck "authorized_keys root-only" '[ "$(stat -c %a "$R/state/ssh/root/authorized_keys")" = 600 ] && [ "$(wc -l < "$R/state/ssh/root/authorized_keys")" = 2 ]'
+ck "remove a key" '[ "$(ctl keys remove "$(fp_of "$T/k1.pub")")" = OK ] && ! ctl keys list | grep -q ssh-ed25519 && ctl keys list | grep -q ssh-rsa'
+ck "remove unknown key" '[ "$(ctl keys remove SHA256:nope)" = "ERR missing" ]'
+ck "credential still works with keys" '[ "$(head -n1 "$R/etc/shadow")" = "root:$(hash_of "$PW2"):::::::" ]'
 
 [ "$FAIL" = 0 ] && echo "[PASS] remote"
 exit "$FAIL"

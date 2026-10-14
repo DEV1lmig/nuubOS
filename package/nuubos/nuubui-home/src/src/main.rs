@@ -1,4 +1,6 @@
 mod apppage;
+mod bus;
+mod castui;
 mod datetime;
 mod filesui;
 mod findui;
@@ -7,6 +9,7 @@ mod library;
 mod lighting;
 mod mediaui;
 mod moonlight;
+mod netplayui;
 mod qr;
 mod splash;
 mod splash_core;
@@ -497,6 +500,7 @@ fn apply_users(ui:&HomeWindow,s:&USnap,picker:&Arc<AtomicBool>){
     /* Moonlight shows the active user's PCs: it closes for a user switch. */
     if open&&moonlight::ACTIVE.load(Ordering::SeqCst){moonlight::leave(ui);}
     if open&&steamlink::ACTIVE.load(Ordering::SeqCst){steamlink::leave(ui);}
+    if open&&netplayui::ACTIVE.load(Ordering::SeqCst){netplayui::leave(ui);}
     /* Web bookmarks and history are the active user's too. */
     if open&&webui::ACTIVE.load(Ordering::SeqCst){webui::leave(ui);}
     if open&&findui::ACTIVE.load(Ordering::SeqCst){findui::leave(ui);}
@@ -808,6 +812,7 @@ fn audio_output_label(ui: &HomeWindow, output: &str) -> String {
         "analog" => tr(ui, 332, "Analog Audio"),
         "headphones" => tr(ui, 330, "Headphones"),
         "hdmi" => "HDMI".to_owned(),
+        "cast" => tr(ui, 1202, "Screen Cast"),
         "speaker" => tr(ui, 240, "Speaker"),
         _ => tr(ui, 211, "Unknown"),
     }
@@ -1114,7 +1119,7 @@ fn refresh_wifi_networks(ui: &HomeWindow, saved: bool) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<Vec<(String, String, i32, bool, bool)>> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call(if saved { "GetSavedNetworks" } else { "GetNetworks" }, &())
         })();
@@ -1206,7 +1211,7 @@ fn refresh_bluetooth_devices(ui: &HomeWindow) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<Vec<(String, String, String, bool, bool, bool, i32, i32)>> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = bluetooth_proxy(&connection)?;
             proxy.call("GetDevices", &())
         })();
@@ -1233,7 +1238,7 @@ fn bluetooth_set_enabled(ui: &HomeWindow, enabled: bool) {
     bluetooth_notice(ui, if enabled { tr(ui, 242, "Enabling Bluetooth…") } else { tr(ui, 243, "Disabling Bluetooth…") });
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = bluetooth_proxy(&connection)?;
             proxy.call("SetEnabled", &(enabled,))
         })();
@@ -1258,7 +1263,7 @@ fn bluetooth_start_discovery_session(ui: &HomeWindow) {
     bluetooth_notice(ui, "");
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = bluetooth_proxy(&connection)?;
             proxy.call("StartDiscoverySession", &())
         })();
@@ -1278,7 +1283,7 @@ fn bluetooth_stop_discovery_session(ui: &HomeWindow) {
     ui.set_bluetooth_scanning(false);
     thread::spawn(move || {
         let _ = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = bluetooth_proxy(&connection)?;
             proxy.call("StopDiscoverySession", &())
         })();
@@ -1298,7 +1303,7 @@ fn bluetooth_device_operation(ui: &HomeWindow, method: &'static str, address: St
 
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = bluetooth_proxy(&connection)?;
             proxy.call(method, &(address.as_str(),))
         })();
@@ -1328,7 +1333,7 @@ fn bluetooth_pair_with_pin(ui: &HomeWindow, address: String, pin: String) {
 
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = bluetooth_proxy(&connection)?;
             proxy.call("PairWithPin", &(address.as_str(), pin.as_str()))
         })();
@@ -1431,7 +1436,7 @@ fn refresh_controllers(ui: &HomeWindow) {
             Vec<(String, String, String, bool, bool, i32, i32, i32)>,
             Vec<(i32, String, String, bool)>,
         )> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = controllers_proxy(&connection)?;
             let devices = proxy.call("GetDevices", &())?;
             let assignments = proxy.call("GetAssignments", &())?;
@@ -1696,7 +1701,7 @@ fn refresh_controller_mapping(ui: &HomeWindow) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<(Vec<(String, i32, String, bool)>, (i32, i32))> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = controllers_proxy(&connection)?;
             let rows: Vec<(String, i32, String, bool)> =
                 proxy.call("GetMapping", &(id.as_str(),))?;
@@ -1727,7 +1732,7 @@ fn reset_controller_mapping(ui: &HomeWindow) {
     }
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = controllers_proxy(&connection)?;
             proxy.call("ResetMapping", &(id.as_str(),))
         })();
@@ -1758,7 +1763,7 @@ fn set_controller_deadzone(ui: &HomeWindow, stick: &'static str, delta: i32) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = controllers_proxy(&connection)?;
             proxy.call("SetDeadzone", &(id.as_str(), stick, next))
         })();
@@ -2047,7 +2052,7 @@ fn refresh_audio(ui: &HomeWindow) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<AudioProductState> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = audio_proxy(&connection)?;
             let (mode, selected, volume, volume_supported,
                  bluetooth_available, headphones_available,
@@ -2084,7 +2089,11 @@ fn refresh_audio(ui: &HomeWindow) {
 }
 
 fn start_home_music_session() {
-    if let Ok(connection) = zbus::blocking::Connection::system() {
+    /* The user's own music (Media) plays instead. */
+    if mediaui::MUSIC.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Ok(connection) = crate::bus::system() {
         if let Ok(proxy) = audio_proxy(&connection) {
             let result: zbus::Result<()> = proxy.call("StartHomeMusic", &());
             if let Err(error) = result {
@@ -2109,7 +2118,7 @@ fn on_game_session(ui: &HomeWindow, running: bool) {
 }
 
 fn stop_home_music_session() {
-    if let Ok(connection) = zbus::blocking::Connection::system() {
+    if let Ok(connection) = crate::bus::system() {
         if let Ok(proxy) = audio_proxy(&connection) {
             let result: zbus::Result<()> = proxy.call("StopHomeMusic", &());
             if let Err(error) = result {
@@ -2125,7 +2134,7 @@ fn start_audio_product_listener(ui: &HomeWindow) {
     let weak = ui.as_weak();
 
     thread::spawn(move || loop {
-        let connection = match zbus::blocking::Connection::system() {
+        let connection = match crate::bus::system() {
             Ok(connection) => connection,
             Err(error) => {
                 eprintln!("home: Audio bus failed={error}");
@@ -2141,9 +2150,11 @@ fn start_audio_product_listener(ui: &HomeWindow) {
                 continue;
             }
         };
-        let start_music: zbus::Result<()> = proxy.call("StartHomeMusic", &());
-        if let Err(error) = start_music {
-            eprintln!("home: StartHomeMusic failed={error}");
+        if !mediaui::MUSIC.load(Ordering::SeqCst) {
+            let start_music: zbus::Result<()> = proxy.call("StartHomeMusic", &());
+            if let Err(error) = start_music {
+                eprintln!("home: StartHomeMusic failed={error}");
+            }
         }
 
         let mut signals = match proxy.receive_signal("StateChanged") {
@@ -2195,7 +2206,7 @@ fn audio_set_output(ui: &HomeWindow, output: String) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = audio_proxy(&connection)?;
             proxy.call("SetOutput", &(output.as_str(),))
         })();
@@ -2217,7 +2228,7 @@ fn audio_adjust_volume(ui: &HomeWindow, delta: i32) {
 
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = audio_proxy(&connection)?;
             proxy.call("AdjustVolume", &(delta,))
         })();
@@ -2236,7 +2247,7 @@ fn audio_toggle_mute(ui: &HomeWindow) {
 
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = audio_proxy(&connection)?;
             proxy.call("ToggleMute", &())
         })();
@@ -2545,6 +2556,7 @@ fn apply_settings_choice(ui: &HomeWindow) {
         c if c.starts_with("game-") || c.starts_with("emu-") || c == "update-channel" => gameui::apply_choice(ui, c, value),
         c if c.starts_with("files-") || c.starts_with("share-") || c.starts_with("backup-") => filesui::apply_choice(ui, c, value),
         c if c.starts_with("find-") => findui::apply_choice(ui, c, value),
+        c if c.starts_with("media-") => mediaui::apply_choice(ui, c, value),
         c if storageui::owns_choice(c) => storageui::apply_choice(ui, c, value),
         c if syncui::owns_choice(c) => syncui::apply_choice(ui, c, value),
         "player-assignment" => {
@@ -2570,7 +2582,7 @@ fn apply_settings_choice(ui: &HomeWindow) {
             let weak = ui.as_weak();
             thread::spawn(move || {
                 let result = (|| -> zbus::Result<()> {
-                    let connection = zbus::blocking::Connection::system()?;
+                    let connection = crate::bus::system()?;
                     let proxy = controllers_proxy(&connection)?;
                     proxy.call("SetPlayerPreference", &(player, value.as_str(), name.as_str()))
                 })();
@@ -2622,7 +2634,7 @@ fn set_controller_tester(ui: &HomeWindow, enabled: bool) {
     }
 
     thread::spawn(move || {
-        if let Ok(connection) = zbus::blocking::Connection::system() {
+        if let Ok(connection) = crate::bus::system() {
             if let Ok(proxy) = controllers_proxy(&connection) {
                 let _: zbus::Result<()> =
                     proxy.call("SetTester", &(enabled, if enabled { id.as_str() } else { "" }));
@@ -2654,7 +2666,7 @@ fn begin_controller_remap(ui: &HomeWindow) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = controllers_proxy(&connection)?;
             proxy.call("BeginRemap", &(id.as_str(), control.as_str()))
         })();
@@ -2675,7 +2687,7 @@ fn cancel_controller_remap(ui: &HomeWindow) {
     }
     ui.set_controller_remap_waiting(false);
     thread::spawn(move || {
-        if let Ok(connection) = zbus::blocking::Connection::system() {
+        if let Ok(connection) = crate::bus::system() {
             if let Ok(proxy) = controllers_proxy(&connection) {
                 let _: zbus::Result<()> = proxy.call("CancelRemap", &());
             }
@@ -2687,7 +2699,7 @@ fn refresh_rumble(ui: &HomeWindow) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<(bool, bool)> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = rumble_proxy(&connection)?;
             proxy.call("GetState", &())
         })();
@@ -2706,7 +2718,7 @@ fn rumble_set_enabled(ui: &HomeWindow, enabled: bool) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = rumble_proxy(&connection)?;
             proxy.call("SetEnabled", &(enabled,))
         })();
@@ -2724,7 +2736,7 @@ fn rumble_set_enabled(ui: &HomeWindow, enabled: bool) {
 
 fn rumble_test() {
     thread::spawn(move || {
-        if let Ok(connection) = zbus::blocking::Connection::system() {
+        if let Ok(connection) = crate::bus::system() {
             if let Ok(proxy) = rumble_proxy(&connection) {
                 let result: zbus::Result<()> = proxy.call("Test", &());
                 if let Err(error) = result {
@@ -2738,7 +2750,7 @@ fn rumble_test() {
 fn start_controller_signal_listener(ui: &HomeWindow, signal_name: &'static str) {
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let connection = match zbus::blocking::Connection::system() {
+        let connection = match crate::bus::system() {
             Ok(connection) => connection,
             Err(error) => {
                 eprintln!("home: Controllers bus failed={error}");
@@ -2887,7 +2899,7 @@ fn start_rumble_listener(ui: &HomeWindow) {
     refresh_rumble(ui);
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let Ok(connection) = zbus::blocking::Connection::system() else {
+        let Ok(connection) = crate::bus::system() else {
             return;
         };
         let Ok(proxy) = rumble_proxy(&connection) else {
@@ -2954,7 +2966,7 @@ fn wifi_set_enabled(ui: &HomeWindow, enabled: bool) {
     wifi_notice(ui, if enabled { tr(ui, 250, "Enabling Wi-Fi…") } else { tr(ui, 251, "Disabling Wi-Fi…") });
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("SetEnabled", &(enabled,))
         })();
@@ -2974,7 +2986,7 @@ fn wifi_start_scan_session(ui: &HomeWindow) {
     ui.set_wifi_scanning(true);
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("StartScanSession", &())
         })();
@@ -2993,7 +3005,7 @@ fn wifi_stop_scan_session(ui: &HomeWindow) {
     ui.set_wifi_scanning(false);
     thread::spawn(move || {
         let _ = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("StopScanSession", &())
         })();
@@ -3101,7 +3113,7 @@ fn wifi_connect(ui: &HomeWindow, ssid: String, password: String, hidden: bool) {
     wifi_notice(ui, tr_arg(ui, 254, "Connecting to {0}…", &ssid));
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("Connect", &(ssid.as_str(), password.as_str(), hidden))
         })();
@@ -3124,7 +3136,7 @@ fn wifi_start_wps(ui: &HomeWindow, ssid: String) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("StartWps", &(ssid.as_str(),))
         })();
@@ -3142,7 +3154,7 @@ fn wifi_start_wps(ui: &HomeWindow, ssid: String) {
 fn wifi_cancel_wps() {
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("CancelWps", &())
         })();
@@ -3168,7 +3180,7 @@ fn wifi_disconnect(ui: &HomeWindow) {
     wifi_notice(ui, tr(ui, 256, "Disconnecting…"));
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("Disconnect", &())
         })();
@@ -3193,7 +3205,7 @@ fn wifi_forget(ui: &HomeWindow, ssid: String) {
     wifi_notice(ui, tr_arg(ui, 258, "Forgetting {0}…", &ssid));
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("Forget", &(ssid.as_str(),))
         })();
@@ -3219,7 +3231,7 @@ fn fetch_wifi_ip_configuration(ui: &HomeWindow, ssid: String, runtime_only: bool
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<(String, String, u32, String, String, String, String, u32, String, String, String)> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call("GetIpConfiguration", &(ssid.as_str(),))
         })();
@@ -3264,7 +3276,7 @@ fn save_wifi_ip_configuration(ui: &HomeWindow) {
     wifi_notice(ui, tr(ui, 261, "Applying network settings…"));
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
-            let connection = zbus::blocking::Connection::system()?;
+            let connection = crate::bus::system()?;
             let proxy = wifi_proxy(&connection)?;
             proxy.call(
                 "SetIpConfiguration",
@@ -3503,6 +3515,7 @@ fn finish_system_keyboard(ui: &HomeWindow) {
         gameui::KEYBOARD_TGDB_KEY | gameui::KEYBOARD_SEARCH => gameui::keyboard_done(ui, purpose, value),
         filesui::KEYBOARD_FOLDER..=filesui::KEYBOARD_SHARE_PASSWORD => filesui::keyboard_done(ui, purpose, value),
         mediaui::KEYBOARD_SERVER..=mediaui::KEYBOARD_JF_PASSWORD => mediaui::keyboard_done(ui, purpose, value),
+        mediaui::KEYBOARD_PLAYLIST | mediaui::KEYBOARD_PLAYLIST_RENAME => mediaui::keyboard_done(ui, purpose, value),
         webui::KEYBOARD_ADDRESS => webui::keyboard_done(ui, value),
         findui::KEYBOARD_TITLE..=findui::KEYBOARD_RENAME_COLLECTION => findui::keyboard_done(ui, purpose, value),
         _ => navigate_settings_view(ui, return_view),
@@ -3670,7 +3683,7 @@ fn update_wifi_detail_scroll(ui: &HomeWindow) {
 fn start_wifi_aux_signal_listener(ui: &HomeWindow, signal_name: &'static str) {
     let weak = ui.as_weak();
     thread::spawn(move || loop {
-        let connection = match zbus::blocking::Connection::system() {
+        let connection = match crate::bus::system() {
             Ok(connection) => connection,
             Err(error) => {
                 eprintln!("home: Wi-Fi auxiliary bus failed={error}");
@@ -3809,7 +3822,7 @@ fn start_wifi_product_listener(ui: &HomeWindow) {
 
     let weak = ui.as_weak();
     thread::spawn(move || loop {
-        let connection = match zbus::blocking::Connection::system() {
+        let connection = match crate::bus::system() {
             Ok(connection) => connection,
             Err(error) => {
                 eprintln!("home: Wi-Fi system bus connection failed={error}");
@@ -3872,7 +3885,7 @@ fn start_wifi_product_listener(ui: &HomeWindow) {
 fn start_bluetooth_aux_signal_listener(ui: &HomeWindow, signal_name: &'static str) {
     let weak = ui.as_weak();
     thread::spawn(move || loop {
-        let connection = match zbus::blocking::Connection::system() {
+        let connection = match crate::bus::system() {
             Ok(connection) => connection,
             Err(error) => {
                 eprintln!("home: Bluetooth auxiliary bus failed={error}");
@@ -3940,7 +3953,7 @@ fn start_bluetooth_product_listener(ui: &HomeWindow) {
 
     let weak = ui.as_weak();
     thread::spawn(move || loop {
-        let connection = match zbus::blocking::Connection::system() {
+        let connection = match crate::bus::system() {
             Ok(connection) => connection,
             Err(error) => {
                 eprintln!("home: Bluetooth system bus connection failed={error}");
@@ -4201,22 +4214,29 @@ fn update_display_audio_scroll(ui: &HomeWindow, count: i32) {
         ui.get_display_audio_index(),
         count,
         ui.get_display_audio_scroll_offset(),
-        (ui.get_da_audio_start(), ui.get_da_sounds_start(), 0),
+        (ui.get_da_audio_start(), ui.get_da_sounds_start(), if ui.get_cast_available() { ui.get_da_cast_start() } else { 0 }),
     ));
 }
 
 /// Display & Audio rows by function. Color Temperature (row 1) exists only
 /// when the panel supports it; the rows below it move up when it does not.
 #[derive(Clone, Copy, PartialEq)]
-enum DaRow { Brightness, ColorTemperature, Output, Volume, Applications, HomeMusic, TestSound, SystemSounds, NavigationSounds, NotifySounds, PowerSounds }
+enum DaRow { Brightness, ColorTemperature, Output, Volume, Applications, HomeMusic, TestSound, SystemSounds, NavigationSounds, NotifySounds, PowerSounds,
+    CastSound, CastLatency, CastEncoder }
 
-/* Rows without Color Temperature. */
+/* Rows without Color Temperature and without SCREEN CASTING (3 rows, only
+ * while nuubos-castd runs). */
 const DA_ROWS: i32 = 10;
 
+fn display_audio_count(ui: &HomeWindow) -> i32 {
+    DA_ROWS + ui.get_da_temp() + if ui.get_cast_available() { 3 } else { 0 }
+}
+
 fn display_audio_row(ui: &HomeWindow) -> DaRow {
-    const ROWS: [DaRow; 11] = [DaRow::Brightness, DaRow::ColorTemperature, DaRow::Output, DaRow::Volume, DaRow::Applications,
-        DaRow::HomeMusic, DaRow::TestSound, DaRow::SystemSounds, DaRow::NavigationSounds, DaRow::NotifySounds, DaRow::PowerSounds];
-    let index = ui.get_display_audio_index().clamp(0, DA_ROWS - 1 + ui.get_da_temp());
+    const ROWS: [DaRow; 14] = [DaRow::Brightness, DaRow::ColorTemperature, DaRow::Output, DaRow::Volume, DaRow::Applications,
+        DaRow::HomeMusic, DaRow::TestSound, DaRow::SystemSounds, DaRow::NavigationSounds, DaRow::NotifySounds, DaRow::PowerSounds,
+        DaRow::CastSound, DaRow::CastLatency, DaRow::CastEncoder];
+    let index = ui.get_display_audio_index().clamp(0, display_audio_count(ui) - 1);
     let logical = if ui.get_da_temp() == 0 && index >= 1 { index + 1 } else { index };
     ROWS[logical as usize]
 }
@@ -5209,7 +5229,7 @@ fn handle_settings_action(
             _ => {}
         },
         18 => {
-            let count = DA_ROWS + ui.get_da_temp();
+            let count = display_audio_count(ui);
             let row = display_audio_row(ui);
             let step = match action { "menu_left" => -1, "menu_right" => 1, _ => 0 };
             match action {
@@ -5229,6 +5249,8 @@ fn handle_settings_action(
                     DaRow::NavigationSounds => set_navigation_sounds_enabled(ui, !ui.get_navigation_sounds_enabled()),
                     DaRow::NotifySounds => set_notify_sounds_enabled(ui, !ui.get_notify_sounds_enabled()),
                     DaRow::PowerSounds => set_power_sounds_enabled(ui, !ui.get_power_sounds_enabled()),
+                    DaRow::CastSound => castui::toggle_audio(ui),
+                    DaRow::CastLatency => castui::step_latency(ui, step),
                     _ => {}
                 },
                 "menu_confirm" => match row {
@@ -5240,6 +5262,9 @@ fn handle_settings_action(
                     DaRow::NavigationSounds => set_navigation_sounds_enabled(ui, !ui.get_navigation_sounds_enabled()),
                     DaRow::NotifySounds => set_notify_sounds_enabled(ui, !ui.get_notify_sounds_enabled()),
                     DaRow::PowerSounds => set_power_sounds_enabled(ui, !ui.get_power_sounds_enabled()),
+                    DaRow::CastSound => castui::toggle_audio(ui),
+                    DaRow::CastLatency => castui::step_latency(ui, 1),
+                    DaRow::CastEncoder => castui::encoder_action(ui),
                     _ => {}
                 },
                 _ => {}
@@ -5268,9 +5293,17 @@ fn route_input_action(
     settings_active: &Arc<AtomicBool>,
     user_picker_active: &Arc<AtomicBool>,
 ) {
-    /* Playing media (EPIC-028): the player window covers nuubUI and the
-     * controller drives it. */
-    if mediaui::PLAYING.load(Ordering::SeqCst) {
+    /* Double L1/R1: previous/next track while music plays (screen off too). */
+    if mediaui::music_skip_input(action) {
+        return;
+    }
+    /* Media Screen Off: only Start (or Power, Quick Menu) wakes it. */
+    if mediaui::screen_off_input(weak, action) {
+        return;
+    }
+    /* A video plays (EPIC-028): the player window covers nuubUI and the
+     * controller drives it. Music plays behind nuubUI and takes no input. */
+    if mediaui::PLAYING_VIDEO.load(Ordering::SeqCst) {
         mediaui::handle_player(action);
         return;
     }
@@ -5389,7 +5422,7 @@ fn route_input_action(
         if matches!(
             action,
             "menu_up" | "menu_down" | "menu_left" | "menu_right" |
-            "menu_confirm" | "menu_back" | "face_west"
+            "menu_confirm" | "menu_back" | "face_north" | "face_west" | "tab_prev" | "tab_next"
         ) {
             let action = action.to_owned();
             let weak = weak.clone();
@@ -5407,7 +5440,7 @@ fn route_input_action(
         if matches!(
             action,
             "menu_up" | "menu_down" | "menu_left" | "menu_right" |
-            "menu_confirm" | "menu_back" | "face_west"
+            "menu_confirm" | "menu_back" | "face_north" | "face_west" | "select"
         ) {
             let action = action.to_owned();
             let weak = weak.clone();
@@ -5457,6 +5490,20 @@ fn route_input_action(
             });
         }
         /* Moonlight is left with Back, not with Start. */
+        return;
+    }
+
+    if netplayui::ACTIVE.load(Ordering::SeqCst) {
+        if matches!(action, "menu_up" | "menu_down" | "menu_left" | "menu_right" | "menu_confirm" | "menu_back") {
+            let action = action.to_owned();
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    netplayui::handle_action(&ui, &action);
+                    netplayui::refresh(&ui);
+                }
+            });
+        }
         return;
     }
 
@@ -6000,7 +6047,7 @@ fn main() -> Result<(), slint::PlatformError> {
     /* Also with nobody signed in yet: the user picker wears the last
      * user's Mood (themes::apply_active). */
     if ui.get_active_user_id().is_empty() { themes::apply_active(&ui); }
-    start_users_listener(&ui,user_picker_active.clone()); start_regional_listener(&ui); syncui::start_listener(&ui);
+    start_users_listener(&ui,user_picker_active.clone()); start_regional_listener(&ui); syncui::start_listener(&ui); castui::start_listener(&ui);
     start_localization_listener(&ui); start_status_listener(&ui);
     start_wifi_product_listener(&ui);
     start_bluetooth_product_listener(&ui);

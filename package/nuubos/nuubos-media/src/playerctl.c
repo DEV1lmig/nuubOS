@@ -2,8 +2,9 @@
 /*
  * nuubos-playerctl — command line client of nuubos-mediad (tests, the
  * pre-power hook): sends one command line, prints the reply.
- *   nuubos-playerctl status | watch | play PATH [START] | playdir DIR FILE |
- *                    pause | seek S | next | prev | sub | audio | stop | pre-power
+ *   nuubos-playerctl status | watch | queue | play PATH [START [audio]] |
+ *                    playdir DIR FILE | pause | seek S | seekto S | next | prev |
+ *                    jump I | shuffle | repeat | volume V | key ACTION | labels W... | sub | audio | stop | pre-power
  */
 
 #include <stdio.h>
@@ -23,13 +24,14 @@ int main(int argc, char **argv)
 	struct timeval tv = { 12, 0 };
 	char cmd[4096] = "", buf[4096];
 	const char *verb = argc > 1 ? argv[1] : "";
-	int multi = !strcmp(verb, "status") || !strcmp(verb, "watch");
+	int multi = !strcmp(verb, "status") || !strcmp(verb, "watch") || !strcmp(verb, "queue");
 	int watch = !strcmp(verb, "watch");
 	int fd, ok = 0;
 
 	if (!verb[0]) {
-		fprintf(stderr, "Usage: nuubos-playerctl status|watch|play PATH [START]|playdir DIR FILE|"
-				"pause|seek S|next|prev|sub|audio|stop|pre-power\n");
+		fprintf(stderr, "Usage: nuubos-playerctl status|watch|queue|play PATH [START [audio]]|"
+				"playdir DIR FILE|pause|seek S|seekto S|next|prev|jump I|shuffle|repeat|volume V|"
+				"sub|audio|stop|pre-power\n");
 		return 2;
 	}
 	if (watch)

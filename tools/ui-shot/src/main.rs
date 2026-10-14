@@ -190,14 +190,62 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
         shot(win, w, h, "qm_game_slot_dropdown");
     }
     qm.set_game_slot_dropdown_open(false);
+    /* Cheats (40) and Netplay (41) with their sheets. */
+    let model = |v: Vec<&str>| ModelRc::from(Rc::new(VecModel::from(v.into_iter().map(SharedString::from).collect::<Vec<_>>())));
+    let kinds = |v: Vec<i32>| ModelRc::from(Rc::new(VecModel::from(v)));
+    qm.set_game_cheats_value("2 on".into());
+    qm.set_game_net_value("Hosting • 1 connected".into());
+    qm.set_selected_index(40);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_cheats_row");
+    }
+    qm.set_game_sheet_row(40);
+    qm.set_game_sheet_title("Cheats".into());
+    qm.set_game_sheet_titles(model(vec!["Cheat List", "Infinite Maximum Coins", "Powerup Always In Level",
+        "In-level music mod", "Spare Item Type (In-Level)", "Spare Item Type (On Map)", "Invincibility", "Moon Jump"]));
+    qm.set_game_sheet_values(model(vec!["Super Mario World (USA) (Game Genie)", "", "", "", "", "", "", ""]));
+    qm.set_game_sheet_kinds(kinds(vec![0, 2, 1, 1, 2, 1, 1, 1]));
+    qm.set_game_sheet_index(1);
+    qm.set_game_sheet_scroll(0);
+    qm.set_game_sheet_open(true);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_cheats");
+    }
+    qm.set_selected_index(41);
+    qm.set_game_sheet_row(41);
+    qm.set_game_sheet_title("Netplay".into());
+    qm.set_game_sheet_titles(model(vec!["Hosting • 1 connected", "Stop Hosting"]));
+    qm.set_game_sheet_values(model(vec!["", ""]));
+    qm.set_game_sheet_kinds(kinds(vec![3, 0]));
+    qm.set_game_sheet_index(1);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_netplay");
+    }
+    qm.set_game_sheet_open(false);
+    qm.set_game_net_value("".into());
+    qm.set_game_cheats_value("".into());
     /* Hardcore session: no state rows. */
     qm.set_game_hardcore(true);
-    for (name, sel) in [("qm_game_hardcore", 8), ("qm_game_hardcore_quit", 14)] {
+    qm.set_game_cheats_value("Not available in Hardcore Mode".into());
+    qm.set_game_net_value("Not available in Hardcore Mode".into());
+    for (name, sel) in [("qm_game_hardcore", 8), ("qm_game_hardcore_quit", 14), ("qm_game_hardcore_cheats", 40)] {
         qm.set_selected_index(sel);
         for (w, h) in sizes {
             shot(win, w, h, name);
         }
     }
+    qm.set_game_sheet_row(40);
+    qm.set_game_sheet_title("Cheats".into());
+    qm.set_game_sheet_titles(model(vec!["Not available in Hardcore Mode"]));
+    qm.set_game_sheet_values(model(vec![""]));
+    qm.set_game_sheet_kinds(kinds(vec![3]));
+    qm.set_game_sheet_open(true);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_hardcore_cheats_sheet");
+    }
+    qm.set_game_sheet_open(false);
+    qm.set_game_cheats_value("".into());
+    qm.set_game_net_value("".into());
     qm.set_game_hardcore(false);
     /* Audio output dropdown over a game: the row is near the bottom, the
      * dropdown opens above it. */
@@ -214,7 +262,12 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
     qm.set_stream_latency_label("4 ms".into());
     qm.set_stream_decode_label("1.6 ms".into());
     qm.set_stream_video_label("640×480 • 60 fps".into());
-    for (name, sel, confirm) in [("qm_stream", 15, -1), ("qm_stream_close", 17, 17)] {
+    for (name, sel, confirm, overlay) in [
+        ("qm_stream", 15, -1, false),
+        ("qm_stream_overlay", 38, -1, true),
+        ("qm_stream_close", 17, 17, false),
+    ] {
+        qm.set_stream_overlay_on(overlay);
         qm.set_selected_index(sel);
         qm.set_game_confirm_index(confirm);
         for (w, h) in sizes {
@@ -241,6 +294,54 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
         shot(win, w, h, "qm_web");
     }
     qm.set_web_section_visible(false);
+    /* MUSIC (2026-10-12): the user's music over Home, then over a game
+     * with the mixer (Music / Game volume). */
+    qm.set_music_section_visible(true);
+    qm.set_music_playing(true);
+    qm.set_music_title("One More Time • Daft Punk".into());
+    qm.set_music_volume(65);
+    qm.set_game_volume(80);
+    for (name, game, sel) in [("qm_music_home", false, 31), ("qm_music_game", true, 34)] {
+        qm.set_game_section_visible(game);
+        qm.set_selected_index(sel);
+        for (w, h) in sizes {
+            shot(win, w, h, name);
+        }
+    }
+    qm.set_game_section_visible(false);
+    qm.set_music_section_visible(false);
+    /* Cast Screen (EPIC-029): the row while casting, the receiver
+     * dropdown over Home, then over a game (low-delay receivers only). */
+    qm.set_cast_row_visible(true);
+    qm.set_cast_label("Living Room TV".into());
+    qm.set_selected_index(39);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_cast");
+    }
+    let opts = |items: &[&str]| -> ModelRc<SharedString> {
+        ModelRc::from(Rc::new(VecModel::from(items.iter().map(|k| SharedString::from(*k)).collect::<Vec<_>>())))
+    };
+    qm.set_cast_options(opts(&[
+        "Stop Casting",
+        "Living Room TV • Google Cast",
+        "Office PC • Miracast",
+        "Bedroom TV • DLNA • with delay",
+    ]));
+    qm.set_cast_dropdown_index(1);
+    qm.set_cast_dropdown_open(true);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_cast_dropdown");
+    }
+    qm.set_game_section_visible(true);
+    qm.set_cast_label("Off".into());
+    qm.set_cast_options(opts(&["Living Room TV • Google Cast", "Office PC • Miracast"]));
+    qm.set_cast_dropdown_index(0);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_cast_game");
+    }
+    qm.set_cast_dropdown_open(false);
+    qm.set_cast_row_visible(false);
+    qm.set_game_section_visible(false);
     qm.set_menu_panel_visible(false);
     qm.set_surface_mode(2);
     let row = |keys: &[&str]| -> ModelRc<SharedString> {
@@ -301,6 +402,16 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
         card.set_toast_battery(battery);
         card.set_toast_progress(progress);
         shot(win, 416, 88, &format!("notif_{name}"));
+    }
+    card.hide().unwrap();
+    drop(card);
+    /* Stream performance overlay: the bottom strip surface (58 px). */
+    let hud = StreamHudWindow::new().unwrap();
+    hud.show().unwrap();
+    hud.set_line_one("14:32   BAT 78%   1280×720   60 fps   18.4 Mbps".into());
+    hud.set_line_two(format!("{} 4 ms ±1   {} 5.1 ms   {} 3.2 ms   {} 0.0%", t(1190), t(1191), t(1192), t(1193)).into());
+    for w in [640u32, 720, 1280] {
+        shot(win, w, 58, "stream_overlay");
     }
 }
 
@@ -406,6 +517,19 @@ fn main() {
         })),
         ("display_audio", Box::new(|ui| { ui.set_settings_selected_index(4); ui.set_settings_view(18); ui.set_display_audio_index(2); ui.set_display_audio_scroll_offset(0); })),
         ("display_audio_sounds", Box::new(|ui| { ui.set_display_color_temperature_available(true); ui.set_display_audio_index(9); ui.set_display_audio_scroll_offset(5); })),
+        ("display_audio_cast", Box::new(|ui| {
+            ui.set_settings_open(true); ui.set_settings_selected_index(4); ui.set_settings_view(18);
+            ui.set_display_color_temperature_available(false);
+            ui.set_cast_available(true); ui.set_cast_audio(true); ui.set_cast_latency("low".into());
+            ui.set_cast_h264("installed".into()); ui.set_cast_encoder_value(s(ui, 1220).into());
+            ui.set_display_audio_index(12); ui.set_display_audio_scroll_offset(9);
+        })),
+        ("display_audio_cast_download", Box::new(|ui| {
+            ui.set_settings_open(true); ui.set_settings_selected_index(4); ui.set_settings_view(18);
+            ui.set_cast_available(true); ui.set_cast_latency("normal".into());
+            ui.set_cast_h264("installing".into()); ui.set_cast_encoder_value(s(ui, 1221).replace("{0}", "42").into());
+            ui.set_display_audio_index(12); ui.set_display_audio_scroll_offset(9);
+        })),
         ("system", Box::new(|ui| { ui.set_display_color_temperature_available(false); ui.set_settings_selected_index(6); ui.set_settings_view(19); ui.set_system_index(5); ui.set_system_scroll_offset(0); })),
         ("power", Box::new(|ui| { ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(1); ui.set_power_scroll_offset(0); })),
         ("power_devices", Box::new(|ui| { ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(5); ui.set_power_scroll_offset(3); })),
@@ -469,10 +593,10 @@ fn main() {
             ui.set_details_description("Mario and Luigi travel to Dinosaur Land, where Bowser has kidnapped Princess Toadstool again. With the help of Yoshi, they explore seven worlds full of secret exits, hidden switches and castles. Ride Yoshi, fly with the cape feather and discover the Star Road to reach the hardest levels. The adventure spans 96 exits and a final battle in Bowser's castle.".into());
             ui.set_details_cover(art(200, 280, (40, 90, 200), (120, 40, 160), true)); ui.set_details_has_cover(true);
             ui.set_details_backdrop(art(96, 72, (30, 110, 60), (20, 40, 110), false)); ui.set_details_has_backdrop(true);
-            ui.set_details_chips(chips(&[(11, "1-2", false), (1, &s(ui, 789).replace("{0}", "90"), false),
-                (12, &format!("{}  •  12 h 05 min", s(ui, 403)), false)]));
+            ui.set_details_chips(chips(&[(35, &s(ui, 1233), false), (13, &s(ui, 1236), true), (11, "1-2", false),
+                (1, &s(ui, 789).replace("{0}", "90"), false), (12, &format!("{}  •  12 h 05 min", s(ui, 403)), false)]));
             ui.set_details_actions(actions(&[(0, s(ui, 413), true, false, false), (1, s(ui, 412), false, true, false),
-                (2, s(ui, 537), false, false, false), (3, s(ui, 524), false, false, false),
+                (2, s(ui, 537), false, false, false), (35, s(ui, 1230), false, false, false), (3, s(ui, 524), false, false, false),
                 (5, s(ui, 560), false, false, false), (9, s(ui, 549), false, false, false), (10, s(ui, 544), false, false, false)]));
             ui.set_details_caption("snes/Super Mario World (USA).sfc".into()); ui.set_details_caption_armed(false);
             ui.set_details_desc_step(0); ui.set_gen_notice("".into());
@@ -480,6 +604,10 @@ fn main() {
         ("game_details_scrolled", Box::new(|ui| {
             ui.set_gen_index(2); ui.set_details_desc_step(1);
             ui.set_details_caption("Platformers, Favorites of the year".into());
+        })),
+        ("game_details_tags", Box::new(|ui| {
+            ui.set_gen_index(3); ui.set_details_desc_step(0);
+            ui.set_details_caption(format!("{}, {}", s(ui, 1233), s(ui, 1236)).into());
         })),
         ("game_delete", Box::new(|ui| {
             ui.set_gen_index(6); ui.set_details_desc_step(0);
@@ -506,8 +634,21 @@ fn main() {
             ui.set_details_title("Super Mario World".into()); ui.set_gen_section(s(ui, 524).into());
             ui.set_details_subtitle("Nintendo Entertainment System".into());
             ui.set_gen_rows(gen(&[(&s(ui, 525), &s(ui, 528).replace("{0}", "snes9x"), "", true, -1),
+                (&s(ui, 1253), "", "", true, -1),
                 (&s(ui, 526), "4:3", "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
                 (&s(ui, 535), "", &s(ui, 536), false, -1)]));
+        })),
+        ("game_settings_core_download", Box::new(|ui| {
+            ui.set_gen_index(1);
+            let rows = gen(&[(&s(ui, 525), "bsnes", "", true, -1),
+                (&s(ui, 1254), "42%", "", false, -1),
+                (&s(ui, 526), "4:3", "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
+                (&s(ui, 535), "", &s(ui, 536), false, -1)]);
+            let mut r = rows.row_data(1).unwrap();
+            r.progress_shown = true;
+            r.progress = 0.42;
+            rows.set_row_data(1, r);
+            ui.set_gen_rows(rows);
         })),
         ("bios", Box::new(|ui| {
             ui.set_details_active(false); ui.set_settings_selected_index(3); ui.set_settings_view(52); ui.set_gen_index(1); ui.set_gen_scroll(0);
@@ -558,7 +699,7 @@ fn main() {
             ui.set_op_screen_open(false); ui.set_op_kind(0);
             ui.set_notes_title(format!("{} • nuubOS 0.6", s(ui, 1005)).into());
             ui.set_notes_text(["OTA updates with two system slots and an automatic return to the previous version when the new one does not start",
-                "Update channels (Stable, Beta, Alpha) and a daily check with a notification", "Full-screen SD2 restore with progress",
+                "Update channels (Stable, RC, Nightly) and a daily check with a notification", "Full-screen SD2 restore with progress",
                 "Fix: Wi-Fi gets its address by itself after every boot", "Fix: CPU stability under load (1416 MHz maximum)",
                 "Release notes on their own screen, scrolled with the D-pad", "Faster library scan on large SD2 cards",
                 "New themes: Lagoon and Ember", "Smaller fixes and translations"].iter().map(|l| format!("•  {l}")).collect::<Vec<_>>().join("\n\n").into());
@@ -810,7 +951,7 @@ fn main() {
     scenes.push(("oob_ready", Box::new(|ui| { ui.set_avatar_picker_open(false); ui.set_oob_step(4); })));
     /* Moonlight (EPIC-025): the Settings shell with the PCs rail. */
     fn ml_host(id: &str, name: &str, address: &str, paired: bool, online: &str, probing: bool) -> MoonlightHostEntry {
-        MoonlightHostEntry { id: id.into(), name: name.into(), address: address.into(), paired, online: online.into(), probing }
+        MoonlightHostEntry { id: id.into(), name: name.into(), address: address.into(), paired, online: online.into(), probing, wol: false, waking: false }
     }
     fn ml_hosts() -> ModelRc<MoonlightHostEntry> {
         ModelRc::from(Rc::new(VecModel::from(vec![
@@ -921,17 +1062,27 @@ fn main() {
             available, focused: false, ..Default::default()
         }
     }
+    /* Game tags on the cover (library.rs tag_label/tag_color). */
+    fn tagged(mut c: HomeCard, t1: &str, c1: u32, t2: &str, c2: u32) -> HomeCard {
+        let col = |v: u32| slint::Color::from_rgb_u8((v >> 16) as u8, (v >> 8) as u8, v as u8);
+        c.tag1 = t1.into(); c.tag1_color = col(c1); c.tag2 = t2.into(); c.tag2_color = col(c2);
+        c
+    }
     fn units(mut v: Vec<HomeCard>) -> ModelRc<HomeCard> {
         let mut u = 0.0;
         for c in v.iter_mut() { c.x_units = u; u += c.aspect; }
         ModelRc::from(Rc::new(VecModel::from(v)))
     }
     let recent = units(vec![
-        card(0, "Super Mario World", "Super Nintendo  •  Last played today  •  Played 2 h 05 min", "Super Nintendo", 1.4, 0x6b5bc4, Some(cover(280, 200, (200, 60, 50))), true, true),
-        card(0, "Crash Bandicoot", "PlayStation  •  Last played yesterday", "PlayStation", 1.0, 0x3d6fb8, Some(cover(240, 240, (230, 120, 30))), true, false),
-        card(0, "Monster Hunter Freedom Unite", "PlayStation Portable  •  Last played 3 days ago", "PlayStation Portable", 0.57, 0x2c2f36, Some(cover(114, 200, (40, 140, 90))), true, false),
+        tagged(card(0, "Super Mario World", "Super Nintendo  •  Last played today  •  Played 2 h 05 min", "Super Nintendo", 1.4, 0x6b5bc4, Some(cover(280, 200, (200, 60, 50))), true, true),
+            "Playing", 0x4f9cf9, "", 0),
+        tagged(card(0, "Crash Bandicoot", "PlayStation  •  Last played yesterday", "PlayStation", 1.0, 0x3d6fb8, Some(cover(240, 240, (230, 120, 30))), true, false),
+            "Completed", 0x3ec27a, "Broken", 0xef5350),
+        tagged(card(0, "Monster Hunter Freedom Unite", "PlayStation Portable  •  Last played 3 days ago", "PlayStation Portable", 0.57, 0x2c2f36, Some(cover(114, 200, (40, 140, 90))), true, false),
+            "100%", 0xf2c94c, "", 0),
         card(0, "The Legend of Zelda: The Minish Cap", "Game Boy Advance  •  Last played 5 days ago", "Game Boy Advance", 1.0, 0x4b3fb0, None, true, false),
-        card(0, "Sonic the Hedgehog 2", "Unavailable  •  Mega Drive / Genesis", "Mega Drive / Genesis", 0.7, 0x1f4fa8, None, false, false),
+        tagged(card(0, "Sonic the Hedgehog 2", "Unavailable  •  Mega Drive / Genesis", "Mega Drive / Genesis", 0.7, 0x1f4fa8, None, false, false),
+            "Backlog", 0x8e9aaf, "", 0),
         card(0, "Final Fantasy VII", "PlayStation  •  Last played 12 days ago", "PlayStation", 1.0, 0x3d6fb8, Some(cover(240, 240, (60, 80, 160))), true, true),
     ]);
     /* System icons as shipped by nuubos-library. */
@@ -972,7 +1123,12 @@ fn main() {
             return card(0, "The Legend of Zelda II: The Adventure of Link", "Nintendo Entertainment System  •  Last played 3 days ago  •  Played 12 h 40 min",
                         "Nintendo Entertainment System", 1.4, 0xb03a2e, img, true, true);
         }
-        card(0, t, "Super Nintendo  •  Never played", "Super Nintendo", 1.4, 0x6b5bc4, img, true, i == 2)
+        let c = card(0, t, "Super Nintendo  •  Never played", "Super Nintendo", 1.4, 0x6b5bc4, img, true, i == 2);
+        match i % 5 {
+            0 => tagged(c, "Completed", 0x3ec27a, "", 0),
+            1 => tagged(c, "Dropped", 0xa08679, "Broken", 0xef5350),
+            _ => c,
+        }
     }).collect());
     /* Games copied but none played yet: the empty Recently Played card. */
     let (shelf_only, apps_only, collections_only) = (shelf.clone(), apps.clone(), collections.clone());
@@ -1120,6 +1276,17 @@ fn main() {
         ui.set_app_page_captions(captions(&["Waiting for the PC…", ""]));
     })));
     let ap = app_page.clone();
+    scenes.push(("moonlight_wake", Box::new(move |ui| {
+        ap(ui, "STREAM", "GAMING-PC", "192.168.5.20");
+        ui.set_app_page_pin("".into());
+        ui.set_settings_view(41); ui.set_moonlight_index(0);
+        ui.set_app_page_chips(chips(&[(6, "Paired", false), (18, "Offline", true)]));
+        ui.set_app_page_entries(entries(&[]));
+        ui.set_app_page_description("The PC could not be reached".into());
+        ui.set_app_page_actions(actions(&[(34, "Wake PC".into(), true, false, false), (10, "Remove PC".into(), false, false, false)]));
+        ui.set_app_page_captions(captions(&["Sends a Wake-on-LAN signal to the PC", ""]));
+    })));
+    let ap = app_page.clone();
     scenes.push(("steamlink_absent", Box::new(move |ui| {
         ap(ui, "STEAM LINK", "Steam Link", "");
         ui.set_moonlight_active(false); ui.set_steamlink_active(true); ui.set_settings_view(45); ui.set_steamlink_index(0);
@@ -1142,7 +1309,35 @@ fn main() {
         ui.set_app_page_captions(captions(&["Choose and pair your PC in Steam Link", "Version 1.3.9.300", ""]));
         ui.set_steamlink_index(1);
     })));
+    let ap = app_page.clone();
+    scenes.push(("netplay", Box::new(move |ui| {
+        ap(ui, "NETPLAY", "Netplay", "");
+        ui.set_steamlink_active(false); ui.set_moonlight_active(false);
+        ui.set_netplay_active(true); ui.set_settings_view(72); ui.set_gen_index(0); ui.set_gen_notice("".into());
+        ui.set_app_page_description(s(ui, 1262).into());
+        let v: Vec<AppEntry> = vec![
+            AppEntry { title: "Super Mario Kart".into(), detail: "Hosted by Alice • Super Nintendo".into(), value: s(ui, 1269).into(),
+                icon: 11, good: true, caption: "Hosted by Alice • Super Nintendo • 192.168.5.40:55435".into() },
+            AppEntry { title: "Street Fighter II' Turbo (USA)".into(), detail: "Hosted by PC-Luca".into(), value: s(ui, 1266).into(),
+                icon: 11, good: false, caption: "".into() },
+            AppEntry { title: "Bomberman '94".into(), detail: "Hosted by Bob • PC Engine".into(),
+                value: s(ui, 1267).replace("{0}", "Beetle PCE").into(), icon: 11, good: false, caption: "".into() },
+        ];
+        ui.set_app_page_entries(ModelRc::from(Rc::new(VecModel::from(v))));
+        ui.set_app_page_actions(actions(&[(17, s(ui, 1263), false, false, false)]));
+        ui.set_app_page_captions(captions(&[""]));
+    })));
+    let ap = app_page.clone();
+    scenes.push(("netplay_empty", Box::new(move |ui| {
+        ap(ui, "NETPLAY", "Netplay", "");
+        ui.set_netplay_active(true); ui.set_settings_view(72); ui.set_gen_index(0);
+        ui.set_app_page_description(s(ui, 1265).into());
+        ui.set_app_page_entries(entries(&[]));
+        ui.set_app_page_actions(actions(&[(17, s(ui, 1263), true, false, false)]));
+        ui.set_app_page_captions(captions(&[""]));
+    })));
     scenes.push(("app_page_done", Box::new(|ui| {
+        ui.set_netplay_active(false);
         ui.set_steamlink_active(false); ui.set_moonlight_active(false); ui.set_settings_open(false); ui.set_settings_view(0);
     })));
     scenes.push(("launch", Box::new(|ui| {
@@ -1246,6 +1441,167 @@ fn main() {
         ui.set_sync_guide_index(0); ui.set_sync_guide_step(5);
     })));
     scenes.push(("sync_closed", Box::new(|ui| { ui.set_sync_guide_open(false); ui.set_settings_open(false); })));
+    /* Media (2026-10-12): shelves, grid, album, Now Playing. */
+    fn mtile(title: &str, sub: &str, kind: i32, art: Option<slint::Image>, progress: f32, badge: &str, tint: (u8, u8, u8)) -> MediaTile {
+        MediaTile { title: title.into(), subtitle: sub.into(), has_art: art.is_some(), art: art.unwrap_or_default(), kind, progress,
+            badge: badge.into(), tint: slint::Color::from_rgb_u8(tint.0, tint.1, tint.2) }
+    }
+    fn hints(items: &[(&str, i32, &str)]) -> ModelRc<AppHint> {
+        ModelRc::from(Rc::new(VecModel::from(items.iter().map(|(k, r, l)| AppHint { kind: (*k).into(), role: *r, label: (*l).into() }).collect::<Vec<_>>())))
+    }
+    fn tracks(items: &[(&str, &str, &str, bool)]) -> ModelRc<MediaTrack> {
+        ModelRc::from(Rc::new(VecModel::from(items.iter().map(|(n, t, d, c)| MediaTrack { number: (*n).into(), title: (*t).into(), detail: (*d).into(), current: *c }).collect::<Vec<_>>())))
+    }
+    let media_base = |ui: &HomeWindow| {
+        ui.set_details_active(true); ui.set_library_open(false); ui.set_settings_choice_open(false);
+        ui.set_details_shell_title("Media".into()); ui.set_settings_view(65); ui.set_settings_open(true);
+        ui.set_moonlight_active(false); ui.set_steamlink_active(false); ui.set_files_open(false); ui.set_media_open(true);
+        ui.set_app_kicker("MEDIA".into());
+        ui.set_select_face_position(2); ui.set_back_face_position(1); ui.set_context_face_position(0); ui.set_details_face_position(3);
+        ui.set_media_notice("".into());
+    };
+    let mb = media_base.clone();
+    scenes.push(("media_home", Box::new(move |ui| {
+        mb(ui);
+        let shelf = |title: &str, tiles: Vec<MediaTile>, shape: i32| MediaShelf { title: title.into(), tiles: ModelRc::from(Rc::new(VecModel::from(tiles))), shape };
+        let cont = vec![mtile("Big Buck Bunny", "Resume from 4:12", 0, Some(cover(320, 180, (230, 140, 60))), 0.42, "", (0, 0, 0)),
+            mtile("Sintel", "Resume from 31:05", 0, None, 0.7, "", (140, 90, 230)), mtile("Tears of Steel", "", 0, None, 0.1, "", (60, 180, 140))];
+        let videos = vec![mtile("Cosmos Laundromat", "", 0, Some(cover(200, 300, (60, 120, 220))), -1.0, "", (0, 0, 0)),
+            mtile("Agent 327", "3 videos", 1, None, -1.0, "3", (220, 90, 120)), mtile("Spring", "", 0, Some(cover(200, 300, (90, 200, 120))), -1.0, "", (0, 0, 0)),
+            mtile("Caminandes Llamigos", "", 0, None, -1.0, "", (240, 150, 60)), mtile("Elephants Dream", "", 0, None, -1.0, "", (60, 160, 200)),
+            mtile("Coffee Run", "", 0, None, -1.0, "", (200, 160, 40))];
+        let music = vec![mtile("Shuffle All", "", 4, None, -1.0, "", (58, 134, 255)),
+            mtile("Discovery", "Daft Punk • 14 tracks", 2, Some(cover(240, 240, (200, 60, 160))), -1.0, "", (0, 0, 0)),
+            mtile("Random Access Memories", "Daft Punk • 13 tracks", 2, None, -1.0, "", (210, 170, 60)),
+            mtile("In Rainbows", "Radiohead • 10 tracks", 2, Some(cover(240, 240, (240, 120, 40))), -1.0, "", (0, 0, 0)),
+            mtile("Songs", "8 tracks", 2, None, -1.0, "", (80, 170, 140))];
+        let lists = vec![mtile("Road Trip", "24 tracks", 2, None, -1.0, "", (140, 90, 230)), mtile("New Playlist", "", 4, None, -1.0, "", (58, 134, 255))];
+        let browse = vec![mtile("Internal Storage", "56.5 GB free", 6, None, -1.0, "", (100, 110, 140)), mtile("SD2", "60.2 GB free", 6, None, -1.0, "", (100, 110, 140)),
+            mtile("NAS", "Network Share", 6, None, -1.0, "", (100, 110, 140)), mtile("Jellyfin", "Signed in as eli", 3, None, -1.0, "", (110, 80, 200))];
+        let _ = (music, lists);
+        let shelves = vec![shelf("Continue Watching", cont, 2), shelf("Videos", videos, 0), shelf("Browse", browse, 1)];
+        ui.set_media_shelves(ModelRc::from(Rc::new(VecModel::from(shelves))));
+        ui.set_media_shelf_indices(ModelRc::from(Rc::new(VecModel::from(vec![0, 2, 0]))));
+        ui.set_media_section(1);
+        ui.set_media_shelf_index(0);
+        ui.set_media_screen(0);
+        ui.set_media_hero_title("Big Buck Bunny".into()); ui.set_media_hero_subtitle("Resume from 4:12".into());
+        ui.set_media_backdrop(cover(24, 14, (230, 140, 60))); ui.set_media_has_backdrop(true);
+        ui.set_media_np_active(false);
+        ui.set_app_hints(hints(&[("face", 0, "Play"), ("face", 1, "Back"), ("face", 3, "Options")]));
+    })));
+    scenes.push(("media_home_music", Box::new(|ui| {
+        let shelf = |title: &str, tiles: Vec<MediaTile>, shape: i32| MediaShelf { title: title.into(), tiles: ModelRc::from(Rc::new(VecModel::from(tiles))), shape };
+        let albums = vec![mtile("Shuffle All", "", 9, None, -1.0, "", (58, 134, 255)),
+            mtile("Discovery", "Daft Punk • 14 tracks", 2, Some(cover(240, 240, (200, 60, 160))), -1.0, "", (0, 0, 0)),
+            mtile("Random Access Memories", "Daft Punk • 13 tracks", 2, None, -1.0, "", (210, 170, 60)),
+            mtile("In Rainbows", "Radiohead • 10 tracks", 2, Some(cover(240, 240, (240, 120, 40))), -1.0, "", (0, 0, 0))];
+        let lists = vec![mtile("Road Trip", "24 tracks", 2, None, -1.0, "", (140, 90, 230)), mtile("New Playlist", "", 4, None, -1.0, "", (58, 134, 255))];
+        ui.set_media_shelves(ModelRc::from(Rc::new(VecModel::from(vec![shelf("Albums", albums, 1), shelf("Playlists", lists, 1)]))));
+        ui.set_media_shelf_indices(ModelRc::from(Rc::new(VecModel::from(vec![1, 0]))));
+        ui.set_media_section(0);
+        ui.set_media_shelf_index(0);
+        ui.set_media_hero_title("Discovery".into()); ui.set_media_hero_subtitle("Daft Punk • 14 tracks".into());
+        ui.set_media_backdrop(cover(24, 24, (200, 60, 160)));
+        ui.set_media_np_active(true); ui.set_media_np_playing(true);
+        ui.set_media_np_title("One More Time".into()); ui.set_media_np_artist("Daft Punk".into());
+        ui.set_media_np_has_art(true); ui.set_media_np_art(cover(64, 64, (200, 60, 160)));
+        ui.set_media_np_position(83.0); ui.set_media_np_duration(320.0);
+        ui.set_app_hints(hints(&[("face", 0, "Open"), ("face", 1, "Back"), ("face", 3, "Options"), ("face", 2, "Now Playing")]));
+    })));
+    scenes.push(("media_grid", Box::new(|ui| {
+        let t: Vec<MediaTile> = (0..14).map(|i| mtile(&format!("Episode {}", i + 1), "", 0, if i % 3 == 0 { Some(cover(200, 300, (60 + i * 10, 120, 200))) } else { None },
+            if i == 2 { 0.5 } else { -1.0 }, "", ((40 + i * 15) as u8, 120, 200))).collect();
+        ui.set_media_grid_tiles(ModelRc::from(Rc::new(VecModel::from(t))));
+        ui.set_media_grid_title("AGENT 327".into()); ui.set_media_grid_shape(0); ui.set_media_grid_index(6);
+        ui.set_media_hero_title("Episode 7".into()); ui.set_media_hero_subtitle("Agent 327 • 3:52".into());
+        ui.set_media_screen(1);
+    })));
+    scenes.push(("media_album", Box::new(|ui| {
+        ui.set_media_album_title("Discovery".into()); ui.set_media_album_artist("Daft Punk".into()); ui.set_media_album_meta("14 tracks".into());
+        ui.set_media_album_art(cover(300, 300, (200, 60, 160))); ui.set_media_album_has_art(true);
+        ui.set_media_album_tracks(tracks(&[("1", "One More Time", "5:20", true), ("2", "Aerodynamic", "3:27", false), ("3", "Digital Love", "4:58", false),
+            ("4", "Harder, Better, Faster, Stronger", "3:44", false), ("5", "Crescendolls", "3:31", false), ("6", "Nightvision", "1:44", false),
+            ("7", "Superheroes", "3:57", false), ("8", "High Life", "3:21", false), ("9", "Something About Us", "3:51", false)]));
+        ui.set_media_album_index(3); ui.set_media_screen(2);
+        ui.set_media_backdrop(cover(24, 24, (200, 60, 160)));
+        ui.set_app_hints(hints(&[("face", 0, "Play"), ("face", 1, "Back"), ("face", 3, "Options"), ("face", 2, "Now Playing")]));
+    })));
+    scenes.push(("media_album_buttons", Box::new(|ui| { ui.set_media_album_index(-2); ui.set_media_album_has_art(false); })));
+    scenes.push(("media_np", Box::new(|ui| {
+        ui.set_media_screen(3);
+        ui.set_media_np_album("Discovery • FLAC • 24-bit • 96 kHz".into());
+        ui.set_media_np_elapsed("1:23".into()); ui.set_media_np_total("5:20".into());
+        ui.set_media_np_shuffle(true); ui.set_media_np_repeat(2);
+        ui.set_media_np_queue(tracks(&[("1", "One More Time", "", true), ("2", "Aerodynamic", "", false), ("3", "Digital Love", "", false),
+            ("4", "Harder, Better, Faster, Stronger", "", false), ("5", "Crescendolls", "", false), ("6", "Nightvision", "", false)]));
+        ui.set_media_np_zone(1); ui.set_media_np_control(2); ui.set_media_np_queue_index(0);
+        ui.set_app_hints(hints(&[("face", 0, "Select"), ("face", 1, "Back"), ("face", 3, "Screen Off")]));
+    })));
+    scenes.push(("media_np_paused", Box::new(|ui| { ui.set_media_np_zone(1); ui.set_media_np_has_art(false); ui.set_media_np_playing(false); })));
+    scenes.push(("media_empty", Box::new(|ui| {
+        ui.set_media_screen(0); ui.set_media_np_active(false); ui.set_media_has_backdrop(false);
+        ui.set_media_shelves(ModelRc::default()); ui.set_media_hero_title("".into()); ui.set_media_hero_subtitle("".into());
+        ui.set_media_empty_text(ui.get_i18n_strings().row_data(1121).unwrap_or_default());
+    })));
+    /* Settings tab (2026-10-14): rows like Moonlight's Stream Settings. */
+    scenes.push(("media_settings", Box::new(|ui| {
+        ui.set_media_shelves(ModelRc::default());
+        ui.set_media_section(2); ui.set_media_screen(0);
+        ui.set_media_has_backdrop(false); ui.set_media_np_active(false);
+        ui.set_lighting_supported(true);
+        ui.set_media_rgb_follow(true); ui.set_media_rgb_keep(false); ui.set_media_settings_index(0);
+        ui.set_app_hints(hints(&[("face", 0, "Select"), ("face", 1, "Back")]));
+    })));
+    /* Files (2026-10-12): two-pane commander. */
+    fn frow(name: &str, detail: &str, icon: i32, marked: bool, usage: f32) -> FileRow {
+        FileRow { name: name.into(), detail: detail.into(), icon, marked, dim: false, usage }
+    }
+    scenes.push(("files_commander", Box::new(|ui| {
+        ui.set_media_open(false); ui.set_files_open(true); ui.set_app_kicker("FILES".into()); ui.set_details_shell_title("Files".into()); ui.set_settings_view(58);
+        ui.set_details_active(true); ui.set_settings_open(true);
+        ui.set_select_face_position(2); ui.set_back_face_position(1); ui.set_context_face_position(0); ui.set_details_face_position(3);
+        let rows = |v: Vec<FileRow>| ModelRc::from(Rc::new(VecModel::from(v)));
+        ui.set_files_left(FilePane { title: "Places".into(), path: "".into(), places: true, loading: false, index: 0, rows: rows(vec![
+            frow("Internal Storage", "56.5 GB free / 58.1 GB", 6, false, 0.03), frow("SD2", "60.2 GB free / 62.5 GB", 7, false, 0.04),
+            frow("KINGSTON", "3.1 GB free / 15.9 GB", 8, false, 0.81), frow("NAS", "//nas/media • Connect to open it", 9, false, -1.0),
+            frow("Add Share", "", 10, false, -1.0)]) });
+        ui.set_files_right(FilePane { title: "Internal Storage".into(), path: "/roms/snes".into(), places: false, loading: false, index: 3, rows: rows(vec![
+            frow("..", "", 11, false, -1.0), frow("Hacks", "", 0, false, -1.0), frow("Chrono Trigger (USA).sfc", "4.2 MB", 12, true, -1.0),
+            frow("Donkey Kong Country 2 - Diddy's Kong Quest (USA) (Rev 1).sfc", "4.2 MB", 12, true, -1.0), frow("EarthBound (USA).sfc", "3.1 MB", 12, false, -1.0),
+            frow("F-Zero (USA).sfc", "524 KB", 12, false, -1.0), frow("Super Metroid (Japan, USA) (En,Ja).sfc", "3.1 MB", 12, false, -1.0),
+            frow("Super Mario World (USA).sfc", "524 KB", 12, false, -1.0), frow("cover.png", "312 KB", 2, false, -1.0), frow("notes.txt", "2 KB", 1, false, -1.0),
+            frow("The Legend of Zelda - A Link to the Past (USA).sfc", "1.0 MB", 12, false, -1.0), frow("Yoshi's Island (USA).sfc", "2.1 MB", 12, false, -1.0)]) });
+        ui.set_files_active(1);
+        ui.set_files_status("Donkey Kong Country 2 - Diddy's Kong Quest (USA) (Rev 1).sfc • 4.2 MB • 12 ottobre 2026 14:02".into());
+        ui.set_files_status_right("2 selected • 56.5 GB free".into());
+        ui.set_files_progress(-1.0); ui.set_files_notice("".into()); ui.set_files_sort_label("Sort: Name".into());
+        ui.set_app_hints(hints(&[("face", 1, "Back"), ("face", 2, "Mark"), ("face", 3, "Actions"), ("select", 0, "Sort")]));
+    })));
+    scenes.push(("files_copying", Box::new(|ui| {
+        ui.set_files_active(0);
+        ui.set_files_progress(0.46); ui.set_files_progress_label("Copying Chrono Trigger (USA).sfc (1/2)".into());
+    })));
+    scenes.push(("files_actions", Box::new(|ui| {
+        ui.set_files_progress(-1.0); ui.set_files_active(1);
+        let o: Vec<SettingsChoiceEntry> = [1139, 1140, 1275, 618, 523, 612, 1144]
+            .iter().map(|&k| SettingsChoiceEntry { value: k.to_string().into(), label: s(ui, k).into() }).collect();
+        ui.set_settings_choice_title("2 selected".into());
+        ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o))));
+        ui.set_settings_choice_index(2); ui.set_settings_choice_scroll(0); ui.set_settings_choice_open(true);
+    })));
+    /* Add to Library (2026-10-14): the one question of a PS1 .m3u + .chd set, then the job. */
+    scenes.push(("files_import_ask", Box::new(|ui| {
+        let o: Vec<SettingsChoiceEntry> = ["Dreamcast", "Neo Geo CD", "PC Engine", "PC Engine CD", "PlayStation", "Sega CD", "Sega Saturn"]
+            .iter().map(|l| SettingsChoiceEntry { value: (*l).into(), label: (*l).into() }).collect();
+        ui.set_settings_choice_title(s(ui, 1276).replace("{0}", "Final Fantasy VII (USA).m3u (+3)").into());
+        ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o))));
+        ui.set_settings_choice_index(4); ui.set_settings_choice_scroll(0); ui.set_settings_choice_open(true);
+    })));
+    scenes.push(("files_importing", Box::new(|ui| {
+        ui.set_files_progress(0.37); ui.set_files_progress_label(s(ui, 1277).replace("{0}", "Final Fantasy VII (USA)").into());
+    })));
+    scenes.push(("files_closed", Box::new(|ui| { ui.set_files_open(false); ui.set_settings_open(false); ui.set_app_hints(ModelRc::default()); })));
     let only = std::env::var("ONLY").unwrap_or_default();
     for (name, f) in &scenes {
         if !only.is_empty() && !only.split(',').any(|o| name.starts_with(o)) {

@@ -13,6 +13,8 @@
 #   /tmp/vtest on the target and runs it there (the screen shows the clip).
 #   Grab the screen meanwhile with tools/grab-target.sh to check the image.
 #   Never run it while the user is playing or streaming.
+#   SLICES=N (env, H.264 only, default 1) encodes N slices per frame, like
+#   NVENC/Sunshine hosts do.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HOST=root@192.168.5.36
@@ -20,6 +22,7 @@ if [ "${1:-}" = "-H" ]; then HOST="$2"; shift 2; fi
 SIZE="${1:?usage: run.sh [-H host] WIDTHxHEIGHT [fps] [h264|hevc]}"
 FPS="${2:-60}"
 CODEC="${3:-h264}"
+SLICES="${SLICES:-1}"
 W="${SIZE%x*}"
 H="${SIZE#*x}"
 OUT="$ROOT/output/moonlight-vdec"
@@ -36,12 +39,12 @@ fi
     "$B/xdg-shell-protocol.c" "$B/viewporter-protocol.c" "$B/linux-dmabuf-unstable-v1-protocol.c" \
     -o "$OUT/vdec-test" -lavcodec -lavutil -lwayland-client -lpthread || exit 1
 
-CLIP="$OUT/$CODEC-${W}x$H-$FPS.bin"
+CLIP="$OUT/$CODEC-${W}x$H-$FPS-s$SLICES.bin"
 if [ ! -f "$CLIP" ]; then
     if [ "$CODEC" = hevc ]; then
         ENC=(-c:v libx265 -x265-params aud=1:repeat-headers=1:bframes=0:log-level=error)
     else
-        ENC=(-c:v libx264 -profile:v high -bf 0 -x264-params aud=1:repeat-headers=1:sliced-threads=0:slices=1)
+        ENC=(-c:v libx264 -profile:v high -bf 0 -x264-params aud=1:repeat-headers=1:sliced-threads=0:slices=$SLICES)
     fi
     ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=size=${W}x${H}:rate=$FPS" -t 15 \
         -pix_fmt yuv420p -preset veryfast -tune zerolatency -g 9999 -b:v 10M "${ENC[@]}" \
