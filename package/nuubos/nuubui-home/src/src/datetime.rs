@@ -18,10 +18,16 @@ use std::thread;
 
 const YEAR_MIN: i32 = 2020;
 const YEAR_MAX: i32 = 2099;
-/* i18n: 875.. months, 887.. weekdays (Monday first), 894.. field labels. */
+/* i18n: 875.. months, 887.. weekdays (Monday first), 894.. field labels;
+ * 1287.. months as written inside a date (case, genitive: "15 października",
+ * "15 октября"), 1299 the date pattern ({0} day, {1} month, {2} year), 1300
+ * the same with the weekday ({3}): each language orders its own date. */
 const MONTHS: usize = 875;
 const WEEKDAYS: usize = 887;
 const LABELS: usize = 894;
+const DATE_MONTHS: usize = 1287;
+const DATE_PATTERN: usize = 1299;
+const DATE_WEEKDAY_PATTERN: usize = 1300;
 
 thread_local! {
     /* year, month, day, hour, minute */
@@ -49,13 +55,17 @@ fn month_name(ui: &HomeWindow, month: i32) -> String {
     tr(ui, MONTHS + (month - 1) as usize, "")
 }
 
-/* Month inside a sentence: lowercase where the language writes it so. */
-fn month_in_text(ui: &HomeWindow, month: i32) -> String {
-    let name = month_name(ui, month);
-    match ui.get_ui_language_code().as_str() {
-        "it" | "es" | "fr" | "pt" | "nl" => name.to_lowercase(),
-        _ => name,
-    }
+/* A full date in the UI language; weekday: Monday = 0. */
+fn format_date(ui: &HomeWindow, y: i32, m: i32, d: i32, weekday: Option<usize>) -> String {
+    let pattern = match weekday {
+        Some(_) => tr(ui, DATE_WEEKDAY_PATTERN, "{3} {0} {1} {2}"),
+        None => tr(ui, DATE_PATTERN, "{0} {1} {2}"),
+    };
+    pattern
+        .replace("{0}", &d.to_string())
+        .replace("{1}", &tr(ui, DATE_MONTHS + (m - 1) as usize, &month_name(ui, m)))
+        .replace("{2}", &y.to_string())
+        .replace("{3}", &weekday.map(|w| tr(ui, WEEKDAYS + w, "")).unwrap_or_default())
 }
 
 /* "10 October 2026" from regionald's local_date (YYYY-MM-DD); the raw
@@ -63,7 +73,7 @@ fn month_in_text(ui: &HomeWindow, month: i32) -> String {
 pub(crate) fn date_label(ui: &HomeWindow, iso: &str) -> String {
     let parts: Vec<i32> = iso.split('-').filter_map(|p| p.parse().ok()).collect();
     match parts[..] {
-        [y, m, d] if (1..=12).contains(&m) => format!("{d} {} {y}", month_in_text(ui, m)),
+        [y, m, d] if (1..=12).contains(&m) => format_date(ui, y, m, d, None),
         _ => iso.to_owned(),
     }
 }
@@ -98,7 +108,7 @@ fn apply(ui: &HomeWindow) {
     ];
     ui.set_datetime_fields(ModelRc::new(Rc::new(VecModel::from(fields))));
     ui.set_datetime_preview(
-        format!("{} {d} {} {y}", tr(ui, WEEKDAYS + weekday(y, mo, d), ""), month_in_text(ui, mo)).into(),
+        format_date(ui, y, mo, d, Some(weekday(y, mo, d))).into(),
     );
 }
 

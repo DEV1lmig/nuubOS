@@ -179,14 +179,17 @@ if [[ "$freq" =~ ^[0-9]+$ ]] && ((freq >= 5000)); then
     is_5g=1
     pass "5 GHz association"
 
-    if grep -Eq '40MHz|80MHz|160MHz' <<<"$tx_rate $rx_rate"; then
-        fail "RTL8821CS 5 GHz channel width exceeds 20 MHz"
+    # Patch 0012 (5 GHz limited to 20 MHz) was removed on 2026-10-15:
+    # HT40/VHT80 must be offered; the width used depends on the AP.
+    widths="$(remote "iw phy \$(iw dev $WIFI_INTERFACE info | awk '/wiphy/{print \"phy\"\$2}') channels 2>/dev/null | awk '/\\[36\\]/{f=1} f&&/Channel widths/{print; exit}'")"
+    if grep -q 'VHT80' <<<"$widths"; then
+        pass "RTL8821CS 5 GHz offers HT40/VHT80 ($(remote "iw dev $WIFI_INTERFACE info | awk '/width/{print \$6, \$7}'" | tr -d ',') in use)"
     else
-        pass "RTL8821CS 5 GHz limited to 20 MHz"
+        fail "RTL8821CS 5 GHz still limited to 20 MHz: ${widths:-no channel info}"
     fi
 elif [[ "$freq" =~ ^[0-9]+$ ]] && ((freq >= 2400 && freq < 2500)); then
     pass "2.4 GHz association"
-    skip "5 GHz HT20 production quirk not exercised"
+    skip "5 GHz channel widths not exercised"
 else
     warn "unable to classify associated Wi-Fi band"
 fi

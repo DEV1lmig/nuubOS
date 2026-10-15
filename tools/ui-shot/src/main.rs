@@ -284,6 +284,31 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
     qm.set_stream_steamlink(false);
     qm.set_stream_section_visible(false);
     qm.set_game_confirm_index(-1);
+    /* Game closing screen (surface-mode 3): with a cover (a synthetic
+     * 3:4 gradient), then without. */
+    let mut cover = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(300, 400);
+    let cw = cover.width();
+    for (i, px) in cover.make_mut_slice().iter_mut().enumerate() {
+        let (x, y) = (i as u32 % cw, i as u32 / cw);
+        *px = slint::Rgba8Pixel { r: (40 + x / 3) as u8, g: (60 + y / 4) as u8, b: 150, a: 255 };
+    }
+    qm.set_menu_panel_visible(false);
+    qm.set_surface_mode(3);
+    qm.set_closing_title("Adventure Island II - Aliens in Paradise".into());
+    qm.set_closing_system("Game Boy".into());
+    qm.set_closing_accent(slint::Color::from_rgb_u8(0x8b, 0x95, 0x6d));
+    qm.set_closing_has_cover(true);
+    qm.set_closing_cover(slint::Image::from_rgba8(cover));
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_closing");
+    }
+    qm.set_closing_has_cover(false);
+    qm.set_closing_cover(slint::Image::default());
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_closing_nocover");
+    }
+    qm.set_surface_mode(0);
+    qm.set_menu_panel_visible(true);
     /* Web Mode (EPIC-030): WEB section (Zoom adjustable), then the
      * keyboard bottom sheet surface (270 logical px high). */
     qm.set_web_section_visible(true);

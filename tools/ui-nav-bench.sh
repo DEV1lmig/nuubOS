@@ -9,7 +9,7 @@
 #
 # Usage: tools/ui-nav-bench.sh [-H root@host] [pattern] [repeat] [interval_ms]
 #   pattern  R L U D (D-pad), A (south), B (east), M (Quick Menu), + - (volume),
-#            any other char = pause
+#            N W (north/west), S (start), E (select), any other char = pause
 #            default RRRRLLLLDUDU, repeated 4 times, 250 ms apart
 #
 # Note: creating the virtual pad posts a "controller connected"

@@ -1,0 +1,18 @@
+Subject: [PATCH] DEBUG ONLY layer render log
+---
+--- a/item_rendering.rs	2026-10-15 16:06:43.898877910 +0200
++++ b/item_rendering.rs	2026-10-15 16:26:56.153324960 +0200
+@@ -809,6 +809,13 @@
+             return None;
+         };
+ 
++        if std::env::var("NUUBOS_DBG_LAYERS").is_ok() {
++            let (g, o) = crate::properties::evaluate_no_tracking(|| { let g = item_rc.geometry(); (g, item_rc.map_to_window(g.origin)) });
++            let kind = if ItemRef::downcast_pin::<Opacity>(item_rc.borrow()).is_some() { "opacity" }
++                else if ItemRef::downcast_pin::<Clip>(item_rc.borrow()).is_some() { "clip" } else { "layer" };
++            let op = crate::properties::evaluate_no_tracking(|| ItemRef::downcast_pin::<Opacity>(item_rc.borrow()).map(|o| o.opacity()).unwrap_or(1.0));
++            std::eprintln!("LAYER-RENDER {} op={:.3} at {:.0},{:.0} size {:.0}x{:.0} bounds {:.0}x{:.0}", kind, op, o.x, o.y, g.size.width, g.size.height, bounding_rect.size.width, bounding_rect.size.height);
++        }
+         let image = renderer.render_into_layer(target, item_rc, bounding_rect);
+         Some((physical_origin, image))
+     })

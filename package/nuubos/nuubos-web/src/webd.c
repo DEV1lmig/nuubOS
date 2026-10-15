@@ -30,6 +30,7 @@
  * timeout; a timer exists only while a quit is pending.
  */
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
@@ -442,10 +443,17 @@ static void user_language(const char *user, char *out, size_t size)
 	while (fgets(line, sizeof(line), fp)) {
 		line[strcspn(line, "\r\n")] = '\0';
 		if (!strncmp(line, "LANGUAGE=", 9) && line[9] &&
-		    strspn(line + 9, "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ") == strlen(line + 9))
+		    strspn(line + 9, "abcdefghijklmnopqrstuvwxyz-_ABCDEFGHIJKLMNOPQRSTUVWXYZ") == strlen(line + 9))
 			copy_text(out, size, line + 9);
 	}
 	fclose(fp);
+	/* nuubOS "zh-cn" → gettext/WebKit "zh_CN". */
+	char *region = strchr(out, '-');
+	if (region) {
+		*region = '_';
+		while (*++region)
+			*region = (char)toupper((unsigned char)*region);
+	}
 }
 
 static const char *start_cog(const char *url)

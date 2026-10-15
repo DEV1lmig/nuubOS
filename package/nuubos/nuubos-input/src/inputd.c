@@ -45,6 +45,8 @@
 #define MAX_VPADS 8
 #define NAV_REPEAT_INTERVAL_MS 90
 #define WEB_DEV_NAME "nuubOS Web Input"
+/* Steam Link: keys for Valve's app (F6 = its statistics). */
+#define STREAM_KEYS_NAME "nuubOS Stream Keys"
 
 /* Analog stick poll rate (kernel patch 0106 lets /sys/.../poll go up to
  * 100 ms): the device-tree 4 ms only while a game owns the controllers,
@@ -1067,7 +1069,8 @@ static void rescan_inputs(void)
 		/* Our own game gamepads and browser input are outputs,
 		 * never inputs. */
 		if (strncmp(name, VPAD_NAME, strlen(VPAD_NAME)) == 0 ||
-		    strcmp(name, WEB_DEV_NAME) == 0) {
+		    strcmp(name, WEB_DEV_NAME) == 0 ||
+		    strcmp(name, STREAM_KEYS_NAME) == 0) {
 			close(fd);
 			continue;
 		}
@@ -1426,6 +1429,11 @@ static bool vpad_guide;
 #define PADPRESS_SOUTH 0x2
 #define PADPRESS_NORTH 0x4
 static unsigned int pad_inject;
+/* PADKEY: a uinput keyboard that lives with GAMEPADS ON guide. Valve's
+ * statistics chord (modifier + Y) takes its modifier from the PC's
+ * controller configuration; F6 always works. The Quick Menu never takes the
+ * Wayland keyboard focus, so the key reaches Valve's window under it. */
+static int stream_keys_fd = -1;
 /*
  * Game hotkeys (CLAUDE §18.2): the Quick Menu button is a modifier while a
  * game runs. Held with a chord control it triggers an Emulation Service
@@ -1717,6 +1725,57 @@ static void refresh_screen_off(void)
 	apply_stick_poll();
 }
 
+static void stream_keys_set(bool enabled)
+{
+	struct uinput_setup setup;
+	int fd;
+
+	if (!enabled) {
+		if (stream_keys_fd >= 0) {
+			(void)ioctl(stream_keys_fd, UI_DEV_DESTROY);
+			close(stream_keys_fd);
+			stream_keys_fd = -1;
+		}
+		return;
+	}
+	if (stream_keys_fd >= 0)
+		return;
+	fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0)
+		return;
+	(void)ioctl(fd, UI_SET_EVBIT, EV_KEY);
+	(void)ioctl(fd, UI_SET_KEYBIT, KEY_F6);
+	memset(&setup, 0, sizeof(setup));
+	setup.id.bustype = BUS_VIRTUAL;
+	setup.id.product = 0x101;
+	setup.id.version = 1;
+	snprintf(setup.name, sizeof(setup.name), "%s", STREAM_KEYS_NAME);
+	if (ioctl(fd, UI_DEV_SETUP, &setup) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) {
+		log_message("stream keys create failed errno=%d", errno);
+		close(fd);
+		return;
+	}
+	stream_keys_fd = fd;
+}
+
+/* PADKEY <name>: one press and release on the stream keyboard. */
+static void stream_key_tap(int code)
+{
+	struct input_event ev[4];
+	int i;
+
+	if (stream_keys_fd < 0)
+		return;
+	memset(ev, 0, sizeof(ev));
+	for (i = 0; i < 4; i++) {
+		ev[i].type = (i % 2) ? EV_SYN : EV_KEY;
+		ev[i].code = (i % 2) ? SYN_REPORT : (unsigned short)code;
+		ev[i].value = (i == 0) ? 1 : 0;
+	}
+	if (write(stream_keys_fd, ev, sizeof(ev)) != (ssize_t)sizeof(ev))
+		log_message("stream keys write failed errno=%d", errno);
+}
+
 static void set_gamepads(bool enabled)
 {
 	if (gamepads_on == enabled)
@@ -1730,6 +1789,7 @@ static void set_gamepads(bool enabled)
 		sync_vpads();
 	else
 		destroy_vpads();
+	stream_keys_set(enabled && vpad_guide);
 	sync_input_grab();
 	apply_stick_poll();
 }
@@ -2518,6 +2578,12 @@ static void handle_command(struct client *client, const char *line)
 	if (strncmp(line, "PADPRESS ", 9) == 0 && client->owns_gamepads) {
 		set_pad_inject((unsigned int)strtoul(line + 9, NULL, 16) &
 			       (PADPRESS_MODE | PADPRESS_SOUTH | PADPRESS_NORTH));
+		(void)write_all(client->fd, "OK\n");
+		return;
+	}
+
+	if (strcmp(line, "PADKEY F6") == 0 && client->owns_gamepads) {
+		stream_key_tap(KEY_F6);
 		(void)write_all(client->fd, "OK\n");
 		return;
 	}

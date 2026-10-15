@@ -18,7 +18,7 @@
 #define USER_DIR "/run/nuubos/user"
 #define ACTIVE_USER USER_DIR "/active"
 #define MAX_CLIENTS 8
-#define LANGS "en,it,fr,de,es,pt,nl"
+#define LANGS "en,it,fr,de,es,es-419,pt,pt-br,nl,pl,cs,sv,da,nb,fi,hu,ro,tr,el,ru,uk,id,vi,th,hi,ja,zh-cn,zh-tw,ko"
 
 struct client { int fd; bool subscribed; char buf[256]; size_t used; };
 static struct client clients[MAX_CLIENTS];
@@ -45,7 +45,7 @@ static int write_all(int fd, const char *s)
 
 static bool language_supported(const char *code)
 {
-    static const char *langs[] = {"en","it","fr","de","es","pt","nl"};
+    static const char *langs[] = {"en","it","fr","de","es","es-419","pt","pt-br","nl","pl","cs","sv","da","nb","fi","hu","ro","tr","el","ru","uk","id","vi","th","hi","ja","zh-cn","zh-tw","ko"};
     size_t i;
     for (i = 0; i < sizeof(langs)/sizeof(langs[0]); i++)
         if (strcmp(code, langs[i]) == 0) return true;

@@ -2431,6 +2431,10 @@ static void user_language(char out[8])
 		trim(line);
 		if (!strncmp(line, "LANGUAGE=", 9) && strlen(line + 9) == 2)
 			copy_text(out, 8, line + 9);
+		else if (!strncmp(line, "LANGUAGE=", 9) && strlen(line + 9) > 3 && line[11] == '-') {
+			line[11] = '\0'; /* zh-cn, pt-br, es-419: the scraper's key */
+			copy_text(out, 8, line + 9);
+		}
 	}
 	fclose(fp);
 }

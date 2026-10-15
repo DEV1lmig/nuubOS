@@ -672,6 +672,10 @@ static void user_language(char *out, size_t size)
 	snprintf(path, sizeof(path), STATE_ROOT "/users/%s/localization.conf", user);
 	if (conf_value(path, "LANGUAGE", lang, sizeof(lang)) && strlen(lang) == 2)
 		copy_text(out, size, lang);
+	else if (strlen(lang) > 3 && lang[2] == '-') {
+		lang[2] = '\0'; /* zh-cn, pt-br, es-419: the sources' language */
+		copy_text(out, size, lang);
+	}
 }
 
 /* ------------------------------------------------------------------ */

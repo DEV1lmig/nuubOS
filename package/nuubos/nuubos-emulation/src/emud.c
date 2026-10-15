@@ -788,6 +788,7 @@ static size_t build_status(char *out, size_t size)
 			 "netplay=%s\n"
 			 "netplay_peers=%d\n"
 			 "netplay_peer=%s\n"
+			 "quitting=%d\n"
 			 "end=1\n",
 			 state_name(),
 			 session.state == SESSION_IDLE ? "" : session.game,
@@ -807,7 +808,14 @@ static size_t build_status(char *out, size_t size)
 			 : session.netplay == NET_HOST ? "host"
 			 : session.netplay == NET_CLIENT ? "client"
 			 : session.net_launch[0] ? "starting" : "off",
-			 session.net_peers, session.net_peer);
+			 session.net_peers, session.net_peer,
+			 /* The game is closing: quit asked (its automatic save may
+			 * still run) or RetroArch exiting. The Quick Menu covers it
+			 * with the closing screen; not when it restarts as netplay
+			 * host. */
+			 !session.relaunch_host &&
+			 (session.state == SESSION_EXITING ||
+			  (session.state == SESSION_RUNNING && session.quit_requested)) ? 1 : 0);
 
 	return n < 0 ? 0 : (size_t)n < size ? (size_t)n : size - 1;
 }
@@ -992,7 +1000,12 @@ static int retroarch_language(const char *user)
 		int retro;
 	} langs[] = {
 		{ "en", 0 }, { "fr", 2 }, { "es", 3 }, { "de", 4 },
-		{ "it", 5 }, { "nl", 6 }, { "pt", 8 },
+		{ "it", 5 }, { "nl", 6 }, { "pt", 8 }, { "ja", 1 },
+		{ "ru", 9 }, { "ko", 10 }, { "zh-tw", 11 }, { "zh-cn", 12 },
+		{ "pl", 14 }, { "el", 17 }, { "tr", 18 }, { "fi", 23 },
+		{ "sv", 25 }, { "uk", 26 }, { "cs", 27 }, { "hu", 31 },
+		{ "nb", 34 }, { "es-419", 3 }, { "pt-br", 7 }, { "id", 24 },
+		/* RetroArch has no Danish or Romanian: English. */
 	};
 	char path[PATH_MAX];
 	char line[128];
@@ -1434,6 +1447,7 @@ static void default_settings(struct emu_settings *e)
 	memset(e, 0, sizeof(*e));
 	e->slots = DEFAULT_SLOTS;
 	e->slot_rotation = true;
+	e->bezels = true; /* user decision 2026-10-15 */
 	e->crt = true;
 	copy_text(e->overlay_items, sizeof(e->overlay_items), DEFAULT_OVERLAY_ITEMS);
 	for (int i = 0; i < HK_COUNT; i++)
@@ -3352,6 +3366,7 @@ static void request_quit(void)
 	 * goes into the next slot first (once; a failed save still quits). */
 	if (session.settings.slot_rotation && !session.hardcore && !session.quit_saved) {
 		session.quit_requested = true;
+		notify_subscribers();
 		if (session.pending != PENDING_NONE)
 			return;
 		session.quit_saved = true;

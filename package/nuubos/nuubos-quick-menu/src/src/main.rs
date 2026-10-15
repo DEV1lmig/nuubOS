@@ -11,7 +11,10 @@ use slint::platform::{
     },
     Platform, PlatformError, WindowAdapter, WindowEvent,
 };
-use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedString, VecModel};
+use slint::{
+    ComponentHandle, Model, ModelRc, PhysicalSize, Rgba8Pixel, SharedPixelBuffer, SharedString,
+    VecModel,
+};
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -67,6 +70,7 @@ const STATUS_STATE: &str = "/run/nuubos/statusd.state";
 const STATUS_SOCKET: &str = "/run/nuubos/statusd.sock";
 const NOTIFY_SOCKET: &str = "/run/nuubos/notifyd.sock";
 const EMULATION_SOCKET: &str = "/run/nuubos/emud.sock";
+const LIBRARY_SOCKET: &str = "/run/nuubos/libraryd.sock";
 const STREAM_SOCKET: &str = "/run/nuubos/streamd.sock";
 const WEB_SOCKET: &str = "/run/nuubos/webd.sock";
 const MEDIA_SOCKET: &str = "/run/nuubos/mediad.sock";
@@ -204,6 +208,8 @@ enum SurfaceKind {
     Toast,
     Keyboard,
     StreamHud,
+    /* Game closing screen: full screen, display only. */
+    Closing,
 }
 
 impl SurfaceKind {
@@ -211,6 +217,7 @@ impl SurfaceKind {
         match self {
             SurfaceKind::Volume => 1,
             SurfaceKind::Keyboard => 2,
+            SurfaceKind::Closing => 3,
             _ => 0,
         }
     }
@@ -350,7 +357,7 @@ impl WaylandState {
                 layer_surface.set_size(0, KEYBOARD_SURFACE_HEIGHT);
                 layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
             }
-            SurfaceKind::Full => {
+            SurfaceKind::Full | SurfaceKind::Closing => {
                 layer_surface.set_size(0, 0);
                 layer_surface.set_anchor(
                     Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
@@ -1413,6 +1420,8 @@ enum AppEvent {
     Input(LogicalEvent),
     /* Emulation Service session snapshot (nuubos-emud). */
     Game(GameSnapshot),
+    /* What the game closing screen shows for the running game. */
+    GameInfo(ClosingInfo),
     /* PC Game Streaming Service: a stream runs (nuubos-streamd). */
     Stream(StreamState),
     /* One statistics sample of the stream for the performance overlay
@@ -2655,6 +2664,9 @@ fn flush_brightness(
 #[derive(Debug, Clone, Default)]
 struct GameSnapshot {
     running: bool,
+    /* Quit asked or RetroArch exiting: the closing screen covers it. */
+    quitting: bool,
+    game: String,
     paused: bool,
     slot: i32,
     slots: i32,
@@ -2677,6 +2689,8 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
     for line in reply.lines() {
         match line.split_once('=') {
             Some(("state", value)) => snapshot.running = value == "running",
+            Some(("quitting", value)) => snapshot.quitting = value == "1",
+            Some(("game", value)) => snapshot.game = value.to_owned(),
             Some(("paused", value)) => snapshot.paused = value == "1",
             Some(("slot", value)) => snapshot.slot = value.parse().unwrap_or(0),
             Some(("slots", value)) => snapshot.slots = value.parse().unwrap_or(10),
@@ -3192,6 +3206,107 @@ fn start_game_subscription(tx: Sender<AppEvent>) {
         /* Only reached while emud is absent or restarting. */
         thread::sleep(Duration::from_secs(1));
     });
+}
+
+/* Game closing screen (user request 2026-10-15): Home's loading screen
+ * again while the game saves and exits. Its title, system, colour and cover
+ * come from nuubos-libraryd as soon as the game runs, so the screen is ready
+ * the moment the quit starts. */
+#[derive(Debug, Clone)]
+struct ClosingInfo {
+    game: String,
+    title: String,
+    system: String,
+    accent: u32,
+    cover: Option<SharedPixelBuffer<Rgba8Pixel>>,
+}
+
+fn library_command(command: &str) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(LIBRARY_SOCKET)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.write_all(command.as_bytes())?;
+    stream.write_all(b"\n")?;
+    let mut reply = String::new();
+    for line in BufReader::new(stream).lines() {
+        let line = line?;
+        let done = line == "end=1" || line.starts_with("ERR");
+        reply.push_str(&line);
+        reply.push('\n');
+        if done {
+            break;
+        }
+    }
+    Ok(reply)
+}
+
+fn fetch_closing_info(tx: Sender<AppEvent>, game: String) {
+    thread::spawn(move || {
+        let mut info = ClosingInfo {
+            game: game.clone(),
+            title: String::new(),
+            system: String::new(),
+            accent: 0x2a3140,
+            cover: None,
+        };
+        let mut system_id = String::new();
+        let mut cover_path = String::new();
+        for line in library_command(&format!("DETAILS\t{game}")).unwrap_or_default().lines() {
+            if let Some(v) = line.strip_prefix("game=") {
+                let f: Vec<&str> = v.split('\t').collect();
+                system_id = f.get(1).unwrap_or(&"").to_string();
+                info.title = f.get(2).unwrap_or(&"").to_string();
+                cover_path = f.get(3).unwrap_or(&"").to_string();
+            } else if let Some(v) = line.strip_prefix("system_name=") {
+                info.system = v.to_owned();
+            }
+        }
+        if !system_id.is_empty() {
+            let status = library_command("STATUS").unwrap_or_default();
+            let color = status.lines().filter_map(|l| l.strip_prefix("system=")).find_map(|v| {
+                let f: Vec<&str> = v.split('\t').collect();
+                (f.first() == Some(&system_id.as_str())).then(|| f.get(4).copied()).flatten()
+            });
+            if let Some(v) = color.and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok()) {
+                info.accent = v;
+            }
+        }
+        if !cover_path.is_empty() {
+            info.cover = slint::Image::load_from_path(std::path::Path::new(&cover_path))
+                .ok()
+                .and_then(|image| image.to_rgba8())
+                .map(round_cover_corners);
+        }
+        let _ = tx.send(AppEvent::GameInfo(info));
+    });
+}
+
+/* Rounded corners like Home's covers (radius 6 % of the height, as its
+ * cover frame): an image is not clipped by a rounded parent. */
+fn round_cover_corners(mut buffer: SharedPixelBuffer<Rgba8Pixel>) -> SharedPixelBuffer<Rgba8Pixel> {
+    let (w, h) = (buffer.width() as f32, buffer.height() as f32);
+    let r = (h * 0.06).min(w / 2.0);
+    let width = buffer.width() as usize;
+    for (i, px) in buffer.make_mut_slice().iter_mut().enumerate() {
+        let (x, y) = ((i % width) as f32 + 0.5, (i / width) as f32 + 0.5);
+        let cx = x.clamp(r, w - r);
+        let cy = y.clamp(r, h - r);
+        let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+        let coverage = (r - d + 0.5).clamp(0.0, 1.0);
+        if coverage < 1.0 {
+            px.a = (px.a as f32 * coverage + 0.5) as u8;
+        }
+    }
+    buffer
+}
+
+fn apply_closing_info(ui: &QuickMenuWindow, info: Option<&ClosingInfo>) {
+    let accent = info.map(|i| i.accent).unwrap_or(0x2a3140);
+    ui.set_closing_title(info.map(|i| i.title.as_str()).unwrap_or("").into());
+    ui.set_closing_system(info.map(|i| i.system.as_str()).unwrap_or("").into());
+    ui.set_closing_accent(slint::Color::from_rgb_u8((accent >> 16) as u8, (accent >> 8) as u8, accent as u8));
+    let cover = info.and_then(|i| i.cover.clone());
+    ui.set_closing_has_cover(cover.is_some());
+    ui.set_closing_cover(cover.map(slint::Image::from_rgba8).unwrap_or_default());
 }
 
 /* PC stream (EPIC-025). The stream runs while the menu is open: nothing
@@ -4858,7 +4973,9 @@ fn present(
         return redraw_overlay(ui, queue, state, qh, conn);
     }
 
-    let want = if ui.get_kb_visible() {
+    let want = if ui.get_closing_active() {
+        Some(SurfaceKind::Closing)
+    } else if ui.get_kb_visible() {
         Some(SurfaceKind::Keyboard)
     } else {
         ui.get_volume_osd_visible().then_some(SurfaceKind::Volume)
@@ -5775,6 +5892,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut perf = PerfOverlay::default();
     /* Last game snapshot and the overlay line built from it. */
     let mut game = GameSnapshot::default();
+    /* Closing screen data of the running game (fetched once per game). */
+    let mut closing_info: Option<ClosingInfo> = None;
+    let mut closing_game = String::new();
     let mut perf_line = String::new();
     let mut animation_deadline: Option<Instant> = None;
     let mut pending_sleep = false;
@@ -5863,6 +5983,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         && passive.is_some()
                         && !mapped
                         && !ui.get_lifecycle_active()
+                        && !ui.get_closing_active()
                     {
                         /* Hotkey can promote a transient volume OSD surface into the
                          * real Quick Menu.  Destroy the non-interactive surface first
@@ -5969,12 +6090,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         dirty = true;
                     }
                 }
+                AppEvent::GameInfo(info) => {
+                    if info.game == closing_game {
+                        if ui.get_closing_active() {
+                            apply_closing_info(&ui, Some(&info));
+                            dirty = true;
+                        }
+                        closing_info = Some(info);
+                    }
+                }
                 AppEvent::StreamStats(fields) => {
                     hud.sample(&ui, &fields);
                     hud_dirty = true;
                 }
                 AppEvent::Game(snapshot) => {
                     apply_game_snapshot(&ui, &snapshot);
+                    if snapshot.running && !snapshot.game.is_empty() && snapshot.game != closing_game {
+                        closing_game = snapshot.game.clone();
+                        closing_info = None;
+                        fetch_closing_info(tx.clone(), closing_game.clone());
+                    }
+                    if snapshot.quitting != ui.get_closing_active() {
+                        if snapshot.quitting {
+                            apply_closing_info(&ui, closing_info.as_ref());
+                        } else {
+                            apply_closing_info(&ui, None);
+                        }
+                        ui.set_closing_active(snapshot.quitting);
+                        dirty = true;
+                    }
+                    if !snapshot.running && !snapshot.quitting {
+                        /* Session over: drop the decoded cover. */
+                        closing_info = None;
+                        closing_game.clear();
+                    }
                     perf_line = if snapshot.running && snapshot.overlay && !snapshot.paused && !mapped {
                         perf_text(&ui, &snapshot)
                     } else {

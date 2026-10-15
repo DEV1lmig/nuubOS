@@ -25,7 +25,7 @@
  * REFRESH [<host>], PAIR <host>, PAIR_CANCEL, APPS <host>,
  * LAUNCH <host> <app>, QUIT [close], WAKE <host>, BUTTON <home|quick-access>
  * (Steam Link too, through inputd PADPRESS; there SET overlay toggles Valve's
- * own statistics with Steam + Y for the session),
+ * own statistics with F6 (inputd PADKEY) for the session),
  * SET <key> <value> reply OK or ERR <reason> at once and report progress in
  * the snapshot; STATS replies "OK key=value..." with the running stream's
  * statistics; SUBSCRIBE_STATS replies OK, then pushes one "stats
@@ -162,7 +162,6 @@
  * game gamepad, which Valve's app forwards). */
 #define PADPRESS_MODE 0x1
 #define PADPRESS_SOUTH 0x2
-#define PADPRESS_NORTH 0x4
 
 /* Settings (per user). Defaults live only here. */
 #define DEFAULT_RESOLUTION "auto"
@@ -253,7 +252,7 @@ struct stream {
 	char last_stats[384];
 	int power_client;
 	bool steamlink;     /* the session is Steam Link, not a Moonlight stream */
-	bool sl_stats;      /* Valve's statistics toggled on (Steam + Y) */
+	bool sl_stats;      /* Valve's statistics toggled on (F6) */
 };
 
 static volatile sig_atomic_t stop_requested;
@@ -1286,7 +1285,7 @@ static bool stats_wanted(void)
  * Steam's menu, which the console keeps for its own Quick Menu, or Home + A
  * (Steam's Quick Access menu). Moonlight sends them in the stream (BUTTONS);
  * for Steam Link inputd holds them on the game gamepad Valve's app reads
- * (PADPRESS), and Steam + Y toggles Valve's statistics ("stats"). */
+ * (PADPRESS). */
 static bool start_buttons(const char *which)
 {
 	static const int home[] = { BUTTON_HOME, 0 };
@@ -1294,9 +1293,6 @@ static bool start_buttons(const char *which)
 	static const int sl_home[] = { PADPRESS_MODE, 0 };
 	static const int sl_quick_access[] = {
 		PADPRESS_MODE, PADPRESS_MODE | PADPRESS_SOUTH, PADPRESS_MODE, 0
-	};
-	static const int sl_stats[] = {
-		PADPRESS_MODE, PADPRESS_MODE | PADPRESS_NORTH, PADPRESS_MODE, 0
 	};
 	const int *steps;
 	int count;
@@ -1306,9 +1302,6 @@ static bool start_buttons(const char *which)
 		count = 2;
 	} else if (!strcmp(which, "quick-access")) {
 		steps = stream.steamlink ? sl_quick_access : quick_access;
-		count = 4;
-	} else if (!strcmp(which, "stats") && stream.steamlink) {
-		steps = sl_stats;
 		count = 4;
 	} else {
 		return false;
@@ -1506,6 +1499,13 @@ static const char *steamlink_locale(void)
 	} langs[] = {
 		{ "de", "german" }, { "en", "english" }, { "es", "spanish" }, { "fr", "french" },
 		{ "it", "italian" }, { "nl", "dutch" }, { "pt", "portuguese" },
+		{ "pl", "polish" }, { "cs", "czech" }, { "sv", "swedish" }, { "da", "danish" },
+		{ "nb", "norwegian" }, { "fi", "finnish" }, { "hu", "hungarian" },
+		{ "ro", "romanian" }, { "tr", "turkish" }, { "el", "greek" },
+		{ "ru", "russian" }, { "uk", "ukrainian" }, { "ja", "japanese" },
+		{ "zh-cn", "schinese" }, { "zh-tw", "tchinese" }, { "ko", "koreana" },
+		{ "es-419", "latam" }, { "pt-br", "brazilian" }, { "vi", "vietnamese" },
+		{ "th", "thai" }, { "id", "indonesian" },
 	};
 	char path[PATH_MAX];
 	char line[128];
@@ -1555,6 +1555,12 @@ static void steamlink_session_env(void)
 	/* The Steam button sequences (PADPRESS) arrive while the Quick Menu
 	 * has the focus; inputd forwards nothing else meanwhile. */
 	setenv("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1", 1);
+	/* The player recreates its renderer when its display changes (TV
+	 * switched off and on: HDMI output gone, panel enabled, HDMI back).
+	 * Left to choose, SDL then tried desktop OpenGL, which this system
+	 * does not have: no renderer, every frame dropped, a frozen stream
+	 * (2026-10-15). GLES2 is what it uses at start. */
+	setenv("SDL_RENDER_DRIVER", "opengles2", 1);
 	setenv("LANG", "C.UTF-8", 1);
 }
 
@@ -2578,7 +2584,11 @@ static void handle_command(struct client *c, char *line)
 			/* Steam Link: Valve's own statistics, for this session. */
 			bool on = !strcmp(args[1], "1");
 
-			if (on != stream.sl_stats && start_buttons("stats"))
+			/* F6 on inputd's stream keyboard: Valve's chord
+			 * (modifier + Y) takes its modifier from the PC's
+			 * controller configuration. */
+			if (on != stream.sl_stats && stream.input_fd >= 0 &&
+			    write_all(stream.input_fd, "PADKEY F6\n", 10) == 0)
 				stream.sl_stats = on;
 			reply(c, "OK\n");
 			notify_subscribers();

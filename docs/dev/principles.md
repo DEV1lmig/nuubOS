@@ -31,7 +31,7 @@ Verify license/provenance before including or publishing anything redistributed 
 Never auto-format a non-nuubOS TF2 (explicit confirmation only). Reset System Settings never erases ROMs, BIOS, saves or USERDATA. SYSTEM/STATE are never shown as user storage.
 
 ## Cross-cutting UI rules (§11, §12)
-- Localization: every visible string goes through localization and is translated into all languages (de en es fr it nl pt); UI language is a per-user preference. Mechanics: ui.md.
+- Localization: every visible string goes through localization and is translated into all 29 catalog languages (list and mechanics: ui.md); UI language is a per-user preference. Mechanics: ui.md.
 - Responsive: native adaptive layouts for 4:3 640×480, square 720×720, 16:9/TV/4K (breakpoints/variants, no uniform scaling of a master canvas; 640×480 is not the only layout).
 - Controller-first: everything usable without touch/mouse; logical actions, never Xbox/Nintendo labels; face-button hints = four dots with the relevant position filled, from the active mapping.
 - Efficiency: no redraw, frames, polling or purposeless animation when nothing changes.

@@ -1,0 +1,9 @@
+config BR2_PACKAGE_NUUBOS_FONTS_NOTO
+	bool "nuubOS Noto fonts (CJK, Thai, Devanagari)"
+	help
+	  Glyph fallback for the interface languages Cantarell does not
+	  cover: Noto Sans CJK (Japanese, Chinese, Korean; Regular and
+	  Bold OpenType collections), Noto Sans Thai and Noto Sans
+	  Devanagari. SIL Open Font License 1.1.
+
+	  https://github.com/notofonts

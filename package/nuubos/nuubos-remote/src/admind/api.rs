@@ -340,7 +340,7 @@ pub fn action(b: &Value) -> R {
         "audio.test" => { sock_ok("audiod", &format!("TEST {}", one_of(&a("v"), &["START", "STOP"])?))?; done("audio") }
 
         /* Language, time, keyboard. */
-        "lang.set" => { sock_ok("localizationd", &format!("SET LANGUAGE {}", one_of(&a("v"), &["en", "it", "fr", "de", "es", "pt", "nl"])?))?; ok() }
+        "lang.set" => { sock_ok("localizationd", &format!("SET LANGUAGE {}", one_of(&a("v"), &["en", "it", "fr", "de", "es", "es-419", "pt", "pt-br", "nl", "pl", "cs", "sv", "da", "nb", "fi", "hu", "ro", "tr", "el", "ru", "uk", "id", "vi", "th", "hi", "ja", "zh-cn", "zh-tw", "ko"])?))?; ok() }
         "tz.set" => { sock_ok("regionald", &format!("SET_TIMEZONE\t{}", token(&a("v"))?))?; ok() }
         "time.auto" => { sock_ok("regionald", &format!("SET_AUTOMATIC_TIME\t{}", flag(&a("v"))?))?; ok() }
         "time.set" => {

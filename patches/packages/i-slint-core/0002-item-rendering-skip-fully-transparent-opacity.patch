@@ -1,0 +1,29 @@
+From: nuubOS <nuubos@localhost>
+Subject: [PATCH] item_rendering: skip fully transparent Opacity items
+
+Opacity::need_layer() is true for any opacity below 1 when the item has
+more than one child, 0 included, so an invisible subtree was rendered into
+a layer and blended at alpha 0 on every frame. With FemtoVG on the H700
+Mali-G31 two such full-window layers cost two full-screen texture blits
+per frame (~7 ms of GPU at 1280x720) while nuubOS Home showed nothing of
+them. Skip an Opacity item whose opacity is 0 together with its children.
+
+Signed-off-by: nuubOS
+---
+--- a/item_rendering.rs	2026-10-15 15:58:30.007621003 +0200
++++ b/item_rendering.rs	2026-10-15 15:58:40.493270209 +0200
+@@ -219,6 +219,14 @@
+             let render_result = if renderer.global_alpha_transparent() {
+                 // apply_opacity only multiplies, so the whole subtree stays transparent.
+                 RenderingResult::ContinueRenderingWithoutChildren
++            } else if ItemRef::downcast_pin::<Opacity>(item).is_some_and(|o| o.opacity() <= 0.0) {
++                // nuubOS: a fully transparent Opacity draws nothing. With more
++                // than one child it used to be rendered into a layer and
++                // blended at alpha 0 on every frame (FemtoVG): two invisible
++                // full-window layers cost two full-screen blits per frame on
++                // nuubOS Home. The opacity is read here, inside the rendering
++                // tracker, so the subtree is drawn again once it fades in.
++                RenderingResult::ContinueRenderingWithoutChildren
+             } else if do_draw
+                || item.as_ref().clips_children()
+                // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children

@@ -4,8 +4,11 @@
  * reproducibly without a person pressing buttons. Never shipped.
  *
  * Usage: uinput-nav [pattern] [interval_ms] [repeat]
- *   pattern: R L U D (D-pad), A (south), B (east), M (mode: Quick Menu),
- *            + - (volume up/down), [ ] (L1/R1), any other char = pause; default "RRRRLLLLDUDU"
+ *   pattern: R L U D (D-pad), A (south), B (east), N (north), W (west),
+ *            S (start), E (select), M (mode: Quick Menu), + - (volume
+ *            up/down), [ ] (L1/R1), any other char = pause;
+ *            default "RRRRLLLLDUDU"; "@" = persistent pad, sequences
+ *            "PATTERN INTERVAL_MS" read from stdin, one per line"
  */
 #include <fcntl.h>
 #include <linux/uinput.h>
@@ -46,6 +49,25 @@ static void press(int code)
 	emit(EV_SYN, SYN_REPORT, 0);
 }
 
+static void play(const char *pattern, long interval, int repeat)
+{
+	for (int r = 0; r < repeat; r++) {
+		for (const char *p = pattern; *p; p++) {
+			int code = *p == 'R' ? BTN_DPAD_RIGHT : *p == 'L' ? BTN_DPAD_LEFT :
+				   *p == 'U' ? BTN_DPAD_UP : *p == 'D' ? BTN_DPAD_DOWN :
+				   *p == 'A' ? BTN_SOUTH : *p == 'B' ? BTN_EAST :
+				   *p == 'M' ? BTN_MODE : *p == '+' ? KEY_VOLUMEUP :
+				   *p == '-' ? KEY_VOLUMEDOWN : *p == '[' ? BTN_TL :
+				   *p == ']' ? BTN_TR : *p == 'N' ? BTN_NORTH :
+				   *p == 'W' ? BTN_WEST : *p == 'S' ? BTN_START :
+				   *p == 'E' ? BTN_SELECT : -1;
+			if (code >= 0)
+				press(code);
+			msleep(interval);
+		}
+	}
+}
+
 int main(int argc, char **argv)
 {
 	const char *pattern = argc > 1 ? argv[1] : "RRRRLLLLDUDU";
@@ -53,7 +75,8 @@ int main(int argc, char **argv)
 	int repeat = argc > 3 ? atoi(argv[3]) : 1;
 	static const int keys[] = { BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT,
 				    BTN_DPAD_RIGHT, BTN_SOUTH, BTN_EAST, BTN_MODE,
-				    KEY_VOLUMEUP, KEY_VOLUMEDOWN, BTN_TL, BTN_TR };
+				    KEY_VOLUMEUP, KEY_VOLUMEDOWN, BTN_TL, BTN_TR,
+				    BTN_NORTH, BTN_WEST, BTN_START, BTN_SELECT };
 	struct uinput_setup setup;
 	size_t i;
 
@@ -79,18 +102,22 @@ int main(int argc, char **argv)
 	/* Let inputd/controllersd pick the device up. */
 	msleep(1500);
 
-	for (int r = 0; r < repeat; r++) {
-		for (const char *p = pattern; *p; p++) {
-			int code = *p == 'R' ? BTN_DPAD_RIGHT : *p == 'L' ? BTN_DPAD_LEFT :
-				   *p == 'U' ? BTN_DPAD_UP : *p == 'D' ? BTN_DPAD_DOWN :
-				   *p == 'A' ? BTN_SOUTH : *p == 'B' ? BTN_EAST :
-				   *p == 'M' ? BTN_MODE : *p == '+' ? KEY_VOLUMEUP :
-				   *p == '-' ? KEY_VOLUMEDOWN : *p == '[' ? BTN_TL :
-				   *p == ']' ? BTN_TR : -1;
-			if (code >= 0)
-				press(code);
-			msleep(interval);
+	if (strcmp(pattern, "@") == 0) {
+		/* Persistent pad: one "PATTERN INTERVAL_MS" per stdin line, "done"
+		 * after each, so a measurement does not pay a controller
+		 * connection (toast, top bar) per sequence. */
+		char line[1024], pat[1000];
+		long iv;
+
+		while (fgets(line, sizeof(line), stdin)) {
+			if (sscanf(line, "%999s %ld", pat, &iv) != 2)
+				continue;
+			play(pat, iv, 1);
+			printf("done\n");
+			fflush(stdout);
 		}
+	} else {
+		play(pattern, interval, repeat);
 	}
 
 	msleep(300);

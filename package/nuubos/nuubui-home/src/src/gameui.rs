@@ -215,6 +215,24 @@ fn emulation(line: &str, multi: bool) -> String {
     request(EMULATION_SOCKET, line, multi, 3).unwrap_or_default()
 }
 
+/* Puts `items` into the model behind `current`: in place when the row
+ * count is unchanged, writing only the rows that differ, else a new model
+ * (returned for the caller to set). A new model re-instantiates every row
+ * (layout, text shaping, animations restarted): Game Details rebuilt all its
+ * buttons and chips on each left/right, ~50 ms of UI thread per press on the
+ * H700 (2026-10-15). */
+pub(crate) fn sync_model<T: Clone + PartialEq + 'static>(current: ModelRc<T>, items: Vec<T>) -> Option<ModelRc<T>> {
+    if current.row_count() == items.len() && current.as_any().is::<VecModel<T>>() {
+        for (i, item) in items.into_iter().enumerate() {
+            if current.row_data(i).as_ref() != Some(&item) {
+                current.set_row_data(i, item);
+            }
+        }
+        return None;
+    }
+    Some(ModelRc::from(Rc::new(VecModel::from(items))))
+}
+
 /* A product CLI (the service contract of these features), optionally fed
  * one secret line on stdin so it never appears in a process list. */
 pub(crate) fn run_tool(program: &str, args: &[&str], stdin_line: Option<String>) -> String {
@@ -732,8 +750,12 @@ fn render_details(ui: &HomeWindow) {
         .map(|(_, a, c)| (if c.is_empty() { path.clone() } else { c.clone() }, a.armed, a.enabled))
         .unwrap_or_default();
     let actions: Vec<DetailAction> = items.into_iter().map(|i| i.1).collect();
-    ui.set_details_actions(ModelRc::from(Rc::new(VecModel::from(actions))));
-    ui.set_details_chips(ModelRc::from(Rc::new(VecModel::from(chips))));
+    if let Some(m) = sync_model(ui.get_details_actions(), actions) {
+        ui.set_details_actions(m);
+    }
+    if let Some(m) = sync_model(ui.get_details_chips(), chips) {
+        ui.set_details_chips(m);
+    }
     ui.set_details_meta(meta.into());
     ui.set_details_caption(caption.into());
     ui.set_details_caption_armed(armed);
@@ -897,7 +919,9 @@ pub(crate) fn apply_rows_sections(ui: &HomeWindow, rows: Vec<(String, GenRow, bo
             row
         })
         .collect();
-    ui.set_gen_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+    if let Some(m) = sync_model(ui.get_gen_rows(), rows) {
+        ui.set_gen_rows(m);
+    }
     ui.set_gen_index(index);
     ui.set_gen_select(select);
     ui.set_gen_select_label("".into());
@@ -906,7 +930,9 @@ pub(crate) fn apply_rows_sections(ui: &HomeWindow, rows: Vec<(String, GenRow, bo
     ui.set_gen_split2(split2);
     ui.set_gen_split2_label(split2_label.into());
     let scopes: Vec<slint::SharedString> = scopes.iter().map(|s| s.into()).collect();
-    ui.set_gen_scopes(ModelRc::from(Rc::new(VecModel::from(scopes))));
+    if let Some(m) = sync_model(ui.get_gen_scopes(), scopes) {
+        ui.set_gen_scopes(m);
+    }
     ui.set_gen_scroll(if split > 0 {
         sectioned_scroll(ui, index, count, ui.get_gen_scroll(), (split, split2, 0))
     } else {
@@ -1594,7 +1620,9 @@ fn render_gaming(ui: &HomeWindow) {
             .collect::<Vec<GenRow>>();
         (rows, select)
     });
-    ui.set_gaming_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+    if let Some(m) = sync_model(ui.get_gaming_rows(), rows) {
+        ui.set_gaming_rows(m);
+    }
     ui.set_gaming_select(select);
 }
 
@@ -1944,7 +1972,9 @@ fn render_services(ui: &HomeWindow) {
             })
             .collect::<Vec<GenRow>>()
     });
-    ui.set_connectivity_services(ModelRc::from(Rc::new(VecModel::from(rows))));
+    if let Some(m) = sync_model(ui.get_connectivity_services(), rows) {
+        ui.set_connectivity_services(m);
+    }
 }
 
 /* Number of SERVICES rows (Connectivity's row count is SERVICES_FIRST + this). */

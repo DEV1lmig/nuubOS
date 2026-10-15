@@ -10,7 +10,37 @@ const ROMS = '/userdata/roms';
  * can be written, else SD1). */
 const gamesRoot = async () => (await get('library')).games_root || ROMS;
 const BIOS = '/userdata/bios';
-const LANGUAGES = [['en', 'English'], ['it', 'Italiano'], ['fr', 'Français'], ['de', 'Deutsch'], ['es', 'Español'], ['pt', 'Português'], ['nl', 'Nederlands']];
+const LANGUAGES = [
+  ['en', 'English'],
+  ['it', 'Italiano'],
+  ['fr', 'Français'],
+  ['de', 'Deutsch'],
+  ['es', 'Español'],
+  ['es-419', 'Español (Latinoamérica)'],
+  ['pt', 'Português'],
+  ['pt-br', 'Português (Brasil)'],
+  ['nl', 'Nederlands'],
+  ['pl', 'Polski'],
+  ['cs', 'Čeština'],
+  ['sv', 'Svenska'],
+  ['da', 'Dansk'],
+  ['nb', 'Norsk'],
+  ['fi', 'Suomi'],
+  ['hu', 'Magyar'],
+  ['ro', 'Română'],
+  ['tr', 'Türkçe'],
+  ['el', 'Ελληνικά'],
+  ['ru', 'Русский'],
+  ['uk', 'Українська'],
+  ['id', 'Bahasa Indonesia'],
+  ['vi', 'Tiếng Việt'],
+  ['th', 'ไทย'],
+  ['hi', 'हिन्दी'],
+  ['ja', '日本語'],
+  ['zh-cn', '简体中文'],
+  ['zh-tw', '繁體中文'],
+  ['ko', '한국어'],
+];
 
 function page(id, group, title, render) {
   PAGES[id] = { group, title, render };

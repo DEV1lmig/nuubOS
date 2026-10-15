@@ -607,10 +607,41 @@ fn with_x_units(mut cards: Vec<HomeCard>) -> Vec<HomeCard> {
     cards
 }
 
+/* Same card for the UI. Images are compared by size, not pixels (comparing
+ * pixel buffers would memcmp every cover): a cover or preview that loads,
+ * unloads or is decoded at another size changes `has_cover`/`previews` or
+ * its size. */
+fn same_card(a: &HomeCard, b: &HomeCard) -> bool {
+    let bare = |c: &HomeCard| HomeCard {
+        cover: Default::default(),
+        p0: Default::default(),
+        p1: Default::default(),
+        p2: Default::default(),
+        p3: Default::default(),
+        ..c.clone()
+    };
+    bare(a) == bare(b)
+        && a.cover.size() == b.cover.size()
+        && a.p0.size() == b.p0.size()
+        && a.p1.size() == b.p1.size()
+        && a.p2.size() == b.p2.size()
+        && a.p3.size() == b.p3.size()
+}
+
 fn set_model(current: ModelRc<HomeCard>, cards: Vec<HomeCard>) -> Option<ModelRc<HomeCard>> {
-    /* Same length: update rows in place so Slint keeps item state. */
+    /* Same length: update rows in place so Slint keeps item state, and only
+     * the rows that changed: every set_row_data re-renders that card's cached
+     * layer, and every decoded cover rebuilds Home (cover_arrived), which
+     * re-rendered all the cards of every row while a strip filled in. Focus
+     * is kept here; sync_focus() owns it. */
     if current.row_count() == cards.len() {
-        for (i, c) in cards.into_iter().enumerate() {
+        for (i, mut c) in cards.into_iter().enumerate() {
+            if let Some(cur) = current.row_data(i) {
+                c.focused = cur.focused;
+                if same_card(&cur, &c) {
+                    continue;
+                }
+            }
             current.set_row_data(i, c);
         }
         return None;

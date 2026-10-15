@@ -266,8 +266,30 @@ fn language_name(code: &str) -> &'static str {
         "fr" => "Français",
         "de" => "Deutsch",
         "es" => "Español",
+        "es-419" => "Español (Latinoamérica)",
         "pt" => "Português",
+        "pt-br" => "Português (Brasil)",
         "nl" => "Nederlands",
+        "pl" => "Polski",
+        "cs" => "Čeština",
+        "sv" => "Svenska",
+        "da" => "Dansk",
+        "nb" => "Norsk",
+        "fi" => "Suomi",
+        "hu" => "Magyar",
+        "ro" => "Română",
+        "tr" => "Türkçe",
+        "el" => "Ελληνικά",
+        "ru" => "Русский",
+        "uk" => "Українська",
+        "id" => "Bahasa Indonesia",
+        "vi" => "Tiếng Việt",
+        "th" => "ไทย",
+        "hi" => "हिन्दी",
+        "ja" => "日本語",
+        "zh-cn" => "简体中文",
+        "zh-tw" => "繁體中文",
+        "ko" => "한국어",
         _ => "English",
     }
 }
@@ -371,7 +393,9 @@ fn start_localization_listener(ui: &HomeWindow) {
 
 /* Order of the Language dropdown and the OOB language selector (same order
  * as the greetings in home.slint `oob-hero`). */
-const UI_LANGUAGES: [&str; 7] = ["en", "it", "fr", "de", "es", "pt", "nl"];
+const UI_LANGUAGES: [&str; 29] = [
+    "en", "it", "fr", "de", "es", "es-419", "pt", "pt-br", "nl", "pl", "cs", "sv", "da", "nb", "fi", "hu", "ro", "tr", "el", "ru", "uk", "id", "vi", "th", "hi", "ja", "zh-cn", "zh-tw", "ko"
+];
 
 fn open_language_dropdown(ui: &HomeWindow) {
     open_settings_choice(

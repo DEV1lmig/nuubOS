@@ -23,13 +23,15 @@ FRACTION="$(awk -v v="$VOL" 'BEGIN { printf "%.4f", v / 100.0 }')"
 # applied by nuubos-audiod before samples enter PipeWire. The Media music
 # ("nuubOS Music") has its own Music volume in nuubos-mediad.
 IDS="$(/usr/bin/wpctl status -n 2>/dev/null \
-  | sed -n '/Streams:/,/^Video/p' \
+  | sed -n '/^Audio/,/^Video/p' | sed -n '/Streams:/,$p' \
   | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p')"
 
 for ID in $IDS; do
   INFO="$(/usr/bin/wpctl inspect "$ID" 2>/dev/null)"
   echo "$INFO" | grep -F 'media.class = "Stream/Output/Audio"' >/dev/null 2>&1 || continue
-  if echo "$INFO" | grep -E 'application.process.binary = "nuubos-audio-wav-player"|application.name = "nuubOS (Product Audio|Music)"' >/dev/null 2>&1; then
+  # nuubOS players reach PipeWire through the ALSA plugin, which sets
+  # node.name (alsa_playback.<binary>) but no application.process.binary.
+  if echo "$INFO" | grep -E 'node.name = "alsa_playback\.nuubos-audio-|application.name = "nuubOS Music"' >/dev/null 2>&1; then
     /usr/bin/wpctl set-volume "$ID" 100% >/dev/null 2>&1 || true
   else
     /usr/bin/wpctl set-volume "$ID" "${VOL}%" >/dev/null 2>&1 || true

@@ -93,6 +93,8 @@ define NUUBOS_AUDIO_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/etc/pipewire/pipewire.conf.d/91-nuubos-analog-sink.conf
 	$(INSTALL) -D -m 0644 $(@D)/93-nuubos-stream-policy.conf \
 		$(TARGET_DIR)/etc/wireplumber/wireplumber.conf.d/93-nuubos-stream-policy.conf
+	$(INSTALL) -D -m 0644 $(@D)/nuubos-app-volume.lua \
+		$(TARGET_DIR)/usr/share/wireplumber/scripts/nuubos-app-volume.lua
 	$(INSTALL) -D -m 0644 $(@D)/nuubos-asound.conf \
 		$(TARGET_DIR)/etc/asound.conf
 endef
