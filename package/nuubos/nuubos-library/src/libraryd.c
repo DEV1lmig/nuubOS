@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-libraryd — Game Library and ROM Discovery service
  * (EPIC-011 / EPIC-012 / EPIC-020 baseline).

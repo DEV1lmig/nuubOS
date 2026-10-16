@@ -7,7 +7,7 @@
 NUUBOS_UPDATE_VERSION = 0.2.0
 NUUBOS_UPDATE_SITE = $(BR2_EXTERNAL_NUUBOS_PATH)/package/nuubos/nuubos-update/src
 NUUBOS_UPDATE_SITE_METHOD = local
-NUUBOS_UPDATE_LICENSE = MIT
+NUUBOS_UPDATE_LICENSE = PolyForm-Noncommercial-1.0.0
 NUUBOS_UPDATE_LICENSE_FILES = LICENSE
 NUUBOS_UPDATE_DEPENDENCIES = libcurl libsodium zlib
 
@@ -16,9 +16,12 @@ NUUBOS_UPDATE_DEPENDENCIES = libcurl libsodium zlib
 # reported unavailable.
 NUUBOS_UPDATE_PUBKEY = $(shell tr -d ' \n' < $(BR2_EXTERNAL_NUUBOS_PATH)/board/nuubos/common/ota/update-key.pub 2>/dev/null)
 
-# Release channel of a device that never chose one (stable|rc|nightly):
-# stable (user decision 2026-10-15).
-NUUBOS_UPDATE_DEFAULT_CHANNEL = stable
+# Release channel of a device that never chose one (stable|rc|nightly): the
+# channel the image is published on, so a flashed nightly keeps receiving
+# nightlies (user decision 2026-10-16; stable from 2026-10-15). Nightly
+# during Alpha; an RC or stable image is built with
+# `compile.sh NUUBOS_UPDATE_DEFAULT_CHANNEL=rc|stable nuubos-update-rebuild all`.
+NUUBOS_UPDATE_DEFAULT_CHANNEL ?= nightly
 
 define NUUBOS_UPDATE_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \

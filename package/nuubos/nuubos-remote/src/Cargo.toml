@@ -2,7 +2,7 @@
 name = "nuubos-admind"
 version = "0.2.0"
 edition = "2021"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [[bin]]
 name = "nuubos-admind"

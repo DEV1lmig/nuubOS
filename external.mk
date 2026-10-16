@@ -4,6 +4,24 @@ include $(sort $(wildcard $(BR2_EXTERNAL_NUUBOS_PATH)/package/libretro/*/*.mk))
 include $(sort $(wildcard $(BR2_EXTERNAL_NUUBOS_PATH)/package/streaming/*/*.mk))
 include $(sort $(wildcard $(BR2_EXTERNAL_NUUBOS_PATH)/package/thirdparty/*/*.mk))
 
+# Third-party notices (LICENSING.md): the crates linked into a cargo package
+# or the Go modules built into a golang package, with their license texts, in
+# /usr/share/licenses/<pkg>/THIRD-PARTY-NOTICES.txt. Buildroot's legal-info
+# archives the vendored sources but does not list their licenses.
+# $(1): package name, $(2): its build directory.
+define NUUBOS_CARGO_NOTICES
+	cd $(2) && $(TARGET_MAKE_ENV) $(PKG_CARGO_ENV) $(HOST_DIR)/bin/cargo metadata --offline --locked \
+		--format-version 1 --filter-platform $(RUSTC_TARGET_NAME) > $(2)/.nuubos-cargo-metadata.json
+	mkdir -p $(TARGET_DIR)/usr/share/licenses/$(1)
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_NUUBOS_PATH)/scripts/third-party-notices.py cargo \
+		$(2)/.nuubos-cargo-metadata.json $(1) $(TARGET_DIR)/usr/share/licenses/$(1)/THIRD-PARTY-NOTICES.txt
+endef
+define NUUBOS_GO_NOTICES
+	mkdir -p $(TARGET_DIR)/usr/share/licenses/$(1)
+	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_NUUBOS_PATH)/scripts/third-party-notices.py go \
+		$(2)/vendor $(1) $(TARGET_DIR)/usr/share/licenses/$(1)/THIRD-PARTY-NOTICES.txt
+endef
+
 # FFmpeg is built for the VPU decoders only (V4L2 request API, patches in
 # patches/packages/ffmpeg): it needs libudev, which ffmpeg.mk does not
 # order before it.
@@ -28,3 +46,9 @@ LIBPLACEBO_CONF_OPTS += -Dvulkan=disabled -Dd3d11=disabled -Dshaderc=disabled -D
 # (nuubos-webd runs cogctl as root); an empty owner would install an
 # invalid D-Bus policy (user="").
 COG_CONF_OPTS += -Dcog_dbus_system_owner=root
+
+# License metadata for legal-info (LICENSING.md). DejaVu: Buildroot leaves it
+# "unknown". linux-firmware: nuubOS ships only the Realtek rtw88 Wi-Fi and
+# rtl_bt Bluetooth firmware, binary-only but redistributable (WHENCE).
+DEJAVU_LICENSE = Bitstream-Vera, Public-Domain (DejaVu changes), Arev fonts license
+LINUX_FIRMWARE_LICENSE = Redistributable binary firmware (LICENCE.rtlwifi_firmware.txt)

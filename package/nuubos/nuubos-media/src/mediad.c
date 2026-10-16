@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-mediad — Media playback service (EPIC-027, EPIC-028).
  *

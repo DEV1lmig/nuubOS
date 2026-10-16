@@ -1,5 +1,5 @@
 /*
- * nuubOS sharp bilinear (MIT).
+ * nuubOS sharp bilinear (PolyForm Noncommercial 1.0.0, LICENSING.md).
  *
  * Scales by the largest integer factor that fits with nearest-neighbour
  * sharpness and blends only across the pixel edges left by the remaining

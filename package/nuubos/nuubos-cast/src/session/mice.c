@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * Miracast over Infrastructure ([MS-MICE], Microsoft Open Specifications):
  * the Wi-Fi Display session runs over the existing network instead of

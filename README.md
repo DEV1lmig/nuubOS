@@ -1,0 +1,94 @@
+# nuubOS
+
+A console-style operating system for Anbernic handhelds built on the Allwinner H700.
+nuubOS boots straight into a controller-first home screen, plays games through
+RetroArch, streams from your PC, plays music and video, and keeps itself up to date
+with signed, rollback-safe updates.
+
+> **Status: Alpha.** Nightly images are for testers. Expect bugs, and keep a backup
+> of your saves. See [Known issues](https://github.com/baf93/nuubOS/wiki/Known-Issues).
+
+**[Download](https://github.com/baf93/nuubOS/releases)** ·
+**[User guide (wiki)](https://github.com/baf93/nuubOS/wiki)** ·
+**[Technical documentation](docs/technical/README.md)** ·
+**[Licensing](LICENSING.md)**
+
+## Highlights
+
+- **Console experience**: a Home screen with your recently played games, systems and
+  collections, cover art, Find a Game, game tags, and a Quick Menu that works
+  everywhere, in games too.
+- **Emulation**: about 80 systems through RetroArch and libretro cores tuned for the
+  H700. Save states with rotating slots, hotkeys, per-game settings, bezels and a CRT
+  look, RetroAchievements with Hardcore Mode, cheats and LAN netplay.
+- **Several users**: each person gets their own profile, saves, language, theme
+  ("Mood") and settings.
+- **PC streaming**: Moonlight for Sunshine and GeForce Experience, and Steam Link (you
+  download Valve's app from the console).
+- **Media**: a music and video player for local files, network shares and Jellyfin.
+  You can turn the screen off and use the console as a music player.
+- **Connectivity**: Wi-Fi, Bluetooth audio and controllers, a web control panel over
+  HTTPS, SSH/SFTP, SMB file sharing, Syncthing sync between consoles, and screen
+  casting to Chromecast, Miracast and DLNA TVs.
+- **HDMI output** at up to 1080p, with automatic switching between the TV and the
+  built-in screen.
+- **Updates**: an A/B system with signed updates. If an update does not boot, the
+  console rolls back automatically. Pick the Nightly, RC or Stable channel.
+- **29 languages.** nuubOS sends no telemetry: see [privacy](docs/privacy.md).
+
+## Supported devices
+
+One image works on every supported device. You choose your model once, when you
+prepare the SD card.
+
+| Device | Status |
+|---|---|
+| RG40XX-V | Tested |
+| RG CubeXX | Tested |
+| RG35XX Pro | Tested (new backlight driver not tested yet) |
+| RG35XX 2024, RG35XX Plus, RG35XX H, RG35XX SP, RG34XX, RG34XX SP, RG40XX H, RG28XX, RG SP | Supported, not tested on hardware yet |
+
+Details and the exact device names: [Supported Devices](https://github.com/baf93/nuubOS/wiki/Supported-Devices).
+
+## Quick start
+
+1. Download `nuubOS-<version>-anbernic-h700.img.xz` from
+   [Releases](https://github.com/baf93/nuubOS/releases).
+2. Write it to a microSD card (8 GB or larger) with
+   [Raspberry Pi Imager](https://www.raspberrypi.com/software/): *Choose OS* →
+   *Use custom* → the downloaded file. Answer *No* if Imager offers OS customisation.
+3. Open the small `NUUBOS_BOOT` partition on the card, edit `nuubos.cfg` and set your
+   device, for example `DEVICE=rg40xx-v`.
+4. Put the card in slot 1 (SD1) and switch the console on. The first boot sets up the
+   storage and opens the setup wizard.
+
+Full instructions: [Installation](https://github.com/baf93/nuubOS/wiki/Installation).
+
+nuubOS does not include BIOS files or games. You add your own: see
+[Adding Games](https://github.com/baf93/nuubOS/wiki/Adding-Games) and
+[BIOS Files](https://github.com/baf93/nuubOS/wiki/BIOS-Files).
+
+## Building from source
+
+The build runs in a Docker container with Buildroot. See
+[Building](docs/technical/building.md). In short:
+
+```sh
+./scripts/bootstrap-buildroot.sh   # Buildroot 2026.08 into external/buildroot
+./scripts/dev.sh                   # builds the nuubos-dev:0.5 container, opens a shell in it
+./scripts/compile.sh               # inside the container: full image build
+```
+
+A first build takes several hours.
+
+## License
+
+nuubOS is **source-available for noncommercial use** under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). You may use, study, modify and share
+it for any noncommercial purpose. Selling it, or shipping it on hardware that is sold,
+is not allowed. nuubUI and the Quick Menu are GPL-3.0, because they are built with the
+Slint toolkit. All bundled third-party software keeps its own license. See
+[LICENSING.md](LICENSING.md).
+
+nuubOS is an independent project. It is not affiliated with Anbernic, Valve, NVIDIA,
+Google, Microsoft or the RetroArch project.

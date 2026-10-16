@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * DLNA / UPnP AV MediaRenderer (smart TVs, AV receivers): the console is
  * the control point and the media server. The TV is told to play

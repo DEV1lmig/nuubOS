@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-cast-session: one casting session (screen + sound to one
  * receiver) or one discovery, run by nuubos-castd as a child process.

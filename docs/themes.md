@@ -6,9 +6,11 @@ a folder (or a `.tar` holding one folder) with a single text file,
 
 ## Installing
 
-- Copy the folder or `.tar` to the SD card or a USB drive, open **Files**,
-  select it and choose **Install Mood**. The package is checked first; an
-  invalid package never replaces a working theme.
+- Copy the theme folder into `themes/` on internal storage (USERDATA, for
+  example with the web administration's Files page, SMB or SFTP); the folder
+  name must equal the theme's `ID`. Invalid themes are not listed. Over SSH,
+  `nuubos-themectl install <folder or .tar>` checks a package first and never
+  replaces a working theme with an invalid one.
 - Each user picks a theme in **Settings → General → Mood**. Moving through
   the list previews each theme on the real interface; **Back** keeps the
   current one.

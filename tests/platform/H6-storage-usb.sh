@@ -13,9 +13,14 @@ root_dev="$(
     true
 )"
 
+# SD1 layout (usr/lib/nuubos/partitions.sh, A/B system slots): p1 slot A,
+# p2 NUUBOS_BOOT, p3 STATE, p4 extended holding p5 slot B and p6 USERDATA.
 case "$root_dev" in
     /dev/mmcblk*p1)
         disk="${root_dev%p1}"
+        ;;
+    /dev/mmcblk*p5)
+        disk="${root_dev%p5}"
         ;;
     *)
         fail "unable to derive TF1 boot disk from root=${root_dev:-unknown}"
@@ -27,14 +32,18 @@ p1="${disk}p1"
 p2="${disk}p2"
 p3="${disk}p3"
 p4="${disk}p4"
+p5="${disk}p5"
+p6="${disk}p6"
 
 disk_name="${disk#/dev/}"
 p1_name="${p1#/dev/}"
 p2_name="${p2#/dev/}"
 p3_name="${p3#/dev/}"
 p4_name="${p4#/dev/}"
+p5_name="${p5#/dev/}"
+p6_name="${p6#/dev/}"
 
-pass "TF1 boot disk derived from root: $disk"
+pass "TF1 boot disk derived from root: $disk (running slot ${root_dev#$disk})"
 
 # Keep raw storage state with the regression artifacts.
 remote "
@@ -43,7 +52,7 @@ sfdisk -d '$disk' 2>/dev/null || true
 
 echo
 echo '===== BLKID ====='
-blkid '$p1' '$p2' '$p3' '$p4' 2>/dev/null || true
+blkid '$p1' '$p2' '$p3' '$p5' '$p6' 2>/dev/null || true
 
 echo
 echo '===== MOUNTS ====='
@@ -91,10 +100,18 @@ remote "[ -b '$p3' ]" \
     || fail "NUUBOS_STATE partition missing ($p3)"
 
 remote "[ -b '$p4' ]" \
-    && pass "NUUBOS_DATA partition present ($p4)" \
-    || fail "NUUBOS_DATA partition missing ($p4)"
+    && pass "extended partition present ($p4)" \
+    || fail "extended partition missing ($p4)"
 
-if ! remote "[ -b '$p1' ] && [ -b '$p2' ] && [ -b '$p3' ] && [ -b '$p4' ]"; then
+remote "[ -b '$p5' ]" \
+    && pass "system slot B partition present ($p5)" \
+    || fail "system slot B partition missing ($p5)"
+
+remote "[ -b '$p6' ]" \
+    && pass "NUUBOS_DATA partition present ($p6)" \
+    || fail "NUUBOS_DATA partition missing ($p6)"
+
+if ! remote "[ -b '$p1' ] && [ -b '$p2' ] && [ -b '$p3' ] && [ -b '$p5' ] && [ -b '$p6' ]"; then
     skip "TF1 geometry/filesystem checks unavailable"
     exit 0
 fi
@@ -102,10 +119,12 @@ fi
 # ---------------------------------------------------------------------------
 # TF1 geometry
 #
-# rootfs       = 2 GiB, starts at sector 2048, bootable
+# rootfs       = slot A, 2 GiB, starts at sector 2048, bootable
 # NUUBOS_BOOT  = 16 MiB, immediately follows rootfs
 # NUUBOS_STATE = 128 MiB, immediately follows NUUBOS_BOOT
-# NUUBOS_DATA  = immediately follows NUUBOS_STATE and consumes the rest of TF1
+# extended     = immediately follows NUUBOS_STATE and consumes the rest of TF1
+# slot B       = 2 GiB, first logical partition (1 MiB EBR gap)
+# NUUBOS_DATA  = second logical partition, the rest of the extended partition
 # ---------------------------------------------------------------------------
 
 p1_start="$(remote "cat '/sys/class/block/$p1_name/start'" || true)"
@@ -115,7 +134,10 @@ p2_size="$(remote "cat '/sys/class/block/$p2_name/size'" || true)"
 p3_start="$(remote "cat '/sys/class/block/$p3_name/start'" || true)"
 p3_size="$(remote "cat '/sys/class/block/$p3_name/size'" || true)"
 p4_start="$(remote "cat '/sys/class/block/$p4_name/start'" || true)"
-p4_size="$(remote "cat '/sys/class/block/$p4_name/size'" || true)"
+p5_start="$(remote "cat '/sys/class/block/$p5_name/start'" || true)"
+p5_size="$(remote "cat '/sys/class/block/$p5_name/size'" || true)"
+p6_start="$(remote "cat '/sys/class/block/$p6_name/start'" || true)"
+p6_size="$(remote "cat '/sys/class/block/$p6_name/size'" || true)"
 disk_sectors="$(remote "blockdev --getsz '$disk'" || true)"
 
 if [[ "$p1_start" == "2048" && "$p1_size" == "4194304" ]]; then
@@ -164,22 +186,52 @@ expected_p4_start=$(( ${p3_start:-0} + ${p3_size:-0} ))
 
 if [[ "$p4_start" == "$expected_p4_start" &&
       $(( ${p4_start:-1} % 2048 )) -eq 0 ]]; then
-    pass "NUUBOS_DATA starts after NUUBOS_STATE with 1 MiB alignment"
+    pass "extended partition starts after NUUBOS_STATE with 1 MiB alignment"
 else
-    fail "NUUBOS_DATA start=${p4_start:-?} expected=$expected_p4_start"
+    fail "extended partition start=${p4_start:-?} expected=$expected_p4_start"
 fi
 
+# The sysfs size of an extended partition is the 1-2 sector link, not its
+# extent: read the table size from sfdisk.
+p4_table_size="$(remote "sfdisk -d '$disk' 2>/dev/null | sed -n 's|^$p4 :.*size= *\([0-9]*\).*|\1|p'" || true)"
 expected_p4_size=$(( ${disk_sectors:-0} - ${p4_start:-0} ))
 
-if [[ "$p4_size" == "$expected_p4_size" && "$expected_p4_size" -gt 0 ]]; then
+if [[ "$p4_table_size" == "$expected_p4_size" && "$expected_p4_size" -gt 0 ]]; then
+    pass "extended partition consumes remaining TF1 capacity"
+else
+    fail "extended partition size=${p4_table_size:-?} expected=$expected_p4_size"
+fi
+
+if remote "sfdisk -d '$disk' 2>/dev/null | grep -F '$p4 :' | grep -Eq 'type=(5|f)([[:space:]]|,|$)'"; then
+    pass "extended partition MBR type 0x05"
+else
+    fail "extended partition MBR type is not 0x05"
+fi
+
+if [[ "$p5_start" == "$(( ${p4_start:-0} + 2048 ))" && "$p5_size" == "4194304" ]]; then
+    pass "system slot B geometry 2 GiB at the start of the extended partition"
+else
+    fail "system slot B geometry start=${p5_start:-?} size=${p5_size:-?}"
+fi
+
+expected_p6_start=$(( ${p5_start:-0} + ${p5_size:-0} + 2048 ))
+expected_p6_size=$(( ${disk_sectors:-0} - expected_p6_start ))
+
+if [[ "$p6_start" == "$expected_p6_start" ]]; then
+    pass "NUUBOS_DATA starts after slot B with 1 MiB alignment"
+else
+    fail "NUUBOS_DATA start=${p6_start:-?} expected=$expected_p6_start"
+fi
+
+if [[ "$p6_size" == "$expected_p6_size" && "$expected_p6_size" -gt 0 ]]; then
     pass "NUUBOS_DATA consumes remaining TF1 capacity"
 else
-    fail "NUUBOS_DATA size=${p4_size:-?} expected=$expected_p4_size"
+    fail "NUUBOS_DATA size=${p6_size:-?} expected=$expected_p6_size"
 fi
 
 if remote "
 sfdisk -d '$disk' 2>/dev/null |
-grep -F '$p4 :' |
+grep -F '$p6 :' |
 grep -Eq 'type=7[[:space:]]*$'
 "; then
     pass "USERDATA MBR type 0x07"
@@ -244,8 +296,8 @@ fi
 # Persistent STATE contract
 # ---------------------------------------------------------------------------
 
-remote "grep -qx 'NUUBOS_CONFIG_VERSION=5' /state/config/nuubos.conf" \
-    && pass "STATE config version 5" \
+remote "grep -qx 'NUUBOS_CONFIG_VERSION=6' /state/config/nuubos.conf" \
+    && pass "STATE config version 6" \
     || fail "STATE config version invalid"
 
 # ---------------------------------------------------------------------------
@@ -346,10 +398,13 @@ elif [[ "$login_mode" == "DEFAULT" ]]; then
     [[ "$active_user" == "$default_user" ]] \
         && pass "default-login active profile equals default user" \
         || fail "default-login active profile inconsistent"
+elif [[ -z "$active_user" ]]; then
+    pass "multi-user selection has no premature active profile"
 else
-    [[ -z "$active_user" ]] \
-        && pass "multi-user selection has no premature active profile" \
-        || fail "active profile published before user selection"
+    # Observational suite: the user may already have picked a profile.
+    remote "[ -f '/state/users/$active_user/profile.conf' ]" \
+        && pass "multi-user active profile is a selected, existing user" \
+        || fail "multi-user active profile invalid (${active_user})"
 fi
 
 storage_mode="$(
@@ -402,19 +457,19 @@ remote "[ -x /etc/init.d/S03nuubos-state ]" \
 # USERDATA filesystem
 # ---------------------------------------------------------------------------
 
-p4_type="$(remote "blkid -s TYPE -o value '$p4' 2>/dev/null" || true)"
-p4_label="$(remote "blkid -s LABEL -o value '$p4' 2>/dev/null" || true)"
+p6_type="$(remote "blkid -s TYPE -o value '$p6' 2>/dev/null" || true)"
+p6_label="$(remote "blkid -s LABEL -o value '$p6' 2>/dev/null" || true)"
 
-[[ "$p4_type" == "exfat" ]] \
+[[ "$p6_type" == "exfat" ]] \
     && pass "USERDATA filesystem exFAT" \
-    || fail "USERDATA filesystem ${p4_type:-unknown}"
+    || fail "USERDATA filesystem ${p6_type:-unknown}"
 
-[[ "$p4_label" == "NUUBOS_DATA" ]] \
+[[ "$p6_label" == "NUUBOS_DATA" ]] \
     && pass "USERDATA label NUUBOS_DATA" \
-    || fail "USERDATA label ${p4_label:-unknown}"
+    || fail "USERDATA label ${p6_label:-unknown}"
 
 if remote "
-awk -v d='$p4' '
+awk -v d='$p6' '
 \$1 == d && \$2 == \"/userdata\" && \$3 == \"exfat\" {
     rw = (\$4 ~ /(^|,)rw(,|$)/)
     noatime = (\$4 ~ /(^|,)noatime(,|$)/)
@@ -575,174 +630,82 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# TF2 storage ownership / selector state
+# SD2 games card and SD1 storage contract (nuubos-storagectl, platform.md
+# "Storage"): S05 writes storage.status, `storagectl sd2 attach` sd2.status.
 # ---------------------------------------------------------------------------
 
-tf2_status="/run/nuubos/storage/tf2.status"
+storage_status=/run/nuubos/storage/storage.status
+sd2_status=/run/nuubos/storage/sd2.status
 
-if remote "[ -f '$tf2_status' ]"; then
-    pass "TF2 storage status published"
-else
-    fail "TF2 storage status missing"
-fi
+status_value() {
+    remote "sed -n 's/^$2=//p' '$1' | head -n 1" || true
+}
 
-if remote "[ -f '$tf2_status' ]"; then
-    tf2_state="$(
-        remote "sed -n 's/^TF2_STATE=//p' '$tf2_status'" ||
-        true
-    )"
+if remote "[ -f '$storage_status' ]"; then
+    pass "SD1 storage status published"
 
-    action_required="$(
-        remote "sed -n 's/^ACTION_REQUIRED=//p' '$tf2_status'" ||
-        true
-    )"
-
-    prompt_user="$(
-        remote "sed -n 's/^PROMPT_USER=//p' '$tf2_status'" ||
-        true
-    )"
-
-    status_mode="$(
-        remote "sed -n 's/^STORAGE_MODE=//p' '$tf2_status'" ||
-        true
-    )"
-
-    active_storage="$(
-        remote "sed -n 's/^ACTIVE_STORAGE=//p' '$tf2_status'" ||
-        true
-    )"
-
-    storage_ready="$(
-        remote "sed -n 's/^STORAGE_READY=//p' '$tf2_status'" ||
-        true
-    )"
-
+    tf1_device="$(status_value "$storage_status" TF1_DEVICE)"
+    storage_ready="$(status_value "$storage_status" STORAGE_READY)"
     effective_userdata="$(
         remote 'awk '"'"'$2=="/userdata"{s=$1} END{print s}'"'"' /proc/mounts' ||
         true
     )"
 
-    [[ "$status_mode" == "$storage_mode" ]] \
-        && pass "TF2 status storage mode consistent ($status_mode)" \
-        || fail "TF2 status mode '${status_mode:-missing}' != '$storage_mode'"
+    [[ "$tf1_device" == "$p6" && "$effective_userdata" == "$p6" ]] \
+        && pass "USERDATA is SD1 $p6 in status and mounts" \
+        || fail "USERDATA device status=${tf1_device:-missing} mounted=${effective_userdata:-none} expected=$p6"
 
-    case "$tf2_state" in
-        ABSENT)
-            pass "TF2 classified ABSENT"
-
-            if [[ "$storage_mode" == "DUAL" ]]; then
-                [[ "$action_required" == "INSERT" &&
-                   "$prompt_user" == "1" ]] \
-                    && pass "DUAL missing-TF2 action published" \
-                    || fail "DUAL missing-TF2 action invalid"
-
-                [[ "$active_storage" == "NONE" &&
-                   "$storage_ready" == "0" ]] \
-                    && pass "DUAL missing TF2 leaves storage not ready" \
-                    || fail "DUAL missing TF2 selector state invalid"
-            else
-                [[ "$action_required" == "NONE" &&
-                   "$prompt_user" == "0" ]] \
-                    && pass "absent TF2 requires no action" \
-                    || fail "absent TF2 action invalid"
-
-                [[ "$active_storage" == "TF1" &&
-                   "$storage_ready" == "1" &&
-                   "$effective_userdata" == "$p4" ]] \
-                    && pass "absent TF2 leaves TF1 active" \
-                    || fail "absent TF2 active storage invalid"
-            fi
+    case "$storage_ready" in
+        1)
+            remote "[ -e '/run/nuubos/storage/ready' ]" \
+                && pass "storage ready file consistent" \
+                || fail "storage ready file missing"
             ;;
-
-        FOREIGN)
-            pass "TF2 classified FOREIGN"
-
-            if [[ "$storage_mode" == "SINGLE" ]]; then
-                [[ "$action_required" == "NONE" &&
-                   "$prompt_user" == "0" ]] \
-                    && pass "SINGLE ignores foreign TF2" \
-                    || fail "SINGLE foreign-TF2 action invalid"
-            else
-                [[ "$action_required" == "FORMAT" &&
-                   "$prompt_user" == "1" ]] \
-                    && pass "foreign TF2 requests explicit format" \
-                    || fail "foreign TF2 action invalid"
-            fi
-
-            if remote 'mount | grep -qE "^/dev/mmcblk2(p[0-9]+)? "'
-            then
-                fail "foreign TF2 unexpectedly mounted"
-            else
-                pass "foreign TF2 remains unmounted"
-            fi
-
-            if [[ "$storage_mode" == "DUAL" ]]; then
-                [[ "$active_storage" == "NONE" &&
-                   "$storage_ready" == "0" ]] \
-                    && pass "DUAL foreign TF2 leaves storage not ready" \
-                    || fail "DUAL foreign TF2 selector state invalid"
-            else
-                [[ "$active_storage" == "TF1" &&
-                   "$storage_ready" == "1" &&
-                   "$effective_userdata" == "$p4" ]] \
-                    && pass "foreign TF2 leaves TF1 USERDATA active" \
-                    || fail "foreign TF2 changed active USERDATA"
-            fi
+        0)
+            remote "[ ! -e '/run/nuubos/storage/ready' ]" \
+                && pass "storage not-ready state consistent" \
+                || fail "storage ready file unexpectedly present"
             ;;
-
-        OWNED)
-            pass "TF2 classified OWNED"
-
-            [[ "$action_required" == "NONE" &&
-               "$prompt_user" == "0" ]] \
-                && pass "owned TF2 requires no user action" \
-                || fail "owned TF2 action state invalid"
-
-            if [[ "$storage_mode" == "SINGLE" ]]; then
-                [[ "$active_storage" == "TF1" &&
-                   "$storage_ready" == "1" &&
-                   "$effective_userdata" == "$p4" ]] \
-                    && pass "SINGLE keeps TF1 active with owned TF2" \
-                    || fail "SINGLE owned-TF2 selector state invalid"
-            else
-                [[ "$active_storage" == "TF2" &&
-                   "$storage_ready" == "1" &&
-                   "$effective_userdata" == "/dev/mmcblk2p1" ]] \
-                    && pass "$storage_mode activates owned TF2" \
-                    || fail "$storage_mode owned-TF2 selector state invalid"
-
-                if remote "
-awk '
-\$1 == \"$p4\" &&
-\$2 == \"/run/nuubos/storage/tf1\" {
-    found=1
-}
-END { exit !found }
-' /proc/mounts
-"; then
-                    pass "TF1 remains available as stable sync view"
-                else
-                    fail "TF1 stable sync view missing"
-                fi
-            fi
-            ;;
-
         *)
-            fail "unknown TF2 state '${tf2_state:-missing}'"
+            fail "invalid STORAGE_READY '${storage_ready:-missing}'"
+            ;;
+    esac
+else
+    fail "SD1 storage status missing"
+fi
+
+if remote "[ -f '$sd2_status' ]"; then
+    pass "SD2 storage status published"
+
+    sd2_slot="$(status_value "$sd2_status" SD2_SLOT)"
+    sd2_state="$(status_value "$sd2_status" SD2_STATE)"
+    sd2_path="$(status_value "$sd2_status" SD2_PATH)"
+
+    case "$sd2_state" in
+        none|empty|checking|ready|readonly|unreadable|ejected|ignored)
+            pass "SD2 state valid ($sd2_state, slot=${sd2_slot:-?})"
+            ;;
+        *)
+            fail "unknown SD2 state '${sd2_state:-missing}'"
             ;;
     esac
 
-    if [[ "$storage_ready" == "1" ]]; then
-        remote "[ -e '/run/nuubos/storage/ready' ]" \
-            && pass "storage ready file consistent" \
-            || fail "storage ready file missing"
-    elif [[ "$storage_ready" == "0" ]]; then
-        remote "[ ! -e '/run/nuubos/storage/ready' ]" \
-            && pass "storage not-ready state consistent" \
-            || fail "storage ready file unexpectedly present"
+    if [[ "$sd2_state" == "ready" || "$sd2_state" == "readonly" ]]; then
+        remote "awk -v p='$sd2_path' '\$2 == p { f=1 } END { exit !f }' /proc/mounts" \
+            && pass "SD2 mounted at $sd2_path" \
+            || fail "SD2 $sd2_state but not mounted at ${sd2_path:-?}"
     else
-        fail "invalid STORAGE_READY '${storage_ready:-missing}'"
+        remote 'awk '"'"'$1 ~ /^\/dev\/mmcblk2/ { f=1 } END { exit !f }'"'"' /proc/mounts' \
+            && fail "SD2 mounted while state is $sd2_state" \
+            || pass "SD2 not mounted while state is $sd2_state"
     fi
+
+    # The games card must never replace SD1 USERDATA.
+    [[ "$(remote 'awk '"'"'$2=="/userdata"{s=$1} END{print s}'"'"' /proc/mounts' || true)" != /dev/mmcblk2* ]] \
+        && pass "SD2 never mounted as USERDATA" \
+        || fail "SD2 mounted as USERDATA"
+else
+    fail "SD2 storage status missing"
 fi
 
 remote "[ -x /etc/init.d/S05nuubos-storage ]" \
@@ -757,24 +720,11 @@ remote "[ -x /etc/init.d/S05nuubos-storage ]" \
 # quick so that quick remains strictly observational/read-only.
 # ---------------------------------------------------------------------------
 
-case "$NUBOS_TEST_MODE" in
-    full|stress)
-        # shellcheck disable=SC1091
-        source "$NUBOS_ROOT/tests/platform/lib/h6-storage-backup.sh"
-        run_h6_storage_backup
-
-        # shellcheck disable=SC1091
-        source "$NUBOS_ROOT/tests/platform/lib/h6-storage-health.sh"
-        run_h6_storage_health
-
-        # shellcheck disable=SC1091
-        source "$NUBOS_ROOT/tests/platform/lib/h6-storage-recovery.sh"
-        run_h6_storage_recovery
-        ;;
-    *)
-        skip "storage backup/health/recovery qualification (full/stress only)"
-        ;;
-esac
+# lib/h6-storage-{backup,health,recovery}.sh qualified the retired DUAL
+# TF1/TF2 USERDATA model (`storagectl storage-mode`, tf2.status, OWNED/FOREIGN
+# cards); SD2 is a games card since 2026-10-11 and the console backup replaced
+# the per-profile one (platform.md "Storage"). Not run until rewritten.
+skip "storage backup/health/recovery qualification (retired DUAL storage model)"
 
 # ---------------------------------------------------------------------------
 # USB baseline

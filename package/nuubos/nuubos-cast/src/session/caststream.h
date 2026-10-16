@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * Cast Streaming sender for one stream (audio or video): Cast RTP
  * packetization, AES-128-CTR frame encryption, RTCP sender reports,

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * Video encoders, all software (Cedrus is decode-only):
  *   VP8   libvpx (BSD, royalty-free): Google Cast.

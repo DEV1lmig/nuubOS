@@ -16,3 +16,5 @@
 | emulation | RetroArch, game UX | 18, 37.13, 37.18 |
 | streaming-media | Moonlight, Steam Link, media, Web, screen casting | 37.14–15, 37.25, 37.27 |
 | open-items | known defects | 37.8 |
+
+User-facing technical documentation (architecture, building, releasing, devices): `docs/technical/`. User guide: the GitHub wiki (source kept in `../nuubOS.wiki`).

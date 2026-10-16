@@ -7,7 +7,7 @@
 NUUBUI_HOME_VERSION = 0.1.0
 NUUBUI_HOME_SITE = $(BR2_EXTERNAL_NUUBOS_PATH)/package/nuubos/nuubui-home/src
 NUUBUI_HOME_SITE_METHOD = local
-NUUBUI_HOME_LICENSE = MIT, CC-BY-4.0
+NUUBUI_HOME_LICENSE = GPL-3.0-only, CC-BY-4.0
 NUUBUI_HOME_LICENSE_FILES = LICENSE ui/assets/icons/LICENSE.txt ui/assets/icons/ATTRIBUTION.txt
 
 # i-slint-core with the nuubOS patches (patches/packages/i-slint-core), used
@@ -22,5 +22,11 @@ define NUUBUI_HOME_VENDOR_SLINT_CORE
 	$(APPLY_PATCHES) $(@D)/vendor/i-slint-core $(BR2_EXTERNAL_NUUBOS_PATH)/patches/packages/i-slint-core \*.patch
 endef
 NUUBUI_HOME_POST_RSYNC_HOOKS += NUUBUI_HOME_VENDOR_SLINT_CORE
+
+NUUBUI_HOME_DEPENDENCIES += host-python3
+define NUUBUI_HOME_INSTALL_NOTICES
+	$(call NUUBOS_CARGO_NOTICES,nuubui-home,$(@D))
+endef
+NUUBUI_HOME_POST_INSTALL_TARGET_HOOKS += NUUBUI_HOME_INSTALL_NOTICES
 
 $(eval $(cargo-package))

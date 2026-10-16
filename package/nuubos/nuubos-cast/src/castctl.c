@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-castctl — command line client of nuubos-castd (tests, lifecycle
  * hooks). Prints the reply; exits 0 on OK, 1 on ERR or no service.

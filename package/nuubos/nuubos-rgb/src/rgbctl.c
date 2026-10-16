@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-rgbctl — development client of nuubos-rgbd. Product lighting
  * goes through nuubos-lightingd, which overwrites a frame set here as soon

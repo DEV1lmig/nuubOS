@@ -19,4 +19,10 @@ SYNCTHING_LDFLAGS = \
 	-X github.com/syncthing/syncthing/lib/build.User=nuubos \
 	-X github.com/syncthing/syncthing/lib/build.Host=buildroot
 
+SYNCTHING_DEPENDENCIES += host-python3
+define SYNCTHING_INSTALL_NOTICES
+	$(call NUUBOS_GO_NOTICES,syncthing,$(@D))
+endef
+SYNCTHING_POST_INSTALL_TARGET_HOOKS += SYNCTHING_INSTALL_NOTICES
+
 $(eval $(golang-package))

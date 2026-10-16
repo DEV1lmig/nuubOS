@@ -1,5 +1,5 @@
 /*
- * nuubOS bezel, last pass (MIT), written for nuubOS.
+ * nuubOS bezel, last pass, written for nuubOS (PolyForm Noncommercial 1.0.0, LICENSING.md).
  *
  * Draws the picture from the core's frame (OrigTexture) where RetroArch
  * would place it without bezels and, around it, the bezel the first pass

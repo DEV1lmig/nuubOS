@@ -273,6 +273,13 @@ if ((EXTENDED)); then
 
         info "Moonlight-like load: host -> target ${load_mbit}Mbit/s ${load_seconds}s"
 
+        # dropbear's default 24 KB channel window caps one SSH pipe at
+        # window/RTT (~15 Mbit/s at 13 ms) whatever the radio does: carry the
+        # load over a temporary instance with a 4 MB window (connectivity.md).
+        load_port=2222
+        remote "dropbear -p $load_port -W 4194304 -P /run/h4-load-dropbear.pid" \
+            || load_port=22
+
         (
             python3 - "$load_mbit" "$load_seconds" <<'PY' |
 import sys
@@ -310,6 +317,7 @@ PY
             ssh \
                 "${SSH_OPTS[@]}" \
                 -o Compression=no \
+                -p "$load_port" \
                 "$NUBOS_TARGET" \
                 'dd of=/dev/null bs=64K 2>/dev/null'
         ) > "$load_log" 2>&1 &
@@ -324,6 +332,9 @@ PY
 
         wait "$load_pid"
         load_rc=$?
+
+        [[ "$load_port" == 22 ]] ||
+            remote 'kill "$(cat /run/h4-load-dropbear.pid)"; rm -f /run/h4-load-dropbear.pid' || true
 
         effective_mbit="$(
             awk -F= '/^LOAD_EFFECTIVE_MBIT=/ {print $2}' "$load_log" |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Host test of nuubos-cast-session against fake receivers.
 
   python3 tests/cast.py serve-cast|serve-dlna   fake receiver on the LAN for

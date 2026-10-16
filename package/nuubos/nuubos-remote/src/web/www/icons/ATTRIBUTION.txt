@@ -15,4 +15,4 @@ Web administration): upload, download, power-off, right-from-bracket, moon,
 house, circle-info, lock, pen, copy, scissors, ellipsis-vertical, keyboard,
 bluetooth-b.
 
-nuubOS own icons (MIT, not Font Awesome): desktop.svg, plus.svg.
+nuubOS own icons (license of this package, not Font Awesome): desktop.svg, plus.svg.

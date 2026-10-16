@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * Google Cast control channel (CASTV2): TLS to the receiver (port 8009),
  * length-prefixed CastMessage protobufs carrying JSON payloads.

@@ -14,7 +14,7 @@ Font Awesome Free 6.7.2 solid icons added 2026-10-10 (Files and Media pages):
 folder, file, image, music, film, hard-drive, network-wired, sd-card,
 box-archive, palette, folder-plus, paste, server, tv.
 
-nuubOS own icons (MIT, not Font Awesome): desktop.svg, plus.svg.
+nuubOS own icons (license of this package, not Font Awesome): desktop.svg, plus.svg.
 
 Font Awesome Free 6.7.2 icons added 2026-10-12 (Files and Media redesign): solid pause,
 forward-step, backward-step, shuffle, repeat, square-check, circle-info, compact-disc, list,

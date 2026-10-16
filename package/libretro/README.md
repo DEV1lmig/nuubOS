@@ -51,7 +51,7 @@ the game does not start.
 | Supervision | Potator | Unlicense | |
 | Mega Duck | SameDuck | MIT | |
 | Vectrex | vecx (software renderer) | GPL-3.0 | built-in system ROM |
-| C64, C128, Plus/4, VIC-20 | VICE x64 / x128 / xplus4 / xvic | GPL-2.0 | ROMs embedded by VICE, see below |
+| C64, C128, Plus/4, VIC-20 | VICE x64 / x128 / xplus4 / xvic | GPL-2.0 | BIOS: Commodore ROMs in `vice/<machine>/` and `vice/DRIVES/` (bios.conf), see below |
 | Amiga | PUAE | GPL-2.0 | AROS Kickstart replacement built in (boots, but most floppy games need the real Kickstart `kick34005.A500` / `kick40068.A1200`) |
 | Amstrad CPC | Caprice32 | GPL-2.0 | Amstrad ROMs embedded (redistribution permitted by Amstrad) |
 | ZX Spectrum | Fuse | GPL-3.0 | Amstrad ROMs embedded (permitted) |
@@ -71,13 +71,20 @@ the game does not start.
 
 Decision (2026-10-06, project owner): the non-commercial cores are included
 because nuubOS is distributed free of charge; they must be removed or replaced
-before any commercial distribution. Every package records its licence and
-licence file, so `make legal-info` lists them.
+before any commercial distribution (nuubOS itself is licensed for
+noncommercial use only since 2026-10-16, LICENSING.md). Every package records
+its licence and licence file, so `make legal-info` lists them.
 
-Open licensing item: VICE embeds the Commodore KERNAL/BASIC/character ROMs
-as upstream VICE distributes them. Their redistribution provenance must be
-confirmed before a public release (CLAUDE §10); if it cannot be, ship VICE
-without ROMs and ask users for them like other BIOS files.
+VICE ROMs (resolved 2026-10-16): upstream VICE carries the Commodore
+KERNAL/BASIC/character/drive ROMs, whose copyright holder does not allow
+redistribution (Debian ships VICE in contrib without them). nuubOS removes
+them from the build tree and from the legal-info source archive
+(`scripts/strip-commodore-roms.sh`, hooks in `libretro-vice.mk`); the core
+reads them from `/userdata/bios/vice/<machine>/` and `vice/DRIVES/`, listed
+as required files in the BIOS Manager (`bios.conf`).
+
+Vectrex: vecx carries the Vectrex system ROM, whose rights holder allowed
+its free noncommercial distribution.
 
 Not shipped on purpose: blueMSX's proprietary MSX/ColecoVision BIOS images,
 Hatari's capsimage (IPF) library (not free software), Drastic (closed source,
@@ -94,8 +101,8 @@ Other redistributed material:
 - `retroarch-assets` subset (Ozone, XMB monochrome icons, fallback/OSD fonts):
   CC-BY-4.0, `COPYING` installed in `/usr/share/retroarch/assets`.
 - `libretro-core-info`: MIT.
-- `nuubos-emulation` data (defaults, sharp-bilinear shader, gamepad
-  autoconfig): MIT, written for nuubOS.
+- `nuubos-emulation` data (defaults, shaders, gamepad autoconfig): written
+  for nuubOS, PolyForm Noncommercial 1.0.0 like the rest of nuubOS.
 
 ## Adding a core
 

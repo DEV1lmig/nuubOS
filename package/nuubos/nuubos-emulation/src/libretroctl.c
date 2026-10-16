@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-libretroctl — online libretro content for nuubOS emulation:
  * emulators (cores) from the libretro buildbot and the libretro cheat

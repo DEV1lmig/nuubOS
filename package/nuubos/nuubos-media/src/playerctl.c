@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-playerctl — command line client of nuubos-mediad (tests, the
  * pre-power hook): sends one command line, prints the reply.

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-smb-browse — find SMB servers on the local network and list their
  * shared folders (EPIC-036, Add Network Location). Run by nuubos-sharesctl.

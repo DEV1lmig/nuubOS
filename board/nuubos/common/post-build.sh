@@ -36,6 +36,17 @@ rm -f \
     "$TARGET_DIR/run/resolv.conf"
 
 #
+# Files of removed features: an incremental build never deletes what an
+# older package version installed in TARGET_DIR (found before the first
+# nightly, 2026-10-16). Per-profile backup (removed 2026-10-12, console
+# backup replaces it), lifecycle-display (screensaver, removed 2026-10-10).
+rm -f \
+    "$TARGET_DIR/usr/bin/nuubos-backupctl" \
+    "$TARGET_DIR/usr/share/nuubos/jobs/backup-user.job" \
+    "$TARGET_DIR/usr/share/nuubos/jobs/restore-user.job" \
+    "$TARGET_DIR/usr/lib/nuubos/lifecycle-display"
+
+#
 # Product release boot keeps tty1 free of getty output.
 if [ -f "$INITTAB" ]; then
     sed -i '/^tty1::respawn:/d' "$INITTAB"

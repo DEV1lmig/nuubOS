@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 #ifndef NUUBOS_RGB_COMMON_H
 #define NUUBOS_RGB_COMMON_H
 

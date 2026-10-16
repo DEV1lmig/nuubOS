@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /*
  * nuubos-emud — Emulation Service (EPIC-013 RetroArch Integration,
  * EPIC-019 Saves & Save States, EPIC-020 sessions, EPIC-005 game actions).

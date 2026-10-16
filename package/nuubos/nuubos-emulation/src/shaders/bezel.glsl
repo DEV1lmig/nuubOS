@@ -1,5 +1,5 @@
 /*
- * nuubOS bezel (MIT), written for nuubOS.
+ * nuubOS bezel, written for nuubOS (PolyForm Noncommercial 1.0.0, LICENSING.md).
  *
  * The game keeps exactly the size and place it has without bezels (the
  * same rule as RetroArch's smart integer scaling, axis Y, with the core's

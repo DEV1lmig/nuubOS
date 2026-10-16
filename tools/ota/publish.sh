@@ -4,8 +4,10 @@
 #   tools/ota/publish.sh OUTDIR
 #
 # Needs the GitHub CLI (gh), logged in with write access to the repository.
-# 1. release <tag> (versioned, kept) with the payload, at the current commit
-#    (pushed first); a pre-release unless the channel is stable;
+# 1. release <tag> (versioned, kept) with every file in OUTDIR/<tag>/ (the
+#    payload, plus the image, legal-info, notices and SHA256SUMS when
+#    tools/ota/add-image.sh added them), at the current commit (pushed
+#    first); a pre-release unless the channel is stable;
 # 2. release channel-<channel> (created once, a pre-release so it is never
 #    "Latest"): its manifest and signature are replaced. Devices on that
 #    channel see the new version at their next check.
@@ -21,11 +23,19 @@ M="$OUT/channel-$CHANNEL/nuubos-update.manifest"
 COMMIT="$(git -C "$(dirname "$0")/../.." rev-parse HEAD)"
 PRE=""; [ "$CHANNEL" = stable ] || PRE="--prerelease"
 
+set -- "$OUT/$TAG"/*
+ASSETS="$*"
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-    gh release upload "$TAG" "$OUT/$TAG/$PAYLOAD" --repo "$REPO" --clobber || exit 1
+    # shellcheck disable=SC2086
+    gh release upload "$TAG" $ASSETS --repo "$REPO" --clobber || exit 1
 else
-    if [ -f "$OUT/release-notes.txt" ]; then set -- --notes-file "$OUT/release-notes.txt"; else set -- --notes "nuubOS $VERSION, $CHANNEL channel."; fi
-    gh release create "$TAG" "$OUT/$TAG/$PAYLOAD" --repo "$REPO" --target "$COMMIT" $PRE \
+    # github-notes.md (optional, e.g. flashing steps) is the GitHub text;
+    # else the console's release notes.
+    if [ -f "$OUT/github-notes.md" ]; then set -- --notes-file "$OUT/github-notes.md"
+    elif [ -f "$OUT/release-notes.txt" ]; then set -- --notes-file "$OUT/release-notes.txt"
+    else set -- --notes "nuubOS $VERSION, $CHANNEL channel."; fi
+    # shellcheck disable=SC2086
+    gh release create "$TAG" $ASSETS --repo "$REPO" --target "$COMMIT" $PRE \
         --title "nuubOS $VERSION ($CHANNEL)" "$@" || exit 1
 fi
 if ! gh release view "channel-$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then

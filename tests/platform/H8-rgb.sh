@@ -57,15 +57,18 @@ for ((i = 0; i < RGB_ZONE_COUNT; i++)); do
         || fail "RGB zone${i} topology mismatch: $status"
 done
 
-if [[ "${RGB_EXPECT_BOOT_OFF:-0}" == "1" ]]; then
-    [[ "$status" == *"mode=off"* ]] \
-        && pass "RGB mode off at regression baseline" \
-        || fail "RGB expected mode=off: $status"
+# The backend follows the user's lighting (lightingd; Aurora is the default
+# since 2026-10-11), so the regression checks consistency, not a fixed state.
+backend="$(sed -n 's/.*backend=\([a-z]*\).*/\1/p' <<< "$status")"
 
-    [[ "$status" == *"backend=off"* ]] \
-        && pass "RGB hardware backend inactive" \
-        || fail "RGB expected backend=off: $status"
-fi
+case "$backend" in
+    active|off)
+        pass "RGB backend state reported ($backend)"
+        ;;
+    *)
+        fail "RGB backend state missing: $status"
+        ;;
+esac
 
 if remote '[ -r /sys/kernel/debug/gpio ]'; then
     gpio="$(remote 'cat /sys/kernel/debug/gpio' || true)"
@@ -76,10 +79,12 @@ if remote '[ -r /sys/kernel/debug/gpio ]'; then
         pass "obsolete rgb:kbd_backlight consumer absent"
     fi
 
-    if grep -Eq 'gpio-133 .*nuubos-rgbd|gpio-263 .*nuubos-rgbd' <<< "$gpio"; then
-        fail "RGB GPIOs claimed while backend is off"
-    else
-        pass "RGB PE5/PI7 unclaimed while backend is off"
+    if [[ "$backend" == "off" ]]; then
+        if grep -Eq 'gpio-133 .*nuubos-rgbd|gpio-263 .*nuubos-rgbd' <<< "$gpio"; then
+            fail "RGB GPIOs claimed while backend is off"
+        else
+            pass "RGB PE5/PI7 unclaimed while backend is off"
+        fi
     fi
 else
     warn "debugfs GPIO state unavailable"
