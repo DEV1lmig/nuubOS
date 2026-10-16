@@ -415,7 +415,7 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
         ("low", 5, 2, t(378), pct(379, "15"), -1, -1.0),
         ("critical", 5, 3, t(380), pct(381, "5"), -1, -1.0),
         ("pad_low", 2, 2, t(378), "8BitDo Ultimate 2C Wireless Controller".into(), 12, -1.0),
-        ("wifi_lost", 8, 2, t(385), "CasaBaf-5G".into(), -1, -1.0),
+        ("wifi_lost", 8, 2, t(385), "MyHome-5G".into(), -1, -1.0),
         ("backup", 9, 0, t(97), t(91), -1, 0.42),
         ("game_saved", 10, 1, t(424), pct(423, "3"), -1, -1.0),
     ];
@@ -458,7 +458,7 @@ fn main() {
     ui.set_battery_percent(78);
     ui.set_battery_label("78%".into());
     ui.set_wifi_state("connected".into());
-    ui.set_current_user_name("Fabio".into());
+    ui.set_current_user_name("Player 1".into());
     ui.set_user_count(2);
     ui.set_ui_language_name("Italiano".into());
     ui.set_timezone("Europe/Rome".into());
@@ -469,7 +469,7 @@ fn main() {
     ui.set_wifi_enabled(true);
     ui.set_bluetooth_enabled(true);
     ui.set_connectivity_wifi_active(true);
-    ui.set_wifi_current_ssid("CasaBaf-5G".into());
+    ui.set_wifi_current_ssid("MyHome-5G".into());
     ui.set_system_storage_summary("SD1 • SD2".into());
     ui.set_system_version("0.5".into());
     ui.set_system_build("2026.10".into());
@@ -487,7 +487,7 @@ fn main() {
     ])));
     ui.set_audio_output_label("Automatic • Speaker".into());
     let nets = vec![
-        WifiNetworkEntry { ssid: "CasaBaf-5G".into(), security: "WPA2".into(), signal_dbm: -48, saved: true, current: true },
+        WifiNetworkEntry { ssid: "MyHome-5G".into(), security: "WPA2".into(), signal_dbm: -48, saved: true, current: true },
         WifiNetworkEntry { ssid: "Vodafone-A1B2C3D4E5 Extended Network Name".into(), security: "WPA2".into(), signal_dbm: -70, saved: false, current: false },
         WifiNetworkEntry { ssid: "Guest".into(), security: "Open".into(), signal_dbm: -80, saved: true, current: false },
     ];
@@ -518,7 +518,7 @@ fn main() {
             ui.set_keyboard_row_one(row(&["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"]));
             ui.set_keyboard_row_two(row(&["a", "s", "d", "f", "g", "h", "j", "k", "l", "⌫"]));
             ui.set_keyboard_row_three(row(&["⇧", "z", "x", "c", "v", "b", "n", "m", "Space", "Done"]));
-            ui.set_keyboard_title(format!("{} • CasaBaf-5G", s(ui, 172)).into());
+            ui.set_keyboard_title(format!("{} • MyHome-5G", s(ui, 172)).into());
             ui.set_keyboard_value("nuubos handheld".into());
             ui.set_keyboard_index(14);
             ui.set_settings_view(6);
@@ -815,8 +815,8 @@ fn main() {
         ("recovery_scope", Box::new(|ui| {
             ui.set_settings_choice_open(true); ui.set_settings_choice_title(s(ui, 1019).into());
             let o = vec![SettingsChoiceEntry { value: "all".into(), label: s(ui, 1018).into() },
-                SettingsChoiceEntry { value: "a".into(), label: "Baf".into() },
-                SettingsChoiceEntry { value: "b".into(), label: "Eli".into() }];
+                SettingsChoiceEntry { value: "a".into(), label: "Player 1".into() },
+                SettingsChoiceEntry { value: "b".into(), label: "Player 2".into() }];
             ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o)))); ui.set_settings_choice_index(0);
         })),
         ("recovery_reset_armed", Box::new(|ui| {
@@ -915,7 +915,7 @@ fn main() {
         ui.set_tester_left_trigger(0); ui.set_tester_left_x(0); ui.set_tester_left_y(0);
         ui.set_tester_r3(false); ui.set_tester_hotkey(false);
         ui.set_settings_open(false);
-        let users: Vec<UserProfileEntry> = [("Fabio", 2), ("Elisa", 6), ("Guest", 11)].iter().enumerate().map(|(i, (n, a))| UserProfileEntry {
+        let users: Vec<UserProfileEntry> = [("Player 1", 2), ("Player 2", 6), ("Guest", 11)].iter().enumerate().map(|(i, (n, a))| UserProfileEntry {
             id: format!("u{i}").into(), name: (*n).into(), avatar_spec: format!("builtin:{a:02}").into(), avatar_path: "".into(),
             avatar: slint::Image::load_from_path(std::path::Path::new(
                 &format!("/workspace/package/nuubos/nuubos-users/src/avatars/{a:02}.png"))).unwrap_or_default(),
@@ -954,10 +954,10 @@ fn main() {
     })));
     scenes.push(("oob_users", Box::new(|ui| {
         ui.set_oob_step(3); ui.set_settings_view(32); ui.set_user_count(3); ui.set_user_login_mode("default".into());
-        ui.set_default_user_name("Fabio".into()); ui.set_oob_index(5); ui.set_oob_scroll(0);
+        ui.set_default_user_name("Player 1".into()); ui.set_oob_index(5); ui.set_oob_scroll(0);
     })));
     scenes.push(("oob_users_one", Box::new(|ui| {
-        let users: Vec<UserProfileEntry> = vec![UserProfileEntry { id: "u0".into(), name: "Fabio".into(), avatar_spec: "".into(),
+        let users: Vec<UserProfileEntry> = vec![UserProfileEntry { id: "u0".into(), name: "Player 1".into(), avatar_spec: "".into(),
             avatar_path: "".into(), avatar: Default::default(), active: false, default_user: true }];
         ui.set_users(ModelRc::from(Rc::new(VecModel::from(users))));
         ui.set_user_count(1); ui.set_oob_index(1);
@@ -1347,9 +1347,9 @@ fn main() {
         ui.set_netplay_active(true); ui.set_settings_view(72); ui.set_gen_index(0); ui.set_gen_notice("".into());
         ui.set_app_page_description(s(ui, 1262).into());
         let v: Vec<AppEntry> = vec![
-            AppEntry { title: "Concentration Room".into(), detail: "Hosted by Alice • Nintendo Entertainment System".into(), value: s(ui, 1269).into(),
-                icon: 11, good: true, caption: "Hosted by Alice • Nintendo Entertainment System • 192.168.5.40:55435".into() },
-            AppEntry { title: "Super Tilt Bro.".into(), detail: "Hosted by PC-Luca".into(), value: s(ui, 1266).into(),
+            AppEntry { title: "Concentration Room".into(), detail: "Hosted by Player 2 • Nintendo Entertainment System".into(), value: s(ui, 1269).into(),
+                icon: 11, good: true, caption: "Hosted by Player 2 • Nintendo Entertainment System • 192.168.5.40:55435".into() },
+            AppEntry { title: "Super Tilt Bro.".into(), detail: "Hosted by Living Room PC".into(), value: s(ui, 1266).into(),
                 icon: 11, good: false, caption: "".into() },
             AppEntry { title: "Bomberman '94".into(), detail: "Hosted by Bob • PC Engine".into(),
                 value: s(ui, 1267).replace("{0}", "Beetle PCE").into(), icon: 11, good: false, caption: "".into() },
@@ -1394,8 +1394,8 @@ fn main() {
         ui.set_gen_rows(gen(&[
             (&s(ui, 669), "", &s(ui, 323), false, 1),
             (&s(ui, 1028), "", &s(ui, 1029), true, -1),
-            (&s(ui, 1037), "Baf · RG CubeXX", &s(ui, 1038).replace("{0}", "3ULBXAD"), false, -1),
-            ("Eli · RG40XX-V", "", &s(ui, 1032), false, -1),
+            (&s(ui, 1037), "Player 1 · RG CubeXX", &s(ui, 1038).replace("{0}", "3ULBXAD"), false, -1),
+            ("Player 2 · RG40XX-V", "", &s(ui, 1032), false, -1),
             ("DESKTOP-NAS", &s(ui, 1039).replace("{0}", "42"), "192.168.1.20", false, -1),
             ("Pixel 8", &s(ui, 159), "", false, -1),
             (&s(ui, 673), "", &s(ui, 323), false, 1),
@@ -1428,7 +1428,7 @@ fn main() {
         let path = [s(ui, 3), s(ui, 702), s(ui, 669), s(ui, 1028), s(ui, 1043)].join(" → ");
         ui.set_sync_guide_title(s(ui, 1051).into());
         ui.set_sync_guide_body(format!("1. {}\n2. {}\n3. {}\n\n{}", s(ui, 1052), s(ui, 1053), s(ui, 1054).replace("{0}", &path),
-            s(ui, 1055).replace("{0}", "Baf · RG CubeXX")).into());
+            s(ui, 1055).replace("{0}", "Player 1 · RG CubeXX")).into());
         ui.set_sync_guide_code("3ULBXAD".into());
         ui.set_sync_guide_items(gen(&[(&s(ui, 391), "", "", false, -1)]));
         ui.set_sync_guide_index(0); ui.set_sync_guide_step(2);
@@ -1436,7 +1436,7 @@ fn main() {
     scenes.push(("sync_guide_pick", Box::new(|ui| {
         ui.set_sync_guide_title(s(ui, 1056).into()); ui.set_sync_guide_body(s(ui, 1057).into()); ui.set_sync_guide_code("".into());
         ui.set_sync_guide_waiting(s(ui, 1058).into());
-        ui.set_sync_guide_items(gen(&[("Eli · RG40XX-V", "192.168.1.31", &s(ui, 1032), false, -1),
+        ui.set_sync_guide_items(gen(&[("Player 2 · RG40XX-V", "192.168.1.31", &s(ui, 1032), false, -1),
             (&s(ui, 1059).replace("{0}", "GBA3TN7"), "192.168.1.30", "", false, -1),
             (&s(ui, 1059).replace("{0}", "MZ2KQ4P"), "192.168.1.44", "", false, -1)]));
         ui.set_sync_guide_index(1); ui.set_sync_guide_step(3);
@@ -1467,7 +1467,7 @@ fn main() {
     })));
     scenes.push(("sync_guide_done", Box::new(|ui| {
         ui.set_sync_guide_show_qr(false); ui.set_sync_guide_code("".into()); ui.set_sync_guide_waiting("".into());
-        ui.set_sync_guide_title(s(ui, 1080).into()); ui.set_sync_guide_body(s(ui, 1081).replace("{0}", "Eli · RG40XX-V").into());
+        ui.set_sync_guide_title(s(ui, 1080).into()); ui.set_sync_guide_body(s(ui, 1081).replace("{0}", "Player 2 · RG40XX-V").into());
         ui.set_sync_guide_items(gen(&[(&s(ui, 697), "", "", false, -1)]));
         ui.set_sync_guide_index(0); ui.set_sync_guide_step(5);
     })));
