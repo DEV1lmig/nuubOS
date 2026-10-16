@@ -48,7 +48,7 @@ prepare the SD card.
 
 | Device | Status |
 |---|---|
-| RG40XX-V | Tested |
+| RG40XX-V, RG40XX-V V2 | Tested |
 | RG CubeXX | Tested |
 | RG35XX Pro | Tested (new backlight driver not tested yet) |
 | RG35XX 2024, RG35XX Plus, RG35XX H, RG35XX SP, RG34XX, RG34XX SP, RG40XX H, RG28XX, RG SP | Supported, not tested on hardware yet |
@@ -103,3 +103,5 @@ Slint toolkit. All bundled third-party software keeps its own license. See
 
 nuubOS is an independent project. It is not affiliated with Anbernic, Valve, NVIDIA,
 Google, Microsoft or the RetroArch project.
+
+<sub>Screenshots show free homebrew games under their own licenses: *Tobu Tobu Girl* and *Tobu Tobu Girl Deluxe* by Tangram Games ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), *µCity* by Antonio Niño Díaz (GPL-3.0+), *Libbet and the Magic Floor* (zlib), *Concentration Room* and *Thwaite* (GPL-3.0+) by Damian Yerrick. Music: Kevin MacLeod, incompetech.com (CC BY 4.0).</sub>

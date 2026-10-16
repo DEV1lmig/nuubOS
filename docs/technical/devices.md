@@ -8,7 +8,7 @@ There is no automatic detection, and an empty or unknown value stops the boot.
 | `DEVICE` | Device tree | Screen | Sticks | Status |
 |---|---|---|---|---|
 | `rg40xx-v` | `sun50i-h700-anbernic-rg40xx-v.dtb` | 640x480 | 1 | Qualified |
-| `rg40xx-v-v2` | `...rg40xx-v-v2-panel.dtb` | 640x480 | 1 | Untested |
+| `rg40xx-v-v2` | `...rg40xx-v-v2-panel.dtb` | 640x480 | 1 | Qualified |
 | `rgcubexx` | `...rgcubexx.dtb` | 720x720 | 2 | Qualified |
 | `rg35xx-pro` | `...rg35xx-pro.dtb` | 640x480 | 2 | Qualified (new PWM backlight untested) |
 | `rg35xx-2024`, `rg35xx-2024-v6` | `...rg35xx-2024(-rev6-panel).dtb` | 640x480 | 0 | Untested |
