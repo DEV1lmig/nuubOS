@@ -1051,7 +1051,7 @@
 1050=Kies wat dit profiel deelt. Gebruik op elk apparaat hetzelfde profiel: elk profiel heeft zijn eigen savegames.
 1051=Op de andere console
 1052=Zet hem aan en verbind hem met hetzelfde wifinetwerk.
-1053=Kies hetzelfde profiel.
+1053=Kies een profiel met dezelfde naam.
 1054=Open {0}.
 1055=Deze console: {0}
 1056=Kies de andere console
@@ -1299,3 +1299,4 @@
 1298=december
 1299={0} {1} {2}
 1300={3} {0} {1} {2}
+1301=Geen batterij

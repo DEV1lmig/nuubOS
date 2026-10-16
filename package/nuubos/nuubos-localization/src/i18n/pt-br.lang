@@ -1051,7 +1051,7 @@
 1050=Escolha o que este perfil compartilha. Use o mesmo perfil em todos os dispositivos: cada perfil tem os próprios saves.
 1051=No outro console
 1052=Ligue-o e conecte-o à mesma rede Wi-Fi.
-1053=Escolha o mesmo perfil.
+1053=Escolha um perfil com o mesmo nome.
 1054=Abra {0}.
 1055=Este console: {0}
 1056=Escolha o outro console
@@ -1299,3 +1299,4 @@
 1298=dezembro
 1299={0} de {1} de {2}
 1300={3}, {0} de {1} de {2}
+1301=Sem bateria

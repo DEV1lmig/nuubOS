@@ -22,9 +22,12 @@
  *     only with RELAYS=1 too may encrypted data pass through the public
  *     relays when no direct connection works; no crash or usage
  *     reports, ever;
- *   - folders "nuubos-<kind>" exactly as FOLDERS says, shared with every
- *     accepted device (same ids on every device: two consoles meet in the
- *     same folder); ignorePerms (exFAT); saves keep replaced versions in
+ *   - folders exactly as FOLDERS says, shared with every accepted device:
+ *     the user's own "nuubos-<profile key>-<kind>" (key from the profile
+ *     name, folder_ids(): the same person on two consoles meets in the same
+ *     folder, two people never do, even through a PC or NAS they share),
+ *     the console's library store "nuubos-covers" / "nuubos-metadata";
+ *     ignorePerms (exFAT); saves keep replaced versions in
  *     .stversions for 30 days (trash can). ROMs are never synchronized and
  *     conflicts stay as Syncthing ".sync-conflict" copies.
  *
@@ -127,17 +130,20 @@
  * library/consoles, where libraryd keeps one file per console and adds
  * the others up (never one file written by two consoles). */
 static const char *const KIND[KINDS] = { "saves", "states", "screenshots", "library", "history" };
+/* id: the console's own folders' id, or the kind part of a per-user id
+ * ("nuubos-<key>-<id>"); per-user folders were "nuubos-<id>" before
+ * 2026-10-16 and are removed from Syncthing under that name. */
 static const struct {
 	int kind;
 	const char *id, *label, *path;
 	bool per_user, versioned;
 } FOLDER[FOLDERS] = {
-	{ 0, "nuubos-saves", "nuubOS Saves", "saves", true, true },
-	{ 1, "nuubos-states", "nuubOS Save States", "states", true, false },
-	{ 2, "nuubos-screenshots", "nuubOS Screenshots", "screenshots", true, false },
+	{ 0, "saves", "nuubOS Saves", "saves", true, true },
+	{ 1, "states", "nuubOS Save States", "states", true, false },
+	{ 2, "screenshots", "nuubOS Screenshots", "screenshots", true, false },
 	{ 3, "nuubos-covers", "nuubOS Covers", "library/covers", false, false },
 	{ 3, "nuubos-metadata", "nuubOS Metadata", "library/metadata", false, false },
-	{ 4, "nuubos-history", "nuubOS Play Activity", "library/consoles", true, false },
+	{ 4, "history", "nuubOS Play Activity", "library/consoles", true, false },
 };
 
 struct conf {
@@ -168,6 +174,8 @@ static pthread_mutex_t ev_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ev_cond = PTHREAD_COND_INITIALIZER;
 static unsigned ev_gen;
 static bool ev_active;
+/* Syncthing ids and labels of FOLDER for the running user (folder_ids). */
+static char folder_id[FOLDERS][200], folder_label[FOLDERS][200];
 static char ev_key[64];
 static char folder_state[FOLDERS][24];
 /* Covers or metadata arrived: libraryd rescans (its metadata index). */
@@ -520,6 +528,46 @@ static bool apply_options(void)
 	return ok;
 }
 
+/* Per-user folder ids carry a key of the profile name, so a PC or NAS that
+ * several profiles sync with keeps each person's saves apart (with fixed
+ * ids every profile of every console met in one folder; user report
+ * 2026-10-16) while the same name on two consoles still meets. Key: ASCII
+ * letters and digits lowercased, other ASCII runs as one "-", each
+ * non-ASCII byte as two hex digits ("José" -> "josc3a9"), at most 64
+ * bytes of name: URL-safe and the same on every console. A renamed profile
+ * gets new folders (the other devices accept them again). */
+static void folder_ids(const char *user)
+{
+	char path[PATH_MAX], name[96] = "", key[160] = "";
+	size_t n = 0;
+
+	snprintf(path, sizeof(path), STATE_USERS "/%s/profile.conf", user);
+	file_value(path, "USER_NAME", name, sizeof(name));
+	for (const unsigned char *c = (const unsigned char *)name; *c && n + 3 < sizeof(key); c++) {
+		if (isalnum(*c) && *c < 0x80)
+			key[n++] = (char)tolower(*c);
+		else if (*c >= 0x80)
+			n += (size_t)snprintf(key + n, sizeof(key) - n, "%02x", *c);
+		else if (n && key[n - 1] != '-')
+			key[n++] = '-';
+	}
+	while (n && key[n - 1] == '-')
+		n--;
+	key[n] = '\0';
+	if (!n)
+		snprintf(key, sizeof(key), "%.36s", user);
+	for (int i = 0; i < FOLDERS; i++) {
+		if (FOLDER[i].per_user) {
+			snprintf(folder_id[i], sizeof(folder_id[i]), "nuubos-%s-%s", key, FOLDER[i].id);
+			snprintf(folder_label[i], sizeof(folder_label[i]), "%s · %s", FOLDER[i].label,
+				 name[0] ? name : key);
+		} else {
+			snprintf(folder_id[i], sizeof(folder_id[i]), "%s", FOLDER[i].id);
+			snprintf(folder_label[i], sizeof(folder_label[i]), "%s", FOLDER[i].label);
+		}
+	}
+}
+
 /* Every nuubOS folder exactly as the user's FOLDERS says, shared with all
  * accepted devices. */
 static bool apply_folders(void)
@@ -528,10 +576,29 @@ static bool apply_folders(void)
 	cJSON *devices = rest("GET", "/rest/config/devices", NULL, &status), *d;
 	bool ok = status == 200;
 
-	for (int i = 0; ok && i < FOLDERS; i++) {
-		char path[128], dir[PATH_MAX];
+	cJSON *folders = rest("GET", "/rest/config/folders", NULL, &status), *x;
+	cJSON *listed = status == 200 ? folders : NULL;
 
-		snprintf(path, sizeof(path), "/rest/config/folders/%s", FOLDER[i].id);
+	/* nuubOS folders that are not the user's current ones stop syncing
+	 * (files stay): the shared ids of before 2026-10-16 and those of an
+	 * earlier profile name, which would overlap the new ones' paths. */
+	cJSON_ArrayForEach(x, listed) {
+		const char *id = jstr(x, "id");
+		bool current = false;
+		char path[256];
+
+		for (int i = 0; i < FOLDERS; i++)
+			current = current || !strcmp(id, folder_id[i]);
+		if (current || strncmp(id, "nuubos-", 7) || strlen(id) > 200)
+			continue;
+		snprintf(path, sizeof(path), "/rest/config/folders/%s", id);
+		cJSON_Delete(rest("DELETE", path, NULL, &status));
+	}
+	cJSON_Delete(folders);
+	for (int i = 0; ok && i < FOLDERS; i++) {
+		char path[256], dir[PATH_MAX];
+
+		snprintf(path, sizeof(path), "/rest/config/folders/%s", folder_id[i]);
 		if (!cur.folder[FOLDER[i].kind]) {
 			/* The folder stops syncing; its files stay on the console. */
 			cJSON_Delete(rest("DELETE", path, NULL, &status));
@@ -545,8 +612,8 @@ static bool apply_folders(void)
 		else
 			snprintf(dir, sizeof(dir), USERDATA_ROOT "/%s", FOLDER[i].path);
 		mkdir_parents(dir);
-		cJSON_AddStringToObject(f, "id", FOLDER[i].id);
-		cJSON_AddStringToObject(f, "label", FOLDER[i].label);
+		cJSON_AddStringToObject(f, "id", folder_id[i]);
+		cJSON_AddStringToObject(f, "label", folder_label[i]);
 		cJSON_AddStringToObject(f, "path", dir);
 		cJSON_AddStringToObject(f, "type", "sendreceive");
 		/* exFAT has no permissions. */
@@ -589,6 +656,7 @@ static void on_ready(void)
 	pthread_mutex_lock(&ev_lock);
 	memset(folder_state, 0, sizeof(folder_state));
 	memset(completion, 0, sizeof(completion));
+	folder_ids(child_user);
 	snprintf(ev_key, sizeof(ev_key), "%s", cur.key);
 	ev_active = true;
 	ev_gen++;
@@ -608,12 +676,12 @@ static void on_ready(void)
 		fprintf(stderr, "syncd: policy not fully applied\n");
 	/* Where each folder stands now; StateChanged events follow it. */
 	for (int i = 0; i < FOLDERS; i++) {
-		char q[96];
+		char q[256];
 		cJSON *st;
 
 		if (!cur.folder[FOLDER[i].kind])
 			continue;
-		snprintf(q, sizeof(q), "/rest/db/status?folder=%s", FOLDER[i].id);
+		snprintf(q, sizeof(q), "/rest/db/status?folder=%s", folder_id[i]);
 		st = rest("GET", q, NULL, &status);
 		pthread_mutex_lock(&ev_lock);
 		if (status == 200 && !folder_state[i][0])
@@ -631,7 +699,7 @@ static void on_ready(void)
 static int folder_of(const char *id)
 {
 	for (int i = 0; i < FOLDERS; i++)
-		if (!strcmp(id, FOLDER[i].id))
+		if (folder_id[i][0] && !strcmp(id, folder_id[i]))
 			return i;
 	return -1;
 }

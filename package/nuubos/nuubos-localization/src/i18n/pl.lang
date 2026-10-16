@@ -1051,7 +1051,7 @@
 1050=Wybierz, co udostępnia ten profil. Używaj tego samego profilu na każdym urządzeniu: każdy profil ma własne zapisy.
 1051=Na drugiej konsoli
 1052=Włącz ją i połącz z tą samą siecią Wi-Fi.
-1053=Wybierz ten sam profil.
+1053=Wybierz profil o tej samej nazwie.
 1054=Otwórz {0}.
 1055=Ta konsola: {0}
 1056=Wybierz drugą konsolę
@@ -1299,3 +1299,4 @@
 1298=grudnia
 1299={0} {1} {2}
 1300={3}, {0} {1} {2}
+1301=Brak baterii

@@ -318,6 +318,20 @@ static void refresh_battery(struct topbar_state *state)
     if (best_base[0] == '\0' || best_score < 0)
         return;
 
+    /* No battery (a console run from USB as a TV box, user case
+     * 2026-10-16): the AXP717 reports present=0, health Dead and a floating
+     * voltage. Say so instead of a dead battery that does not charge. */
+    {
+        int present = 1;
+
+        snprintf(path, sizeof(path), "%s/present", best_base);
+        if (read_int_file(path, &present) && present == 0) {
+            snprintf(state->battery_state, sizeof(state->battery_state), "absent");
+            snprintf(state->battery_health, sizeof(state->battery_health), "absent");
+            return;
+        }
+    }
+
     snprintf(path, sizeof(path), "%s/capacity", best_base);
     if (!read_int_file(path, &percent))
         percent = -1;

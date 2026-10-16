@@ -1051,7 +1051,7 @@
 1050=Chọn những gì hồ sơ này chia sẻ. Dùng cùng một hồ sơ trên mọi thiết bị: mỗi hồ sơ có tệp lưu riêng.
 1051=Trên máy còn lại
 1052=Bật máy và kết nối vào cùng mạng Wi-Fi.
-1053=Chọn cùng hồ sơ.
+1053=Chọn hồ sơ có cùng tên.
 1054=Mở {0}.
 1055=Máy này: {0}
 1056=Chọn máy còn lại
@@ -1299,3 +1299,4 @@
 1298=tháng 12
 1299=ngày {0} {1} năm {2}
 1300={3}, ngày {0} {1} năm {2}
+1301=Không có pin

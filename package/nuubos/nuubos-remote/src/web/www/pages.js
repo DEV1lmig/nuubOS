@@ -1370,8 +1370,9 @@ page('power', 'settings', () => C(813, 'Power'), async () => {
     row({ key: 'sleep', title: C(56, 'Sleep After'), value: Number(s.sleep_after_min) ? s.sleep_after_min + C(215, ' min') : C(54, 'Off'), chevron: true,
       on: () => pickAndAct(C(56, 'Sleep After'), [0, 1, 2, 5, 10, 15, 30, 45, 60, 120].map((v) => ({ value: String(v), label: v ? v + C(215, ' min') : C(54, 'Off') })), s.sleep_after_min, 'system.sleep') })),
   section(C(814, 'BATTERY'), 'device'), group(
+    ...(bstate === 'absent' ? [row({ key: 'charge', title: C(816, 'Charge'), value: C(1301, 'No battery') })] : [
     row({ key: 'charge', title: C(816, 'Charge'), value: s['battery.percent'] + '%', detail: bstate === 'charging' ? C(382, 'Charging') : bstate === 'full' ? C(383, 'Fully charged') : bstate === 'not-charging' ? C(819, 'Not charging') : C(818, 'Discharging') }),
-    row({ key: 'health', title: C(817, 'Battery Health'), value: health ? C(health[0], health[1]) : st.BATTERY_HEALTH ? C(824, 'Check the battery') : C(211, 'Unknown') }),
+    row({ key: 'health', title: C(817, 'Battery Health'), value: health ? C(health[0], health[1]) : st.BATTERY_HEALTH ? C(824, 'Check the battery') : C(211, 'Unknown') })]),
     ...(s['charge_limit.supported'] === '1' ? [row({ key: 'climit', title: C(900, 'Charge Limit'), value: Number(s.charge_limit) < 100 ? s.charge_limit + '%' : C(54, 'Off'), chevron: true,
       on: () => pickAndAct(C(900, 'Charge Limit'), [80, 85, 90, 95, 100].map((v) => ({ value: String(v), label: v < 100 ? v + '%' : C(54, 'Off') })), s.charge_limit, 'system.chargelimit') })] : [])),
   section(C(815, 'ACCESSORY BATTERIES'), 'device'), group(accessories.length

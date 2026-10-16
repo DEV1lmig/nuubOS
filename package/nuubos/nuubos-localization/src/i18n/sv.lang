@@ -1051,7 +1051,7 @@
 1050=Välj vad denna profil delar. Använd samma profil på alla enheter: varje profil har egna sparfiler.
 1051=På den andra konsolen
 1052=Slå på den och anslut den till samma Wi-Fi-nätverk.
-1053=Välj samma profil.
+1053=Välj en profil med samma namn.
 1054=Öppna {0}.
 1055=Denna konsol: {0}
 1056=Välj den andra konsolen
@@ -1299,3 +1299,4 @@
 1298=december
 1299={0} {1} {2}
 1300={3} {0} {1} {2}
+1301=Inget batteri

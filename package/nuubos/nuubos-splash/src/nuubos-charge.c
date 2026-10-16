@@ -5,7 +5,9 @@
  * Run by S08nuubos-charge after the state partition, the display
  * brightness and rgbd are up. When the PMIC reports that the console was
  * switched on by plugging in the charger (AXP717 REG 20: VBUS insert, not
- * the power key; a software reboot reads 0) and a battery is present, it
+ * the power key; a software reboot reads 0), a battery is present and no
+ * HDMI display is connected (a docked console boots straight to the TV:
+ * this screen is drawn on the built-in panel only; 2026-10-16), it
  * shows a minimal screen instead of booting: the nuubOS wordmark, the
  * splash track as the charge gauge (the part above the user's charge limit
  * dimmed, the limit under its edge), the percentage and the battery
@@ -194,6 +196,53 @@ static void find_supplies(void)
 			snprintf(usb_dir, sizeof(usb_dir), "%s", g.gl_pathv[i]);
 	}
 	globfree(&g);
+}
+
+/* A TV on HDMI: the console is docked, boot instead of charging (the
+ * screen would be on the panel, the TV stayed black: RG35XX Pro report
+ * 2026-10-16). HPD is up even with the TV in standby. */
+static bool hdmi_connected(void)
+{
+	glob_t g;
+	bool on = false;
+
+	if (glob("/sys/class/drm/card*-HDMI-A-*/status", 0, NULL, &g))
+		return false;
+	for (size_t i = 0; i < g.gl_pathc && !on; i++) {
+		FILE *fp = fopen(g.gl_pathv[i], "r");
+		char st[32] = "";
+
+		if (fp) {
+			if (fgets(st, sizeof(st), fp))
+				on = !strncmp(st, "connected", 9);
+			fclose(fp);
+		}
+	}
+	globfree(&g);
+	return on;
+}
+
+/* REG 00 bit 3 alone read 1 right after a charger-plug boot with no battery
+ * (RG35XX Pro, 2026-10-16; once running: present 0, health Dead, 0.9 V):
+ * also require a plausible cell voltage and a health that is not Dead. */
+static bool battery_present(void)
+{
+	char health[32] = "";
+	FILE *fp;
+	char path[300];
+
+	if (!battery_dir[0] || read_int(battery_dir, "present", 0) != 1)
+		return false;
+	if (read_int(battery_dir, "voltage_now", 0) < 2500000)
+		return false;
+	snprintf(path, sizeof(path), "%s/health", battery_dir);
+	fp = fopen(path, "r");
+	if (fp) {
+		if (!fgets(health, sizeof(health), fp))
+			health[0] = '\0';
+		fclose(fp);
+	}
+	return strncmp(health, "Dead", 4) != 0;
 }
 
 static bool charger_online(void)
@@ -980,8 +1029,12 @@ int main(int argc, char **argv)
 	pwron = argc > 1 && !strcmp(argv[1], "--force") ? AXP717_PWRON_VBUS : pmic_read(AXP717_PWRON_STATUS);
 	if (pwron < 0 || !(pwron & AXP717_PWRON_VBUS) || (pwron & AXP717_PWRON_KEY))
 		return 0;
+	if (!(argc > 1 && !strcmp(argv[1], "--force")) && hdmi_connected()) {
+		fprintf(stderr, "nuubos-charge: HDMI connected, booting\n");
+		return 0;
+	}
 	find_supplies();
-	if (!battery_dir[0] || read_int(battery_dir, "present", 0) != 1 || !charger_online())
+	if (!battery_present() || !charger_online())
 		return 0;
 
 	apply_charge_limit();

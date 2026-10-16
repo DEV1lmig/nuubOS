@@ -1051,7 +1051,7 @@
 1050=Vyberte, co tento profil sdílí. Na každém zařízení používejte stejný profil: každý profil má vlastní uložené pozice.
 1051=Na druhé konzoli
 1052=Zapněte ji a připojte ke stejné síti Wi-Fi.
-1053=Vyberte stejný profil.
+1053=Vyberte profil se stejným jménem.
 1054=Otevřete {0}.
 1055=Tato konzole: {0}
 1056=Vyberte druhou konzoli
@@ -1299,3 +1299,4 @@
 1298=prosince
 1299={0}. {1} {2}
 1300={3} {0}. {1} {2}
+1301=Bez baterie

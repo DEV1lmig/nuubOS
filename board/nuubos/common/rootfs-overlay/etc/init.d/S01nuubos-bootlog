@@ -16,6 +16,13 @@ cat /proc/partitions > "$LOGDIR/06-partitions.txt" 2>&1
 
 dmesg > "$LOGDIR/07-dmesg-early.txt" 2>&1
 
+# Power supplies and the AXP717 status registers (REG 00 battery present,
+# REG 20 power-on source): what the charge screen decides on.
+{
+    for d in /sys/class/power_supply/*; do echo "== $d"; cat "$d/uevent"; done
+    for r in 0x00 0x01 0x04 0x20; do echo "axp717 $r=$(i2cget -f -y 0 0x34 $r 2>&1)"; done
+} > "$LOGDIR/13-power.txt" 2>&1
+
 ip link > "$LOGDIR/08-ip-link.txt" 2>&1
 ip addr > "$LOGDIR/09-ip-addr.txt" 2>&1
 

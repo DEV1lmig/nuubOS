@@ -1051,7 +1051,7 @@
 1050=Alege ce partajează acest profil. Folosește același profil pe fiecare dispozitiv: fiecare profil are propriile salvări.
 1051=Pe cealaltă consolă
 1052=Pornește-o și conecteaz-o la aceeași rețea Wi-Fi.
-1053=Alege același profil.
+1053=Alege un profil cu același nume.
 1054=Deschide {0}.
 1055=Această consolă: {0}
 1056=Alege cealaltă consolă
@@ -1299,3 +1299,4 @@
 1298=decembrie
 1299={0} {1} {2}
 1300={3}, {0} {1} {2}
+1301=Fără baterie

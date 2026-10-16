@@ -534,10 +534,10 @@ fn screen(ui: &HomeWindow, s: &Snapshot, g: &Guide) -> Screen {
         }
         (2, CONSOLE) => {
             sc.title = tr(ui, 1051, "On the Other Console");
-            let path = [tr(ui, 3, "Settings"), tr(ui, 5, "Connectivity"), tr(ui, 669, "Syncthing"),
+            let path = [tr(ui, 3, "Settings"), tr(ui, 702, "Gaming"), tr(ui, 669, "Syncthing"),
                 tr(ui, 1028, "Add a Device"), tr(ui, 1043, "Another Console")].join(" → ");
             sc.body = format!("{}\n\n{}", numbered(&[tr(ui, 1052, "Turn it on and connect it to the same Wi-Fi network."),
-                tr(ui, 1053, "Choose the same profile."), tr_arg(ui, 1054, "Open {0}.", &path)]),
+                tr(ui, 1053, "Choose a profile with the same name."), tr_arg(ui, 1054, "Open {0}.", &path)]),
                 tr_arg(ui, 1055, "This console: {0}", &s.name));
             if s.ready {
                 sc.code = short(&s.id);

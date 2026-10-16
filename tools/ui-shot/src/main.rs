@@ -915,9 +915,11 @@ fn main() {
         ui.set_tester_left_trigger(0); ui.set_tester_left_x(0); ui.set_tester_left_y(0);
         ui.set_tester_r3(false); ui.set_tester_hotkey(false);
         ui.set_settings_open(false);
-        let users: Vec<UserProfileEntry> = ["Fabio", "Elisa", "Ospite"].iter().enumerate().map(|(i, n)| UserProfileEntry {
-            id: format!("u{i}").into(), name: (*n).into(), avatar_spec: "".into(), avatar_path: "".into(),
-            avatar: Default::default(), active: i == 0, default_user: i == 0 }).collect();
+        let users: Vec<UserProfileEntry> = [("Fabio", 2), ("Elisa", 6), ("Guest", 11)].iter().enumerate().map(|(i, (n, a))| UserProfileEntry {
+            id: format!("u{i}").into(), name: (*n).into(), avatar_spec: format!("builtin:{a:02}").into(), avatar_path: "".into(),
+            avatar: slint::Image::load_from_path(std::path::Path::new(
+                &format!("/workspace/package/nuubos/nuubos-users/src/avatars/{a:02}.png"))).unwrap_or_default(),
+            active: i == 0, default_user: i == 0 }).collect();
         ui.set_users(ModelRc::from(Rc::new(VecModel::from(users))));
         ui.set_user_picker_index(1);
         ui.set_user_picker_open(true);
@@ -962,7 +964,7 @@ fn main() {
     })));
     /* Avatar picker over the Users step: the shipped built-in avatars. */
     scenes.push(("oob_avatar_picker", Box::new(|ui| {
-        let choices: Vec<AvatarChoiceEntry> = (1..=24).map(|n| AvatarChoiceEntry {
+        let choices: Vec<AvatarChoiceEntry> = (1..=20).map(|n| AvatarChoiceEntry {
             spec: format!("builtin:{n:02}").into(), label: format!("Avatar {n}").into(), path: "".into(),
             avatar: slint::Image::load_from_path(std::path::Path::new(
                 &format!("/workspace/package/nuubos/nuubos-users/src/avatars/{n:02}.png"))).unwrap_or_default(),
@@ -1419,7 +1421,7 @@ fn main() {
         ui.set_sync_guide_index(5); ui.set_sync_guide_step(1);
     })));
     scenes.push(("sync_guide_console", Box::new(|ui| {
-        let path = [s(ui, 3), s(ui, 5), s(ui, 669), s(ui, 1028), s(ui, 1043)].join(" → ");
+        let path = [s(ui, 3), s(ui, 702), s(ui, 669), s(ui, 1028), s(ui, 1043)].join(" → ");
         ui.set_sync_guide_title(s(ui, 1051).into());
         ui.set_sync_guide_body(format!("1. {}\n2. {}\n3. {}\n\n{}", s(ui, 1052), s(ui, 1053), s(ui, 1054).replace("{0}", &path),
             s(ui, 1055).replace("{0}", "Baf · RG CubeXX")).into());

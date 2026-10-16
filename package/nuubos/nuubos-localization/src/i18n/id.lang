@@ -1051,7 +1051,7 @@
 1050=Pilih apa yang dibagikan profil ini. Gunakan profil yang sama di setiap perangkat: setiap profil punya simpanannya sendiri.
 1051=Di konsol lainnya
 1052=Nyalakan dan hubungkan ke jaringan Wi-Fi yang sama.
-1053=Pilih profil yang sama.
+1053=Pilih profil dengan nama yang sama.
 1054=Buka {0}.
 1055=Konsol ini: {0}
 1056=Pilih konsol lainnya
@@ -1299,3 +1299,4 @@
 1298=Desember
 1299={0} {1} {2}
 1300={3}, {0} {1} {2}
+1301=Tanpa baterai

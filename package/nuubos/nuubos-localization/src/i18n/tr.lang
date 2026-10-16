@@ -1051,7 +1051,7 @@
 1050=Bu profilin neyi paylaşacağını seçin. Her cihazda aynı profili kullanın: her profilin kendi kayıtları vardır.
 1051=Diğer konsolda
 1052=Açın ve aynı Wi-Fi ağına bağlayın.
-1053=Aynı profili seçin.
+1053=Aynı ada sahip bir profil seçin.
 1054={0} öğesini açın.
 1055=Bu konsol: {0}
 1056=Diğer konsolu seçin
@@ -1299,3 +1299,4 @@
 1298=Aralık
 1299={0} {1} {2}
 1300={0} {1} {2} {3}
+1301=Pil yok

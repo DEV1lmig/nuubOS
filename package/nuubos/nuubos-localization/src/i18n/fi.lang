@@ -1051,7 +1051,7 @@
 1050=Valitse, mitä tämä profiili jakaa. Käytä samaa profiilia jokaisella laitteella: jokaisella profiililla on omat tallennuksensa.
 1051=Toisella konsolilla
 1052=Käynnistä se ja yhdistä se samaan Wi-Fi-verkkoon.
-1053=Valitse sama profiili.
+1053=Valitse profiili, jolla on sama nimi.
 1054=Avaa {0}.
 1055=Tämä konsoli: {0}
 1056=Valitse toinen konsoli
@@ -1299,3 +1299,4 @@
 1298=joulukuuta
 1299={0}. {1} {2}
 1300={3} {0}. {1} {2}
+1301=Ei akkua

@@ -40,7 +40,7 @@ open(home + "/ran", "a").write("x")
 open(home + "/env", "w").write(os.environ.get("STMONITORED", ""))
 if os.path.exists(home + "/crash"): sys.exit(3)
 MY, PEER, NEAR, OLD = %r, %r, %r, %r
-st = {"options": {}, "folders": {}, "devices": {MY: {"deviceID": MY, "name": "nuubos"}},
+st = {"options": {}, "folders": {"nuubos-saves": {"id": "nuubos-saves"}}, "devices": {MY: {"deviceID": MY, "name": "nuubos"}},
       "pending": {PEER: {"name": "Laptop", "address": "192.168.1.20:22000", "time": time.strftime("%%Y-%%m-%%dT%%H:%%M:%%SZ", time.gmtime())},
                   OLD: {"name": "nuubos", "address": "127.0.0.1:22000", "time": "2026-01-01T10:00:00.123+02:00"}},
       "ignored": []}
@@ -65,6 +65,7 @@ class H(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query); p = u.path
         if p == "/rest/system/status": self.out(200, {"myID": MY})
         elif p == "/rest/config/devices": self.out(200, list(st["devices"].values()))
+        elif p == "/rest/config/folders": self.out(200, list(st["folders"].values()))
         elif p == "/rest/config": self.out(200, {"remoteIgnoredDevices": st["ignored"], "devices": list(st["devices"].values())})
         elif p == "/rest/system/connections":
             self.out(200, {"connections": {d: {"connected": d == PEER, "address": "192.168.1.20:22000"} for d in st["devices"]}})
@@ -113,8 +114,8 @@ except OSError: pass
 srv = S(sock, H)
 def later():
     time.sleep(0.5)
-    emit("StateChanged", {"folder": "nuubos-saves", "from": "idle", "to": "syncing"})
-    emit("FolderCompletion", {"folder": "nuubos-saves", "device": PEER, "completion": 42.5})
+    emit("StateChanged", {"folder": "nuubos-mario-saves", "from": "idle", "to": "syncing"})
+    emit("FolderCompletion", {"folder": "nuubos-mario-saves", "device": PEER, "completion": 42.5})
 threading.Thread(target=later, daemon=True).start()
 srv.serve_forever()
 ''' % (MY, PEER, NEAR, OLD))
@@ -195,10 +196,12 @@ try:
     o = s['options']
     check('local only, no reports', o.get('globalAnnounceEnabled') is False and o.get('relaysEnabled') is False
           and o.get('natEnabled') is False and o.get('crashReportingEnabled') is False and o.get('urAccepted') == -1)
-    f = s['folders'].get('nuubos-saves', {})
+    f = s['folders'].get('nuubos-mario-saves', {})
     check('saves folder per user, exFAT, trash can', f.get('path') == users + '/' + U1 + '/saves'
           and f.get('ignorePerms') is True and f.get('versioning', {}).get('type') == 'trashcan')
-    check('states folder too', 'nuubos-states' in s['folders'] and 'nuubos-screenshots' not in s['folders'])
+    check('per-user folder id and label carry the profile name', f.get('label') == 'nuubOS Saves · Mario')
+    check('old shared id removed', 'nuubos-saves' not in s['folders'])
+    check('states folder too', 'nuubos-mario-states' in s['folders'] and 'nuubos-mario-screenshots' not in s['folders'])
     snap = last()
     check('snapshot identity', 'device_id=' + MY in snap and 'device_name=Mario · RG40XX-V' in snap)
     check('snapshot pending + nearby (IPv4, not self)', 'pending=%s\tLaptop\t192.168.1.20' % PEER in snap
@@ -209,7 +212,7 @@ try:
     check('add (accept) device', ctl('add', PEER, 'Laptop').startswith('OK'))
     s = fstate()
     check('folders shared with it', all(any(x['deviceID'] == PEER for x in s['folders'][k]['devices'])
-                                        for k in ('nuubos-saves', 'nuubos-states')))
+                                        for k in ('nuubos-mario-saves', 'nuubos-mario-states')))
     check('device listed connected, request gone', wait(lambda: 'device=%s\tLaptop\t1' % PEER in last()
                                                          and 'pending=' not in last()))
     check('request notification dismissed', wait(lambda: any(n.startswith('DISMISS id=sync.PEER222') for n in notes)))
@@ -222,7 +225,7 @@ try:
           and 'FOLDERS=saves,states,library' in conf())
     check('covers pulled -> library rescan', wait(lambda: any(x.startswith('SCAN') for x in scans)))
     check('history on: the user\'s library/consoles', ctl('folder', 'history', 'on').startswith('OK')
-          and fstate()['folders'].get('nuubos-history', {}).get('path') == users + '/' + U1 + '/library/consoles'
+          and fstate()['folders'].get('nuubos-mario-history', {}).get('path') == users + '/' + U1 + '/library/consoles'
           and wait(lambda: 'folder=history\t1' in last() and 'folder=library\t1\t' in last()))
     check('library off removes both folders', ctl('folder', 'library', 'off').startswith('OK')
           and 'nuubos-covers' not in fstate()['folders'] and 'nuubos-metadata' not in fstate()['folders'])
@@ -233,7 +236,7 @@ try:
           and 'RELAYS=1' in conf() and wait(lambda: 'relays=1' in last()))
     check('internet off also stops relays', ctl('internet', 'off').startswith('OK')
           and fstate()['options']['relaysEnabled'] is False and fstate()['options']['globalAnnounceEnabled'] is False)
-    check('folder off removes it', ctl('folder', 'states', 'off').startswith('OK') and 'nuubos-states' not in fstate()['folders'])
+    check('folder off removes it', ctl('folder', 'states', 'off').startswith('OK') and 'nuubos-mario-states' not in fstate()['folders'])
     check('ignore', ctl('ignore', NEAR).startswith('OK') and any(x['deviceID'] == NEAR for x in fstate()['ignored']))
     check('remove', ctl('remove', PEER).startswith('OK') and PEER not in fstate()['devices'])
     check('bad device id', ctl('add', '../etc').startswith('ERR device'))
@@ -254,6 +257,13 @@ try:
     os.unlink(users + '/' + U1 + '/appdata/syncthing/crash')
     check('enable again clears failed', ctl('enable').startswith('OK') and wait(lambda: 'ready=1' in last()))
     check('disable', ctl('disable').startswith('OK') and wait(lambda: 'running=0' in last()))
+    # Spaces and accents: lowercased ASCII, "-" for punctuation, hex for UTF-8.
+    open(state_users + '/' + U1 + '/profile.conf', 'w').write('USER_ID=%s\nUSER_NAME=Ana María\n' % U1)
+    check('renamed profile gets its own folder id', ctl('enable').startswith('OK') and wait(lambda: 'ready=1' in last())
+          and wait(lambda: 'nuubos-ana-marc3ada-saves' in fstate()['folders']))
+    check('old name\'s folders removed (no overlapping paths)', 'nuubos-mario-saves' not in fstate()['folders']
+          and 'nuubos-mario-history' not in fstate()['folders'])
+    check('disable again', ctl('disable').startswith('OK') and wait(lambda: 'running=0' in last()))
 finally:
     d.terminate(); d.wait(); subprocess.call(['pkill', '-f', fake]); ns.close(); ls.close()
 if fails:

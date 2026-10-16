@@ -1051,7 +1051,7 @@
 1050=Válaszd ki, mit oszt meg ez a profil. Minden eszközön ugyanazt a profilt használd: minden profilnak saját mentései vannak.
 1051=A másik konzolon
 1052=Kapcsold be, és csatlakoztasd ugyanahhoz a Wi-Fi-hálózathoz.
-1053=Válaszd ugyanazt a profilt.
+1053=Válassz azonos nevű profilt.
 1054=Nyisd meg ezt: {0}.
 1055=Ez a konzol: {0}
 1056=Válaszd ki a másik konzolt
@@ -1299,3 +1299,4 @@
 1298=december
 1299={2}. {1} {0}.
 1300={2}. {1} {0}., {3}
+1301=Nincs akkumulátor

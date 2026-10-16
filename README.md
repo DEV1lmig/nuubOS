@@ -1,5 +1,7 @@
 # nuubOS
 
+<p align="center"><img src="https://raw.githubusercontent.com/wiki/baf93/nuubOS/images/tv_home_recent.png" alt="nuubOS Home" width="820"></p>
+
 A console-style operating system for Anbernic handhelds built on the Allwinner H700.
 nuubOS boots straight into a controller-first home screen, plays games through
 RetroArch, streams from your PC, plays music and video, and keeps itself up to date
@@ -32,6 +34,7 @@ with signed, rollback-safe updates.
   casting to Chromecast, Miracast and DLNA TVs.
 - **HDMI output** at up to 1080p, with automatic switching between the TV and the
   built-in screen.
+- **TV box mode**: runs without its battery and screen, powered from USB on your TV.
 - **Updates**: an A/B system with signed updates. If an update does not boot, the
   console rolls back automatically. Pick the Nightly, RC or Stable channel.
 - **29 languages.** nuubOS sends no telemetry: see [privacy](docs/privacy.md).

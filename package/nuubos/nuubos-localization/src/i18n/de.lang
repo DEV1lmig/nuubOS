@@ -1051,7 +1051,7 @@
 1050=Wähle, was dieses Profil teilt. Nutze auf jedem Gerät dasselbe Profil: Jedes Profil hat eigene Spielstände.
 1051=Auf der anderen Konsole
 1052=Schalte sie ein und verbinde sie mit demselben WLAN.
-1053=Wähle dasselbe Profil.
+1053=Wähle ein Profil mit demselben Namen.
 1054=Öffne {0}.
 1055=Diese Konsole: {0}
 1056=Andere Konsole wählen
@@ -1299,3 +1299,4 @@
 1298=Dezember
 1299={0}. {1} {2}
 1300={3}, {0}. {1} {2}
+1301=Kein Akku
