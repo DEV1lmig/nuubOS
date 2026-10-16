@@ -15,6 +15,8 @@ with signed, rollback-safe updates.
 **[Technical documentation](docs/technical/README.md)** ·
 **[Licensing](LICENSING.md)**
 
+> nuubOS does **not** include games, BIOS or any copyrighted files: you bring your own, legally.
+
 ## Highlights
 
 - **Console experience**: a Home screen with your recently played games, systems and
@@ -67,9 +69,15 @@ Details and the exact device names: [Supported Devices](https://github.com/baf93
 
 Full instructions: [Installation](https://github.com/baf93/nuubOS/wiki/Installation).
 
-nuubOS does not include BIOS files or games. You add your own: see
+## No games, no BIOS, no copyrighted content
+
+nuubOS is an operating system only. **It does not include, download or link to any
+games (ROMs), BIOS or firmware files, or any other copyrighted content** you do not
+have the right to use. You add your own files, legally obtained, for example dumped
+from cartridges, discs and consoles you own, or free homebrew: see
 [Adding Games](https://github.com/baf93/nuubOS/wiki/Adding-Games) and
-[BIOS Files](https://github.com/baf93/nuubOS/wiki/BIOS-Files).
+[BIOS Files](https://github.com/baf93/nuubOS/wiki/BIOS-Files). Issues, pull requests
+and discussions asking for or sharing such files are closed and removed.
 
 ## Building from source
 
