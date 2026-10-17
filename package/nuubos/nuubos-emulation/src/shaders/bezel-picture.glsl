@@ -10,6 +10,7 @@
  */
 
 #pragma parameter CRT "CRT look" 0.0 0.0 1.0 1.0
+#pragma parameter CRT_SCANLINES "Scanline strength" 0.25 0.0 1.0 0.05
 /* OVERSCAN_X is declared by bezel.glsl only: RetroArch keeps one entry per
  * pragma and pass, sets the preset value on the first and uploads them all
  * by name, so a second declaration would reset the uniform to 0. */
@@ -133,8 +134,10 @@ COMPAT_VARYING vec4 vPic;
 
 #ifdef PARAMETER_UNIFORM
 uniform float CRT;
+uniform float CRT_SCANLINES;
 #else
 #define CRT 0.0
+#define CRT_SCANLINES 0.25
 #endif
 
 /* Texel t of the picture (origin top-left, whichever way rows run). */
@@ -182,7 +185,7 @@ vec3 picture(vec2 src, vec2 sc)
     float row = whole ? (floor(f.y * s) + 0.5) / s : f.y;
     float dy = row - centre;
     float width = mix(0.20, 0.34, dot(col, vec3(0.299, 0.587, 0.114)));
-    float strength = s >= 2.0 ? 0.25 : 0.0;
+    float strength = s >= 2.0 ? CRT_SCANLINES : 0.0;
     float scan = 1.0 - strength * (1.0 - exp(-(dy * dy) / (2.0 * width * width)));
     return min(col * scan * (1.0 + 0.55 * strength), vec3(1.0));
 }

@@ -132,7 +132,8 @@ deep_ps_failures="$(
     remote '
         dmesg |
         grep -cF \
-            "firmware failed to ack driver for entering Deep Power mode"
+            -e "firmware failed to ack driver for entering Deep Power mode" \
+            -e "firmware failed to leave lps state"
     ' || true
 )"
 deep_ps_failures="${deep_ps_failures:-0}"

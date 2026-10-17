@@ -1,0 +1,213 @@
+From dc45f9f07153fed16e440ae6af91e198ac4450ba Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 21:04:54 +0200
+Subject: [PATCH] Faster geometry FIFO intake (nuubOS)
+
+In 3D games the geometry engine's command intake ran for every word of
+every display list and took about a quarter of the emulation thread
+(New Super Mario Bros. title menu):
+- DMA from main RAM to the geometry FIFO gets its own loop: the main RAM
+  burst timing UnitTimings9_32 computes for this case, without
+  classifying both addresses per word.
+- CmdFIFOWrite keeps its hot path small (stall and the push/pop/test
+  counting out of line).
+- CmdFIFORead starts waiting geometry FIFO DMAs only when the FIFO drops
+  below half full (enabling such a DMA and the end of each 112-word chunk
+  check by themselves); the DMA check is inlined.
+- CheckFIFOIRQ only sets or clears the IRQ when its state changes.
+- AddCycles is always inlined.
+Timing and results are unchanged. NSMB title menu 37.3 -> 42.6 fps.
+
+Upstream: not submitted (nuubOS H700 performance work).
+---
+ src/DMA.cpp   | 26 +++++++++++++++++
+ src/GPU3D.cpp | 81 +++++++++++++++++++++++++++++++++++++--------------
+ 2 files changed, 85 insertions(+), 22 deletions(-)
+
+diff --git a/src/DMA.cpp b/src/DMA.cpp
+index 6fa6092..e94d871 100644
+--- a/src/DMA.cpp
++++ b/src/DMA.cpp
+@@ -574,6 +574,32 @@ void DMA::Run9()
+             if (NDS::ARM9Timestamp >= NDS::ARM9Target) break;
+         }
+     }
++    else if (ConsoleType == 0 && IsGXFIFODMA && SrcAddrInc > 0)
++    {
++        // display list from main RAM to the geometry FIFO: what
++        // UnitTimings9_32 and the generic copy do for this case, without
++        // classifying both addresses for every word (nuubOS)
++        u32 dst_n = NDS::ARM9MemTimings[CurDstAddr >> 14][6];
++        while (IterCount > 0 && !Stall)
++        {
++            if (burststart || MRAMBurstTable[MRAMBurstCount] == 0)
++            {
++                MRAMBurstCount = 0;
++                MRAMBurstTable = DMATiming::MRAMRead32Bursts[dst_n == 2 ? 0 : 1];
++            }
++            NDS::ARM9Timestamp += (MRAMBurstTable[MRAMBurstCount++] << NDS::ARM9ClockShift);
++            burststart = false;
++
++            GPU3D::WriteGXPort32(CurDstAddr, *(u32*)&NDS::MainRAM[CurSrcAddr & NDS::MainRAMMask]);
++
++            CurSrcAddr += SrcAddrInc<<2;
++            CurDstAddr += DstAddrInc<<2;
++            IterCount--;
++            RemCount--;
++
++            if (NDS::ARM9Timestamp >= NDS::ARM9Target) break;
++        }
++    }
+     else
+     {
+         while (IterCount > 0 && !Stall)
+diff --git a/src/GPU3D.cpp b/src/GPU3D.cpp
+index 603ac56..f18a434 100644
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -22,6 +22,8 @@
+ #include "NDS.h"
+ #include "GPU.h"
+ #include "FIFO.h"
++#include "DMA.h"
++namespace NDS { extern DMA* DMAs[8]; }
+ #include "Config.h"
+ 
+ 
+@@ -775,7 +777,7 @@ void UpdateClipMatrix()
+ 
+ 
+ 
+-void AddCycles(s32 num)
++__attribute__((always_inline)) inline void AddCycles(s32 num)
+ {
+     CycleCount += num;
+ 
+@@ -1756,6 +1758,32 @@ void VecTest(u32 param)
+ 
+ 
+ 
++// rare paths of CmdFIFOWrite, out of line so its hot path stays small
++// (nuubOS: it runs for every word of every display list)
++__attribute__((noinline, cold)) static void CmdFIFOStall(CmdFIFOEntry& entry)
++{
++    // store it to the stall queue. stall the system.
++    // worst case is if a STMxx opcode causes this, which is why our stall queue
++    // has 64 entries. this is less complicated than trying to make STMxx stall-able.
++
++    CmdStallQueue.Write(entry);
++    NDS::GXFIFOStall();
++}
++
++__attribute__((noinline)) static void CmdFIFOCountSpecial(u8 cmd)
++{
++    if (cmd == 0x11 || cmd == 0x12)
++    {
++        GXStat |= (1<<14); // push/pop matrix
++        NumPushPopCommands++;
++    }
++    else
++    {
++        GXStat |= (1<<0); // box/pos/vec test
++        NumTestCommands++;
++    }
++}
++
+ void CmdFIFOWrite(CmdFIFOEntry& entry)
+ {
+     if (CmdFIFO.IsEmpty() && !CmdPIPE.IsFull())
+@@ -1764,14 +1792,9 @@ void CmdFIFOWrite(CmdFIFOEntry& entry)
+     }
+     else
+     {
+-        if (CmdFIFO.IsFull())
++        if (__builtin_expect(CmdFIFO.IsFull(), 0))
+         {
+-            // store it to the stall queue. stall the system.
+-            // worst case is if a STMxx opcode causes this, which is why our stall queue
+-            // has 64 entries. this is less complicated than trying to make STMxx stall-able.
+-
+-            CmdStallQueue.Write(entry);
+-            NDS::GXFIFOStall();
++            CmdFIFOStall(entry);
+             return;
+         }
+ 
+@@ -1780,16 +1803,9 @@ void CmdFIFOWrite(CmdFIFOEntry& entry)
+ 
+     GXStat |= (1<<27);
+ 
+-    if (entry.Command == 0x11 || entry.Command == 0x12)
+-    {
+-        GXStat |= (1<<14); // push/pop matrix
+-        NumPushPopCommands++;
+-    }
+-    else if (entry.Command == 0x70 || entry.Command == 0x71 || entry.Command == 0x72)
+-    {
+-        GXStat |= (1<<0); // box/pos/vec test
+-        NumTestCommands++;
+-    }
++    u8 cmd = entry.Command;
++    if (__builtin_expect(cmd == 0x11 || cmd == 0x12 || (cmd >= 0x70 && cmd <= 0x72), 0))
++        CmdFIFOCountSpecial(cmd);
+ }
+ 
+ CmdFIFOEntry CmdFIFORead()
+@@ -1798,6 +1814,7 @@ CmdFIFOEntry CmdFIFORead()
+ 
+     if (CmdPIPE.Level() <= 2)
+     {
++        u32 levelBefore = CmdFIFO.Level();
+         if (!CmdFIFO.IsEmpty())
+             CmdPIPE.Write(CmdFIFO.Read());
+         if (!CmdFIFO.IsEmpty())
+@@ -1818,7 +1835,12 @@ CmdFIFOEntry CmdFIFORead()
+                 NDS::GXFIFOUnstall();
+         }
+ 
+-        CheckFIFODMA();
++        // a geometry FIFO DMA waits for the FIFO to drop below half full;
++        // enabling one and the end of each of its 112-word chunks check by
++        // themselves, so here only the crossing matters (nuubOS: this ran
++        // for every command)
++        if (levelBefore >= 128 && CmdFIFO.Level() < 128)
++            CheckFIFODMA();
+         CheckFIFOIRQ();
+     }
+ 
+@@ -2519,14 +2541,29 @@ void CheckFIFOIRQ()
+     case 2: irq = CmdFIFO.IsEmpty(); break;
+     }
+ 
+-    if (irq) NDS::SetIRQ(0, NDS::IRQ_GXFIFO);
+-    else     NDS::ClearIRQ(0, NDS::IRQ_GXFIFO);
++    // called for nearly every command: only touch IF when the bit changes
++    // (nuubOS)
++    bool set = NDS::IF[0] & (1 << NDS::IRQ_GXFIFO);
++    if (irq && !set)      NDS::SetIRQ(0, NDS::IRQ_GXFIFO);
++    else if (!irq && set) NDS::ClearIRQ(0, NDS::IRQ_GXFIFO);
+ }
+ 
+ void CheckFIFODMA()
+ {
+     if (CmdFIFO.Level() < 128)
+-        NDS::CheckDMAs(0, 0x07);
++    {
++        // same as NDS::CheckDMAs(0, 0x07) without the call per command
++        // (nuubOS)
++        if (NDS::ConsoleType == 0)
++        {
++            NDS::DMAs[0]->StartIfNeeded(0x07);
++            NDS::DMAs[1]->StartIfNeeded(0x07);
++            NDS::DMAs[2]->StartIfNeeded(0x07);
++            NDS::DMAs[3]->StartIfNeeded(0x07);
++        }
++        else
++            NDS::CheckDMAs(0, 0x07);
++    }
+ }
+ 
+ void VCount144()
+-- 
+2.56.0
+

@@ -1,0 +1,86 @@
+From 5affaa340f7a7feb319bb9b25f68d6b156112655 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 15:13:50 +0200
+Subject: [PATCH] Hand the screens to the frontend without a copy (nuubOS)
+
+The two screens of a framebuffer are now one allocation (top, then
+bottom). With the top/bottom layout and no gap, render_frame passes that
+buffer to video_cb directly instead of copying both screens into the
+layout buffer (~390 KB a frame); the touch cursor is drawn into it (the
+next drawn frame repaints every line). Other layouts copy as before.
+
+Upstream: not submitted (nuubOS H700 performance work).
+---
+ src/GPU.cpp               | 19 ++++++++++---------
+ src/libretro/libretro.cpp | 14 ++++++++++++++
+ 2 files changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/src/GPU.cpp b/src/GPU.cpp
+index b975ddc..5b338e9 100644
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -488,10 +488,9 @@ void DeInit()
+     GPU2D_Renderer.reset();
+     GPU3D::DeInit();
+ 
++    // each buffer pair is one allocation (top screen, then bottom)
+     if (Framebuffer[0][0]) delete[] Framebuffer[0][0];
+-    if (Framebuffer[0][1]) delete[] Framebuffer[0][1];
+     if (Framebuffer[1][0]) delete[] Framebuffer[1][0];
+-    if (Framebuffer[1][1]) delete[] Framebuffer[1][1];
+ }
+ 
+ void ResetVRAMCache()
+@@ -785,15 +784,17 @@ void SetRenderSettings(int renderer, RenderSettings& settings)
+     else
+         fbsize = 256 * 192;
+ 
++    Drain2D();
+     if (Framebuffer[0][0]) { delete[] Framebuffer[0][0]; Framebuffer[0][0] = nullptr; }
+     if (Framebuffer[1][0]) { delete[] Framebuffer[1][0]; Framebuffer[1][0] = nullptr; }
+-    if (Framebuffer[0][1]) { delete[] Framebuffer[0][1]; Framebuffer[0][1] = nullptr; }
+-    if (Framebuffer[1][1]) { delete[] Framebuffer[1][1]; Framebuffer[1][1] = nullptr; }
+-
+-    Framebuffer[0][0] = new u32[fbsize];
+-    Framebuffer[1][0] = new u32[fbsize];
+-    Framebuffer[0][1] = new u32[fbsize];
+-    Framebuffer[1][1] = new u32[fbsize];
++    Framebuffer[0][1] = Framebuffer[1][1] = nullptr;
++
++    // top and bottom screen of a buffer are contiguous (nuubOS): the
++    // frontend can hand the pair to the display without copying them
++    Framebuffer[0][0] = new u32[fbsize * 2];
++    Framebuffer[1][0] = new u32[fbsize * 2];
++    Framebuffer[0][1] = Framebuffer[0][0] + fbsize;
++    Framebuffer[1][1] = Framebuffer[1][0] + fbsize;
+ 
+     memset(Framebuffer[0][0], 0, fbsize*4);
+     memset(Framebuffer[1][0], 0, fbsize*4);
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index a36198d..3fedf7d 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -735,6 +735,20 @@ static void render_frame(void)
+ 
+          video_cb((uint8_t*)screen_layout_data.buffer_ptr, screen_layout_data.buffer_width, screen_layout_data.buffer_height, screen_layout_data.buffer_width * sizeof(uint32_t));
+       }
++      else if (screen_layout_data.enable_top_screen && screen_layout_data.enable_bottom_screen &&
++               screen_layout_data.top_screen_offset == 0 && screen_layout_data.screen_gap == 0 &&
++               screen_layout_data.buffer_width == 256 && screen_layout_data.buffer_height == 384 &&
++               screen_layout_data.bottom_screen_offset == 256 * 192 && GPU::Framebuffer[frontbuf][1] == GPU::Framebuffer[frontbuf][0] + 256 * 192)
++      {
++         /* top/bottom layout without a gap: the two screens are one
++          * contiguous buffer (GPU.cpp), handed over without a copy; the
++          * touch cursor goes into it (the next drawn frame repaints it) */
++         ScreenLayoutData direct = screen_layout_data;
++         direct.buffer_ptr = (uint16_t*)GPU::Framebuffer[frontbuf][0];
++         if(cursor_enabled(&input_state))
++            draw_cursor(&direct, input_state.touch_x, input_state.touch_y);
++         video_cb((uint8_t*)direct.buffer_ptr, 256, 384, 256 * sizeof(uint32_t));
++      }
+       else
+       {
+          if(screen_layout_data.enable_top_screen)
+-- 
+2.56.0
+

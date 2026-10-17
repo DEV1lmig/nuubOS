@@ -1,0 +1,1542 @@
+From 370edb6ee62787f61f193edb1d0db97253fd07b4 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 14:23:29 +0200
+Subject: [PATCH] Thread the software renderers (nuubOS)
+
+On the H700 (4x Cortex-A53) the emulation thread was also drawing both
+2D engines (~10 ms a frame in Mario Kart DS) and a single render thread
+needed ~23 ms for the 3D picture.
+
+- 3D: the threaded soft renderer splits the screen in two halves, lines
+  [0, 96) on the render thread and [96, 192) on a second one (per-lane
+  polygon edge state; a lane starts by placing the edges at its first
+  line, which Slope::Setup computes exactly like stepping). The final
+  pass of the boundary lines waits for the raw neighbour line of the
+  other half; each half releases its lines to GetLine in order.
+- 3D color buffer double-buffered: the next frame renders into the other
+  buffer, so the 2D engines may still read this frame's lines during
+  VBlank. Frame start selects the buffer and whether GetLine must wait.
+  GetLine waits on a per-buffer, per-line ready flag set after the final
+  pass (cleared when a render into that buffer starts): the upstream
+  line-count semaphore drifted whenever a rendered frame was not drawn by
+  the 2D engines, and then handed out lines still being rendered.
+- 2D: with the threaded renderer the 2D engines draw on a worker thread.
+  A job covers a run of scanlines (up to 16) over which nothing the
+  worker reads changed: a copy of a unit is sent only when its register
+  generation (Unit::RegGen, bumped by every emulation-side change)
+  moved, palette and OAM only when written; VCount runs along. VRAM flattening stays on the
+  emulation thread. Fields the renderer advances per line (affine
+  reference points, mosaic counters, the horizontal window flags) stay the
+  worker's unless the
+  emulation side set them (per-field generation counters). Frames with a
+  display capture are drawn on the emulation thread as before. Drained
+  before the framebuffers flip, on savestates and resets.
+
+Upstream: not submitted (nuubOS H700 performance work).
+---
+ src/GPU.cpp        | 391 ++++++++++++++++++++++++++++++++++++++++++++-
+ src/GPU.h          |   7 +
+ src/GPU2D.cpp      |  35 ++--
+ src/GPU2D.h        |  21 ++-
+ src/GPU2D_Soft.cpp |  87 +++++-----
+ src/GPU2D_Soft.h   |   1 +
+ src/GPU3D.cpp      |   3 +
+ src/GPU3D.h        |   8 +
+ src/GPU3D_Soft.cpp | 188 +++++++++++++++++-----
+ src/GPU3D_Soft.h   |  45 ++++--
+ 10 files changed, 688 insertions(+), 98 deletions(-)
+
+diff --git a/src/GPU.cpp b/src/GPU.cpp
+index 3297ce7..b975ddc 100644
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -22,6 +22,8 @@
+ #include "GPU.h"
+ 
+ #include "GPU2D_Soft.h"
++#include "Platform.h"
++#include <atomic>
+ 
+ namespace GPU
+ {
+@@ -140,6 +142,325 @@ u8 VRAMFlat_TexPal[128*1024];
+ 
+ u32 OAMDirty;
+ u32 PaletteDirty;
++u32 PalOAMGen = 0;
++
++/*
++ * Threaded 2D (nuubOS, H700): both 2D engines are drawn on a worker thread,
++ * one queued job per scanline (HBlank), concurrently with the emulation. A
++ * job carries copies of both units' registers, the VCount and, when they
++ * changed, palette and OAM, so raster effects done with register or palette
++ * writes stay line-exact. The emulation thread keeps the VRAM flattening
++ * (dirty tracking is not thread-safe); VRAM changed in the middle of a frame
++ * may be seen a few lines early. Fields the renderer itself advances per line
++ * (affine reference points, mosaic counters) live in the worker's units and
++ * are taken from the emulation side only when that side changed them
++ * (register write, VBlank reload). Frames with a display capture are drawn on
++ * the emulation thread as before (the capture writes VRAM the game reads).
++ * Drained at VCount 192 (the 3D renderer starts overwriting the lines the 2D
++ * engines read at 215) and before the framebuffers flip.
++ */
++namespace
++{
++struct Job2D
++{
++    u32 Kind;           // Job_Line, Job_Sprites0, Job_Fence
++    u32 First, Last;    // lines (Job_Line: VCount runs along with them)
++    u32 VCount;         // at First
++    u8 UnitChanged[2];  // Units[n] holds a new copy
++    u8 DrawLine, DrawSprites, PalChanged, Wait3D;
++    s32 Buf3D;
++    alignas(16) u8 Units[2][sizeof(GPU2D::Unit)];
++    alignas(16) u8 PalOAM[4096];
++};
++enum { Job_Line, Job_Sprites0, Job_Fence };
++constexpr u32 Job2DCount = 64;
++
++struct OwnedFields
++{
++    s32 BGXRefInternal[2], BGYRefInternal[2];
++    u8 BGMosaicY, BGMosaicYMax, OBJMosaicY, OBJMosaicYCount;
++};
++
++Job2D* Jobs2D = nullptr;
++u32 Job2DHead = 0, Job2DTail = 0;
++Platform::Thread* Thread2D = nullptr;
++Platform::Semaphore *Sema2DJobs, *Sema2DFree, *Sema2DFence;
++std::atomic_bool Thread2DRunning{false};
++bool Threaded2D = false;    // setting (threaded software renderer)
++bool Sync2D = true;         // this frame is drawn on the emulation thread
++bool Queued2D = false;      // jobs queued since the last drain
++bool JobOpen = false;       // the job at Job2DHead is being extended
++u32 SentRegGen[2] = { ~0u, ~0u };
++constexpr u32 Job2DBatch = 16;  // lines per job at most (the worker starts early)
++u32 PalOAMGenSent = ~0u;
++GPU2D::Unit* WorkUnits[2] = { nullptr, nullptr };
++u32 LastOwnedGen[2][5];
++alignas(16) u8 WorkPalOAM[4096];
++
++OwnedFields GetOwned(const GPU2D::Unit* u)
++{
++    OwnedFields f;
++    for (int i = 0; i < 2; i++)
++    {
++        f.BGXRefInternal[i] = u->BGXRefInternal[i];
++        f.BGYRefInternal[i] = u->BGYRefInternal[i];
++    }
++    f.BGMosaicY = u->BGMosaicY; f.BGMosaicYMax = u->BGMosaicYMax;
++    f.OBJMosaicY = u->OBJMosaicY; f.OBJMosaicYCount = u->OBJMosaicYCount;
++    return f;
++}
++
++// The worker's copy of a unit: registers from the emulation side; the fields
++// the renderer advances per line stay the worker's unless the emulation side
++// set them since the previous job (OwnedGen).
++void MergeUnit(int n, const u8* snap)
++{
++    GPU2D::Unit* w = WorkUnits[n];
++    const GPU2D::Unit* s = (const GPU2D::Unit*)snap;
++    OwnedFields keep = GetOwned(w);
++    u32 win0 = w->Win0Active, win1 = w->Win1Active;
++    u32* last = LastOwnedGen[n];
++
++    memcpy((void*)w, snap, sizeof(GPU2D::Unit));
++    for (int i = 0; i < 2; i++)
++    {
++        if (s->OwnedGen[i] == last[i]) w->BGXRefInternal[i] = keep.BGXRefInternal[i];
++        if (s->OwnedGen[2+i] == last[2+i]) w->BGYRefInternal[i] = keep.BGYRefInternal[i];
++    }
++    if (s->OwnedGen[4] == last[4])
++    {
++        w->BGMosaicY = keep.BGMosaicY;
++        w->BGMosaicYMax = keep.BGMosaicYMax;
++    }
++    // OBJ mosaic counters are only ever advanced and reset by the renderer,
++    // and so is the horizontal half (bit 1) of the window active flags
++    w->OBJMosaicY = keep.OBJMosaicY;
++    w->OBJMosaicYCount = keep.OBJMosaicYCount;
++    w->Win0Active = (w->Win0Active & ~0x2) | (win0 & 0x2);
++    w->Win1Active = (w->Win1Active & ~0x2) | (win1 & 0x2);
++    memcpy(last, s->OwnedGen, sizeof(s->OwnedGen));
++}
++
++void Worker2D()
++{
++    GPU2D::Renderer2D* r = GPU2D_Renderer.get();
++    for (;;)
++    {
++        Platform::Semaphore_Wait(Sema2DJobs);
++        if (!Thread2DRunning.load(std::memory_order_acquire))
++            return;
++
++        Job2D& j = Jobs2D[Job2DTail % Job2DCount];
++        Job2DTail++;
++
++        if (j.Kind == Job_Fence)
++        {
++            Platform::Semaphore_Post(Sema2DFree);
++            Platform::Semaphore_Post(Sema2DFence);
++            continue;
++        }
++
++        if (j.PalChanged)
++            memcpy(WorkPalOAM, j.PalOAM, sizeof(WorkPalOAM));
++        if (j.UnitChanged[0]) MergeUnit(0, j.Units[0]);
++        if (j.UnitChanged[1]) MergeUnit(1, j.Units[1]);
++        GPU3D::Line3DBuf = j.Buf3D;
++        GPU3D::Line3DWait = j.Wait3D;
++
++        if (j.Kind == Job_Line)
++        {
++            for (u32 line = j.First; line <= j.Last; line++)
++            {
++                r->JobVCount = j.VCount + (line - j.First);
++                if (j.DrawLine)
++                {
++                    r->DrawScanline(line, WorkUnits[0]);
++                    r->DrawScanline(line, WorkUnits[1]);
++                }
++                if (j.DrawSprites)
++                {
++                    r->DrawSprites(line+1, WorkUnits[0]);
++                    r->DrawSprites(line+1, WorkUnits[1]);
++                }
++            }
++        }
++        else
++        {
++            r->JobVCount = j.VCount;
++            r->DrawSprites(0, WorkUnits[0]);
++            r->DrawSprites(0, WorkUnits[1]);
++        }
++
++        Platform::Semaphore_Post(Sema2DFree);
++    }
++}
++
++bool FIFOMode(const GPU2D::Unit* u)
++{
++    return ((u->DispCnt >> 16) & (u->Num ? 0x1 : 0x3)) == 3;
++}
++
++// A unit's registers; the 512-byte display FIFO line buffer only when the
++// unit displays from the FIFO (main memory display mode).
++void CopyUnit(u8* dst, const GPU2D::Unit* u)
++{
++    const u8* src = (const u8*)u;
++    size_t fifo = (const u8*)u->DispFIFOBuffer - src;
++    size_t fifoend = fifo + sizeof(u->DispFIFOBuffer);
++
++    if (FIFOMode(u))
++    {
++        memcpy(dst, src, sizeof(GPU2D::Unit));
++        return;
++    }
++    memcpy(dst, src, fifo);
++    memcpy(dst + fifoend, src + fifoend, sizeof(GPU2D::Unit) - fifoend);
++}
++
++// Hands the open job to the worker.
++void Publish2D()
++{
++    if (!JobOpen) return;
++    JobOpen = false;
++    Job2DHead++;
++    Queued2D = true;
++    Platform::Semaphore_Post(Sema2DJobs);
++}
++
++// Opens a job at Job2DHead with what changed since the previous one.
++void Begin2D(u32 kind, u32 line, bool drawline, bool drawsprites)
++{
++    Publish2D();
++    Platform::Semaphore_Wait(Sema2DFree);
++    Job2D& j = Jobs2D[Job2DHead % Job2DCount];
++    j.Kind = kind;
++    j.First = j.Last = line;
++    j.VCount = VCount;
++    j.DrawLine = drawline;
++    j.DrawSprites = drawsprites;
++    j.Buf3D = GPU3D::DisplayBuf3D;
++    j.Wait3D = GPU3D::DisplayWait3D;
++    j.UnitChanged[0] = j.UnitChanged[1] = 0;
++    j.PalChanged = 0;
++    if (kind != Job_Fence)
++    {
++        GPU2D::Unit* units[2] = { &GPU2D_A, &GPU2D_B };
++        for (int n = 0; n < 2; n++)
++        {
++            if (!FIFOMode(units[n]) && units[n]->RegGen == SentRegGen[n])
++                continue;
++            CopyUnit(j.Units[n], units[n]);
++            SentRegGen[n] = units[n]->RegGen;
++            j.UnitChanged[n] = 1;
++        }
++        // the worker never captures (capture frames are drawn synchronously)
++        if (j.UnitChanged[0])
++        {
++            ((GPU2D::Unit*)j.Units[0])->CaptureCnt &= ~(1u << 31);
++            ((GPU2D::Unit*)j.Units[0])->CaptureLatch = false;
++        }
++        j.PalChanged = (PalOAMGen != PalOAMGenSent);
++        if (j.PalChanged)
++        {
++            memcpy(j.PalOAM, Palette, 2048);
++            memcpy(j.PalOAM + 2048, OAM, 2048);
++            PalOAMGenSent = PalOAMGen;
++        }
++    }
++    JobOpen = true;
++}
++
++void Push2D(u32 kind, u32 line, bool drawline, bool drawsprites)
++{
++    Begin2D(kind, line, drawline, drawsprites);
++    Publish2D();
++}
++
++// One scanline: extends the open job while nothing the worker reads changed,
++// so most frames need a handful of jobs instead of one per line.
++void PushLine2D(u32 line, bool drawline, bool drawsprites)
++{
++    if (JobOpen)
++    {
++        Job2D& j = Jobs2D[Job2DHead % Job2DCount];
++        if (j.Kind == Job_Line && j.Last + 1 == line && VCount == j.VCount + (line - j.First) &&
++            j.DrawLine == drawline && j.DrawSprites == drawsprites &&
++            GPU2D_A.RegGen == SentRegGen[0] && GPU2D_B.RegGen == SentRegGen[1] &&
++            PalOAMGen == PalOAMGenSent && !FIFOMode(&GPU2D_A) && !FIFOMode(&GPU2D_B))
++        {
++            j.Last = line;
++            if (j.Last - j.First + 1 >= Job2DBatch || line >= 190)
++                Publish2D();
++            return;
++        }
++    }
++    Begin2D(Job_Line, line, drawline, drawsprites);
++    if (line >= 190)
++        Publish2D();
++}
++
++// Renderer configuration for the emulation thread (sync) or the worker.
++void Configure2D(bool worker)
++{
++    GPU2D::Renderer2D* r = GPU2D_Renderer.get();
++    r->DeferVRAMSync = worker;
++    r->UseJobVCount = worker;
++    r->PalBase = worker ? WorkPalOAM : Palette;
++    r->OAMBase = worker ? WorkPalOAM + 2048 : OAM;
++}
++
++// Worker units start as copies of the emulation side.
++void ResyncWorkUnits()
++{
++    memcpy((void*)WorkUnits[0], (const void*)&GPU2D_A, sizeof(GPU2D::Unit));
++    memcpy((void*)WorkUnits[1], (const void*)&GPU2D_B, sizeof(GPU2D::Unit));
++    memcpy(LastOwnedGen[0], GPU2D_A.OwnedGen, sizeof(LastOwnedGen[0]));
++    memcpy(LastOwnedGen[1], GPU2D_B.OwnedGen, sizeof(LastOwnedGen[1]));
++    PalOAMGenSent = ~0u;
++    SentRegGen[0] = SentRegGen[1] = ~0u;
++}
++
++void Start2DThread()
++{
++    if (Thread2DRunning.load()) return;
++    if (!Jobs2D) Jobs2D = new Job2D[Job2DCount];
++    if (!WorkUnits[0]) { WorkUnits[0] = new GPU2D::Unit(0); WorkUnits[1] = new GPU2D::Unit(1); }
++    Sema2DJobs = Platform::Semaphore_Create();
++    Sema2DFree = Platform::Semaphore_Create();
++    Sema2DFence = Platform::Semaphore_Create();
++    Platform::Semaphore_Post(Sema2DFree, Job2DCount);
++    Job2DHead = Job2DTail = 0;
++    Queued2D = false;
++    JobOpen = false;
++    Thread2DRunning = true;
++    Thread2D = Platform::Thread_Create(Worker2D);
++    ResyncWorkUnits();
++}
++
++void Stop2DThread()
++{
++    if (!Thread2DRunning.load()) return;
++    Drain2D();
++    Thread2DRunning.store(false, std::memory_order_release);
++    Platform::Semaphore_Post(Sema2DJobs);
++    Platform::Thread_Wait(Thread2D);
++    Platform::Thread_Free(Thread2D);
++    Platform::Semaphore_Free(Sema2DJobs);
++    Platform::Semaphore_Free(Sema2DFree);
++    Platform::Semaphore_Free(Sema2DFence);
++    Sync2D = true;
++    Configure2D(false);
++}
++}
++
++void Drain2D()
++{
++    if (!Queued2D || !Thread2DRunning.load())
++        return;
++    Push2D(Job_Fence, 0, false, false);
++    Platform::Semaphore_Wait(Sema2DFence);
++    Queued2D = false;
++}
+ 
+ #ifdef OGLRENDERER_ENABLED
+ std::unique_ptr<GLCompositor> CurGLCompositor = {};
+@@ -160,6 +481,10 @@ bool Init()
+ 
+ void DeInit()
+ {
++    Stop2DThread();
++    delete[] Jobs2D; Jobs2D = nullptr;
++    delete WorkUnits[0]; delete WorkUnits[1];
++    WorkUnits[0] = WorkUnits[1] = nullptr;
+     GPU2D_Renderer.reset();
+     GPU3D::DeInit();
+ 
+@@ -199,6 +524,8 @@ void ResetVRAMCache()
+ 
+ void Reset()
+ {
++    Drain2D();
++    PalOAMGen++;
+     VCount = 0;
+     NextVCount = -1;
+     TotalScanlines = 0;
+@@ -302,6 +629,8 @@ void Stop()
+ 
+ void DoSavestate(Savestate* file)
+ {
++    Drain2D();
++    PalOAMGen++;
+     file->Section("GPUG");
+ 
+     file->Var16(&VCount);
+@@ -364,10 +693,13 @@ void DoSavestate(Savestate* file)
+     GPU3D::DoSavestate(file);
+ 
+     ResetVRAMCache();
++    if (Thread2DRunning.load())
++        ResyncWorkUnits();
+ }
+ 
+ void AssignFramebuffers()
+ {
++    Drain2D();
+     int backbuf = FrontBuffer ? 0 : 1;
+     if (NDS::PowerControl9 & (1<<15))
+     {
+@@ -474,6 +806,12 @@ void SetRenderSettings(int renderer, RenderSettings& settings)
+     {
+         GPU3D::CurrentRenderer->SetRenderSettings(settings);
+     }
++
++    Threaded2D = settings.Soft_Threaded && !GPU3D::CurrentRenderer->Accelerated;
++    if (Threaded2D)
++        Start2DThread();
++    else
++        Stop2DThread();
+ #ifdef OGLRENDERER_ENABLED
+     else
+     {
+@@ -1026,6 +1364,25 @@ void StartHBlank(u32 line)
+         // a display capture writes VRAM the game reads back: always drawn
+         bool draw = !FrameSkip || GPU2D_A.CaptureLatch;
+ 
++        if (!Sync2D)
++        {
++            bool drawline = line < 192 && draw;
++            bool drawsprites = line < 191 && draw;
++            if (drawline)
++            {
++                GPU2D_Renderer->SyncVRAM(0, false);
++                GPU2D_Renderer->SyncVRAM(1, false);
++            }
++            if (drawsprites)
++            {
++                GPU2D_Renderer->SyncVRAM(0, true);
++                GPU2D_Renderer->SyncVRAM(1, true);
++            }
++            if (drawline || drawsprites)
++                PushLine2D(line, drawline, drawsprites);
++        }
++        else
++        {
+         if (line < 192 && draw)
+         {
+             GPU2D_Renderer->DrawScanline(line, &GPU2D_A);
+@@ -1038,6 +1395,7 @@ void StartHBlank(u32 line)
+             GPU2D_Renderer->DrawSprites(line+1, &GPU2D_A);
+             GPU2D_Renderer->DrawSprites(line+1, &GPU2D_B);
+         }
++        }
+ 
+         NDS::CheckDMAs(0, 0x02);
+     }
+@@ -1047,8 +1405,17 @@ void StartHBlank(u32 line)
+     }
+     else if (VCount == 262 && !FrameSkipNext)
+     {
+-        GPU2D_Renderer->DrawSprites(0, &GPU2D_A);
+-        GPU2D_Renderer->DrawSprites(0, &GPU2D_B);
++        if (!Sync2D)
++        {
++            GPU2D_Renderer->SyncVRAM(0, true);
++            GPU2D_Renderer->SyncVRAM(1, true);
++            Push2D(Job_Sprites0, 0, false, false);
++        }
++        else
++        {
++            GPU2D_Renderer->DrawSprites(0, &GPU2D_A);
++            GPU2D_Renderer->DrawSprites(0, &GPU2D_B);
++        }
+     }
+ 
+     if (DispStat[0] & (1<<4)) NDS::SetIRQ(0, NDS::IRQ_HBlank);
+@@ -1062,6 +1429,7 @@ void StartHBlank(u32 line)
+ 
+ void FinishFrame(u32 lines)
+ {
++    Drain2D();
+     FrontBuffer = FrontBuffer ? 0 : 1;
+     AssignFramebuffers();
+ 
+@@ -1118,6 +1486,23 @@ void StartScanline(u32 line)
+     {
+         if (line == 0)
+         {
++            // the 3D picture this frame shows (rendered from VCount 215 on)
++            GPU3D::DisplayBuf3D = GPU3D::PendingBuf3D;
++            GPU3D::DisplayWait3D = GPU3D::PendingWait3D;
++
++            // this frame on the worker unless it captures the display
++            bool worker = Thread2DRunning.load() && !(GPU2D_A.CaptureCnt & (1u << 31));
++            if (worker == Sync2D)
++            {
++                Drain2D();
++                Configure2D(worker);
++                Sync2D = !worker;
++            }
++            if (Sync2D)
++            {
++                GPU3D::Line3DBuf = GPU3D::DisplayBuf3D;
++                GPU3D::Line3DWait = GPU3D::DisplayWait3D;
++            }
+             GPU2D_Renderer->VBlankEnd(&GPU2D_A, &GPU2D_B);
+             GPU2D_A.VBlankEnd();
+             GPU2D_B.VBlankEnd();
+@@ -1144,6 +1529,8 @@ void StartScanline(u32 line)
+             // texture memory anyway and only update it before the start
+             //of the next frame.
+             // So we can give the rasteriser a bit more headroom
++            // (the 2D worker may go on reading this frame's 3D lines: the
++            // next render goes to the other color buffer)
+             GPU3D::VCount144();
+ 
+             // VBlank
+diff --git a/src/GPU.h b/src/GPU.h
+index 602a296..786f2c1 100644
+--- a/src/GPU.h
++++ b/src/GPU.h
+@@ -162,6 +162,8 @@ void SyncDirtyFlags();
+ 
+ extern u32 OAMDirty;
+ extern u32 PaletteDirty;
++// bumped on every palette/OAM write (threaded 2D copies them only when changed)
++extern u32 PalOAMGen;
+ 
+ #ifdef OGLRENDERER_ENABLED
+ extern std::unique_ptr<GLCompositor> CurGLCompositor;
+@@ -599,6 +601,7 @@ void WritePalette(u32 addr, T val)
+ 
+     *(T*)&Palette[addr] = val;
+     PaletteDirty |= 1 << (addr / VRAMDirtyGranularity);
++    PalOAMGen++;
+ }
+ 
+ template<typename T>
+@@ -614,6 +617,7 @@ void WriteOAM(u32 addr, T val)
+ 
+     *(T*)&OAM[addr] = val;
+     OAMDirty |= 1 << (addr / 1024);
++    PalOAMGen++;
+ }
+ 
+ void SetPowerCnt(u32 val);
+@@ -623,6 +627,9 @@ void FinishFrame(u32 lines);
+ void StartScanline(u32 line);
+ void StartHBlank(u32 line);
+ 
++// Threaded 2D (nuubOS): waits until the 2D worker has drawn everything queued.
++void Drain2D();
++
+ void DisplayFIFO(u32 x);
+ 
+ void SetDispStat(u32 cpu, u16 val);
+diff --git a/src/GPU2D.cpp b/src/GPU2D.cpp
+index 2dd606a..e6e03dc 100644
+--- a/src/GPU2D.cpp
++++ b/src/GPU2D.cpp
+@@ -90,6 +90,7 @@ Unit::Unit(u32 num)
+ 
+ void Unit::Reset()
+ {
++    RegGen++;
+     Enabled = false;
+     DispCnt = 0;
+     memset(BGCnt, 0, 4*2);
+@@ -117,6 +118,7 @@ void Unit::Reset()
+     OBJMosaicSize[1] = 0;
+     BGMosaicY = 0;
+     BGMosaicYMax = 0;
++    for (u32& g : OwnedGen) g++;
+     OBJMosaicY = 0;
+     OBJMosaicYMax = 0;
+     OBJMosaicYCount = 0;
+@@ -140,6 +142,7 @@ void Unit::Reset()
+ 
+ void Unit::DoSavestate(Savestate* file)
+ {
++    RegGen++;
+     file->Section((char*)(Num ? "GP2B" : "GP2A"));
+ 
+     file->Var32(&DispCnt);
+@@ -265,6 +268,7 @@ u32 Unit::Read32(u32 addr)
+ 
+ void Unit::Write8(u32 addr, u8 val)
+ {
++    RegGen++;
+     switch (addr & 0x00000FFF)
+     {
+     case 0x000:
+@@ -369,6 +373,7 @@ void Unit::Write8(u32 addr, u8 val)
+ 
+ void Unit::Write16(u32 addr, u16 val)
+ {
++    RegGen++;
+     switch (addr & 0x00000FFF)
+     {
+     case 0x000:
+@@ -420,21 +425,21 @@ void Unit::Write16(u32 addr, u16 val)
+     case 0x026: BGRotD[0] = val; return;
+     case 0x028:
+         BGXRef[0] = (BGXRef[0] & 0xFFFF0000) | val;
+-        if (GPU::VCount < 192) BGXRefInternal[0] = BGXRef[0];
++        if (GPU::VCount < 192) { BGXRefInternal[0] = BGXRef[0]; OwnedGen[0]++; }
+         return;
+     case 0x02A:
+         if (val & 0x0800) val |= 0xF000;
+         BGXRef[0] = (BGXRef[0] & 0xFFFF) | (val << 16);
+-        if (GPU::VCount < 192) BGXRefInternal[0] = BGXRef[0];
++        if (GPU::VCount < 192) { BGXRefInternal[0] = BGXRef[0]; OwnedGen[0]++; }
+         return;
+     case 0x02C:
+         BGYRef[0] = (BGYRef[0] & 0xFFFF0000) | val;
+-        if (GPU::VCount < 192) BGYRefInternal[0] = BGYRef[0];
++        if (GPU::VCount < 192) { BGYRefInternal[0] = BGYRef[0]; OwnedGen[2]++; }
+         return;
+     case 0x02E:
+         if (val & 0x0800) val |= 0xF000;
+         BGYRef[0] = (BGYRef[0] & 0xFFFF) | (val << 16);
+-        if (GPU::VCount < 192) BGYRefInternal[0] = BGYRef[0];
++        if (GPU::VCount < 192) { BGYRefInternal[0] = BGYRef[0]; OwnedGen[2]++; }
+         return;
+ 
+     case 0x030: BGRotA[1] = val; return;
+@@ -443,21 +448,21 @@ void Unit::Write16(u32 addr, u16 val)
+     case 0x036: BGRotD[1] = val; return;
+     case 0x038:
+         BGXRef[1] = (BGXRef[1] & 0xFFFF0000) | val;
+-        if (GPU::VCount < 192) BGXRefInternal[1] = BGXRef[1];
++        if (GPU::VCount < 192) { BGXRefInternal[1] = BGXRef[1]; OwnedGen[1]++; }
+         return;
+     case 0x03A:
+         if (val & 0x0800) val |= 0xF000;
+         BGXRef[1] = (BGXRef[1] & 0xFFFF) | (val << 16);
+-        if (GPU::VCount < 192) BGXRefInternal[1] = BGXRef[1];
++        if (GPU::VCount < 192) { BGXRefInternal[1] = BGXRef[1]; OwnedGen[1]++; }
+         return;
+     case 0x03C:
+         BGYRef[1] = (BGYRef[1] & 0xFFFF0000) | val;
+-        if (GPU::VCount < 192) BGYRefInternal[1] = BGYRef[1];
++        if (GPU::VCount < 192) { BGYRefInternal[1] = BGYRef[1]; OwnedGen[3]++; }
+         return;
+     case 0x03E:
+         if (val & 0x0800) val |= 0xF000;
+         BGYRef[1] = (BGYRef[1] & 0xFFFF) | (val << 16);
+-        if (GPU::VCount < 192) BGYRefInternal[1] = BGYRef[1];
++        if (GPU::VCount < 192) { BGYRefInternal[1] = BGYRef[1]; OwnedGen[3]++; }
+         return;
+ 
+     case 0x040:
+@@ -513,6 +518,7 @@ void Unit::Write16(u32 addr, u16 val)
+ 
+ void Unit::Write32(u32 addr, u32 val)
+ {
++    RegGen++;
+     switch (addr & 0x00000FFF)
+     {
+     case 0x000:
+@@ -541,23 +547,23 @@ void Unit::Write32(u32 addr, u32 val)
+     case 0x028:
+         if (val & 0x08000000) val |= 0xF0000000;
+         BGXRef[0] = val;
+-        if (GPU::VCount < 192) BGXRefInternal[0] = BGXRef[0];
++        if (GPU::VCount < 192) { BGXRefInternal[0] = BGXRef[0]; OwnedGen[0]++; }
+         return;
+     case 0x02C:
+         if (val & 0x08000000) val |= 0xF0000000;
+         BGYRef[0] = val;
+-        if (GPU::VCount < 192) BGYRefInternal[0] = BGYRef[0];
++        if (GPU::VCount < 192) { BGYRefInternal[0] = BGYRef[0]; OwnedGen[2]++; }
+         return;
+ 
+     case 0x038:
+         if (val & 0x08000000) val |= 0xF0000000;
+         BGXRef[1] = val;
+-        if (GPU::VCount < 192) BGXRefInternal[1] = BGXRef[1];
++        if (GPU::VCount < 192) { BGXRefInternal[1] = BGXRef[1]; OwnedGen[1]++; }
+         return;
+     case 0x03C:
+         if (val & 0x08000000) val |= 0xF0000000;
+         BGYRef[1] = val;
+-        if (GPU::VCount < 192) BGYRefInternal[1] = BGYRef[1];
++        if (GPU::VCount < 192) { BGYRefInternal[1] = BGYRef[1]; OwnedGen[3]++; }
+         return;
+     }
+ 
+@@ -584,6 +590,7 @@ void Unit::UpdateMosaicCounters(u32 line)
+ 
+ void Unit::VBlank()
+ {
++    RegGen++;
+     if (CaptureLatch)
+     {
+         CaptureCnt &= ~(1<<31);
+@@ -596,6 +603,7 @@ void Unit::VBlank()
+ 
+ void Unit::VBlankEnd()
+ {
++    RegGen++;
+     // TODO: find out the exact time this happens
+     BGXRefInternal[0] = BGXRef[0];
+     BGXRefInternal[1] = BGXRef[1];
+@@ -604,6 +612,7 @@ void Unit::VBlankEnd()
+ 
+     BGMosaicY = 0;
+     BGMosaicYMax = BGMosaicSize[1];
++    for (u32& g : OwnedGen) g++;
+     //OBJMosaicY = 0;
+     //OBJMosaicYMax = OBJMosaicSize[1];
+     //OBJMosaicY = 0;
+@@ -641,10 +650,12 @@ u16* Unit::GetOBJExtPal()
+ void Unit::CheckWindows(u32 line)
+ {
+     line &= 0xFF;
++    u32 w0 = Win0Active, w1 = Win1Active;
+     if (line == Win0Coords[3])      Win0Active &= ~0x1;
+     else if (line == Win0Coords[2]) Win0Active |=  0x1;
+     if (line == Win1Coords[3])      Win1Active &= ~0x1;
+     else if (line == Win1Coords[2]) Win1Active |=  0x1;
++    if (w0 != Win0Active || w1 != Win1Active) RegGen++;
+ }
+ 
+ void Unit::CalculateWindowMask(u32 line, u8* windowMask, u8* objWindow)
+diff --git a/src/GPU2D.h b/src/GPU2D.h
+index 5a387fd..4bbdf06 100644
+--- a/src/GPU2D.h
++++ b/src/GPU2D.h
+@@ -37,7 +37,7 @@ public:
+ 
+     void DoSavestate(Savestate* file);
+ 
+-    void SetEnabled(bool enable) { Enabled = enable; }
++    void SetEnabled(bool enable) { if (Enabled != enable) RegGen++; Enabled = enable; }
+ 
+     u8 Read8(u32 addr);
+     u16 Read16(u32 addr);
+@@ -116,6 +116,15 @@ public:
+     u32 CaptureCnt;
+ 
+     u16 MasterBrightness;
++
++    // bumped whenever the emulation side sets the fields the renderer
++    // advances per line (affine reference points, BG mosaic counter):
++    // register writes, VBlankEnd, reset (threaded 2D, GPU.cpp)
++    // [0..1] BGXRefInternal, [2..3] BGYRefInternal, [4] BG mosaic counter
++    u32 OwnedGen[5] = {};
++    // bumped whenever the emulation side changes any field (threaded 2D
++    // sends a unit's copy to the worker only when it changed)
++    u32 RegGen = 0;
+ };
+ 
+ class Renderer2D
+@@ -133,6 +142,16 @@ public:
+         Framebuffer[0] = unitA;
+         Framebuffer[1] = unitB;
+     }
++
++    // Threaded 2D (nuubOS): a worker thread draws from per-line copies of
++    // the units, VCount, palette and OAM; the emulation thread keeps the
++    // VRAM flattening (SyncVRAM) so the dirty tracking stays single-threaded.
++    u32 JobVCount = 0;
++    bool UseJobVCount = false;
++    bool DeferVRAMSync = false;
++    const u8* PalBase = nullptr;
++    const u8* OAMBase = nullptr;
++    virtual void SyncVRAM(u32 unitnum, bool obj) {}
+ protected:
+     u32* Framebuffer[2];
+ 
+diff --git a/src/GPU2D_Soft.cpp b/src/GPU2D_Soft.cpp
+index f7adc53..2544242 100644
+--- a/src/GPU2D_Soft.cpp
++++ b/src/GPU2D_Soft.cpp
+@@ -25,6 +25,9 @@ namespace GPU2D
+ SoftRenderer::SoftRenderer()
+     : Renderer2D()
+ {
++    PalBase = GPU::Palette;
++    OAMBase = GPU::OAM;
++
+     // initialize mosaic table
+     for (int m = 0; m < 16; m++)
+     {
+@@ -168,17 +171,23 @@ u32 SoftRenderer::ColorComposite(int i, u32 val1, u32 val2)
+     return val1;
+ }
+ 
+-void SoftRenderer::DrawScanline(u32 line, Unit* unit)
++void SoftRenderer::SyncVRAM(u32 unitnum, bool obj)
+ {
+-    CurUnit = unit;
+-
+-    int stride = GPU3D::CurrentRenderer->Accelerated ? (256*3 + 1) : 256;
+-    u32* dst = &Framebuffer[CurUnit->Num][stride * line];
+-
+-    int n3dline = line;
+-    line = GPU::VCount;
+-
+-    if (CurUnit->Num == 0)
++    if (obj)
++    {
++        if (unitnum == 0)
++        {
++            auto objDirty = GPU::VRAMDirty_AOBJ.DeriveState(GPU::VRAMMap_AOBJ);
++            GPU::MakeVRAMFlat_AOBJCoherent(objDirty);
++        }
++        else
++        {
++            auto objDirty = GPU::VRAMDirty_BOBJ.DeriveState(GPU::VRAMMap_BOBJ);
++            GPU::MakeVRAMFlat_BOBJCoherent(objDirty);
++        }
++        return;
++    }
++    if (unitnum == 0)
+     {
+         auto bgDirty = GPU::VRAMDirty_ABG.DeriveState(GPU::VRAMMap_ABG);
+         GPU::MakeVRAMFlat_ABGCoherent(bgDirty);
+@@ -196,6 +205,20 @@ void SoftRenderer::DrawScanline(u32 line, Unit* unit)
+         auto objExtPalDirty = GPU::VRAMDirty_BOBJExtPal.DeriveState(&GPU::VRAMMap_BOBJExtPal);
+         GPU::MakeVRAMFlat_BOBJExtPalCoherent(objExtPalDirty);
+     }
++}
++
++void SoftRenderer::DrawScanline(u32 line, Unit* unit)
++{
++    CurUnit = unit;
++
++    int stride = GPU3D::CurrentRenderer->Accelerated ? (256*3 + 1) : 256;
++    u32* dst = &Framebuffer[CurUnit->Num][stride * line];
++
++    int n3dline = line;
++    line = UseJobVCount ? JobVCount : GPU::VCount;
++
++    if (!DeferVRAMSync)
++        SyncVRAM(CurUnit->Num, false);
+ 
+     bool forceblank = false;
+ 
+@@ -763,8 +786,8 @@ void SoftRenderer::DrawScanline_BGOBJ(u32 line)
+     }
+ 
+     u64 backdrop;
+-    if (CurUnit->Num) backdrop = *(u16*)&GPU::Palette[0x400];
+-    else     backdrop = *(u16*)&GPU::Palette[0];
++    if (CurUnit->Num) backdrop = *(u16*)&PalBase[0x400];
++    else     backdrop = *(u16*)&PalBase[0];
+ 
+     {
+         u8 r = (backdrop & 0x001F) << 1;
+@@ -1004,14 +1027,14 @@ void SoftRenderer::DrawBG_Text(u32 line, u32 bgnum)
+         tilesetaddr = ((bgcnt & 0x003C) << 12);
+         tilemapaddr = ((bgcnt & 0x1F00) << 3);
+ 
+-        pal = (u16*)&GPU::Palette[0x400];
++        pal = (u16*)&PalBase[0x400];
+     }
+     else
+     {
+         tilesetaddr = ((CurUnit->DispCnt & 0x07000000) >> 8) + ((bgcnt & 0x003C) << 12);
+         tilemapaddr = ((CurUnit->DispCnt & 0x38000000) >> 11) + ((bgcnt & 0x1F00) << 3);
+ 
+-        pal = (u16*)&GPU::Palette[0];
++        pal = (u16*)&PalBase[0];
+     }
+ 
+     // adjust Y position in tilemap
+@@ -1183,14 +1206,14 @@ void SoftRenderer::DrawBG_Affine(u32 line, u32 bgnum)
+         tilesetaddr = ((bgcnt & 0x003C) << 12);
+         tilemapaddr = ((bgcnt & 0x1F00) << 3);
+ 
+-        pal = (u16*)&GPU::Palette[0x400];
++        pal = (u16*)&PalBase[0x400];
+     }
+     else
+     {
+         tilesetaddr = ((CurUnit->DispCnt & 0x07000000) >> 8) + ((bgcnt & 0x003C) << 12);
+         tilemapaddr = ((CurUnit->DispCnt & 0x38000000) >> 11) + ((bgcnt & 0x1F00) << 3);
+ 
+-        pal = (u16*)&GPU::Palette[0];
++        pal = (u16*)&PalBase[0];
+     }
+ 
+     u16 curtile;
+@@ -1337,8 +1360,8 @@ void SoftRenderer::DrawBG_Extended(u32 line, u32 bgnum)
+         {
+             // 256-color bitmap
+ 
+-            if (CurUnit->Num) pal = (u16*)&GPU::Palette[0x400];
+-            else              pal = (u16*)&GPU::Palette[0];
++            if (CurUnit->Num) pal = (u16*)&PalBase[0x400];
++            else              pal = (u16*)&PalBase[0];
+ 
+             u8 color;
+ 
+@@ -1396,14 +1419,14 @@ void SoftRenderer::DrawBG_Extended(u32 line, u32 bgnum)
+             tilesetaddr = ((bgcnt & 0x003C) << 12);
+             tilemapaddr = ((bgcnt & 0x1F00) << 3);
+ 
+-            pal = (u16*)&GPU::Palette[0x400];
++            pal = (u16*)&PalBase[0x400];
+         }
+         else
+         {
+             tilesetaddr = ((CurUnit->DispCnt & 0x07000000) >> 8) + ((bgcnt & 0x003C) << 12);
+             tilemapaddr = ((CurUnit->DispCnt & 0x38000000) >> 11) + ((bgcnt & 0x1F00) << 3);
+ 
+-            pal = (u16*)&GPU::Palette[0];
++            pal = (u16*)&PalBase[0];
+         }
+ 
+         u16 curtile;
+@@ -1514,8 +1537,8 @@ void SoftRenderer::DrawBG_Large(u32 line) // BG is always BG2
+ 
+     // 256-color bitmap
+ 
+-    if (CurUnit->Num) pal = (u16*)&GPU::Palette[0x400];
+-    else     pal = (u16*)&GPU::Palette[0];
++    if (CurUnit->Num) pal = (u16*)&PalBase[0x400];
++    else     pal = (u16*)&PalBase[0];
+ 
+     u8 color;
+ 
+@@ -1593,7 +1616,7 @@ template <SoftRenderer::DrawPixel drawPixel>
+ void SoftRenderer::InterleaveSprites(u32 prio)
+ {
+     u32* objLine = OBJLine[CurUnit->Num];
+-    u16* pal = (u16*)&GPU::Palette[CurUnit->Num ? 0x600 : 0x200];
++    u16* pal = (u16*)&PalBase[CurUnit->Num ? 0x600 : 0x200];
+ 
+     if (CurUnit->DispCnt & 0x80000000)
+     {
+@@ -1665,16 +1688,8 @@ void SoftRenderer::DrawSprites(u32 line, Unit* unit)
+         CurUnit->OBJMosaicYCount = 0;
+     }
+ 
+-    if (CurUnit->Num == 0)
+-    {
+-        auto objDirty = GPU::VRAMDirty_AOBJ.DeriveState(GPU::VRAMMap_AOBJ);
+-        GPU::MakeVRAMFlat_AOBJCoherent(objDirty);
+-    }
+-    else
+-    {
+-        auto objDirty = GPU::VRAMDirty_BOBJ.DeriveState(GPU::VRAMMap_BOBJ);
+-        GPU::MakeVRAMFlat_BOBJCoherent(objDirty);
+-    }
++    if (!DeferVRAMSync)
++        SyncVRAM(CurUnit->Num, true);
+ 
+     NumSprites[CurUnit->Num] = 0;
+     memset(OBJLine[CurUnit->Num], 0, 256*4);
+@@ -1683,7 +1698,7 @@ void SoftRenderer::DrawSprites(u32 line, Unit* unit)
+ 
+     memset(OBJIndex, 0xFF, 256);
+ 
+-    u16* oam = (u16*)&GPU::OAM[CurUnit->Num ? 0x400 : 0];
++    u16* oam = (u16*)&OAMBase[CurUnit->Num ? 0x400 : 0];
+ 
+     const s32 spritewidth[16] =
+     {
+@@ -1778,7 +1793,7 @@ void SoftRenderer::DrawSprites(u32 line, Unit* unit)
+ template<bool window>
+ void SoftRenderer::DrawSprite_Rotscale(u32 num, u32 boundwidth, u32 boundheight, u32 width, u32 height, s32 xpos, s32 ypos)
+ {
+-    u16* oam = (u16*)&GPU::OAM[CurUnit->Num ? 0x400 : 0];
++    u16* oam = (u16*)&OAMBase[CurUnit->Num ? 0x400 : 0];
+     u16* attrib = &oam[num * 4];
+     u16* rotparams = &oam[(((attrib[1] >> 9) & 0x1F) * 16) + 3];
+ 
+@@ -2000,7 +2015,7 @@ void SoftRenderer::DrawSprite_Rotscale(u32 num, u32 boundwidth, u32 boundheight,
+ template<bool window>
+ void SoftRenderer::DrawSprite_Normal(u32 num, u32 width, u32 height, s32 xpos, s32 ypos)
+ {
+-    u16* oam = (u16*)&GPU::OAM[CurUnit->Num ? 0x400 : 0];
++    u16* oam = (u16*)&OAMBase[CurUnit->Num ? 0x400 : 0];
+     u16* attrib = &oam[num * 4];
+ 
+     u32 pixelattr = ((attrib[2] & 0x0C00) << 6) | 0xC0000;
+diff --git a/src/GPU2D_Soft.h b/src/GPU2D_Soft.h
+index b7043ee..a533b69 100644
+--- a/src/GPU2D_Soft.h
++++ b/src/GPU2D_Soft.h
+@@ -31,6 +31,7 @@ public:
+ 
+     void DrawScanline(u32 line, Unit* unit) override;
+     void DrawSprites(u32 line, Unit* unit) override;
++    void SyncVRAM(u32 unitnum, bool obj) override;
+     void VBlankEnd(Unit* unitA, Unit* unitB) override;
+ private:
+     alignas(8) u32 BGOBJLine[256*3];
+diff --git a/src/GPU3D.cpp b/src/GPU3D.cpp
+index 9c02b2f..3a36370 100644
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -2615,6 +2615,9 @@ void SetRenderXPos(u16 xpos)
+ 
+ u32 ScrolledLine[256];
+ 
++int PendingBuf3D = 0, DisplayBuf3D = 0, Line3DBuf = 0;
++bool PendingWait3D = false, DisplayWait3D = false, Line3DWait = false;
++
+ u32* GetLine(int line)
+ {
+     if (!AbortFrame)
+diff --git a/src/GPU3D.h b/src/GPU3D.h
+index 23f55eb..567c20d 100644
+--- a/src/GPU3D.h
++++ b/src/GPU3D.h
+@@ -125,6 +125,14 @@ void RestartFrame();
+ void SetRenderXPos(u16 xpos);
+ u32* GetLine(int line);
+ 
++// nuubOS: the soft renderer's color buffer is double-buffered so the 2D
++// engines (possibly on their worker thread) can read a frame's 3D lines
++// while the next frame renders into the other buffer. Pending* = the render
++// started at VCount 215 (shown in the next frame), Display* = this frame's,
++// Line3D* = what GetLine reads now (set by the thread drawing the 2D lines).
++extern int PendingBuf3D, DisplayBuf3D, Line3DBuf;
++extern bool PendingWait3D, DisplayWait3D, Line3DWait;
++
+ void WriteToGXFIFO(u32 val);
+ 
+ u8 Read8(u32 addr);
+diff --git a/src/GPU3D_Soft.cpp b/src/GPU3D_Soft.cpp
+index 4b0b9b0..c022dfb 100644
+--- a/src/GPU3D_Soft.cpp
++++ b/src/GPU3D_Soft.cpp
+@@ -19,6 +19,7 @@
+ #include "GPU3D_Soft.h"
+ 
+ #include <algorithm>
++#include <thread>
+ #include <stdio.h>
+ #include <string.h>
+ #include "NDS.h"
+@@ -40,6 +41,9 @@ void SoftRenderer::StopRenderThread()
+         Platform::Semaphore_Post(Sema_RenderStart);
+         Platform::Thread_Wait(RenderThread);
+         Platform::Thread_Free(RenderThread);
++        Platform::Semaphore_Post(Sema_LowerStart);
++        Platform::Thread_Wait(LowerThread);
++        Platform::Thread_Free(LowerThread);
+     }
+ }
+ 
+@@ -51,6 +55,7 @@ void SoftRenderer::SetupRenderThread()
+         {
+             RenderThreadRunning = true;
+             RenderThread = Platform::Thread_Create(std::bind(&SoftRenderer::RenderThreadFunc, this));
++            LowerThread = Platform::Thread_Create(std::bind(&SoftRenderer::LowerThreadFunc, this));
+         }
+ 
+         // otherwise more than one frame can be queued up at once
+@@ -62,8 +67,13 @@ void SoftRenderer::SetupRenderThread()
+         Platform::Semaphore_Reset(Sema_RenderDone);
+         Platform::Semaphore_Reset(Sema_RenderStart);
+         Platform::Semaphore_Reset(Sema_ScanlineCount);
++        Platform::Semaphore_Reset(Sema_LowerScanlines);
++        Platform::Semaphore_Reset(Sema_LowerFirstLine);
++        Platform::Semaphore_Reset(Sema_UpperLastLine);
+ 
+         RenderIssued = true;
++        GPU3D::PendingBuf3D = RenderTarget;
++        GPU3D::PendingWait3D = true;
+         Platform::Semaphore_Post(Sema_RenderStart);
+     }
+     else
+@@ -84,6 +94,11 @@ bool SoftRenderer::Init()
+     Sema_RenderStart = Platform::Semaphore_Create();
+     Sema_RenderDone = Platform::Semaphore_Create();
+     Sema_ScanlineCount = Platform::Semaphore_Create();
++    Sema_LowerStart = Platform::Semaphore_Create();
++    Sema_LowerDone = Platform::Semaphore_Create();
++    Sema_LowerScanlines = Platform::Semaphore_Create();
++    Sema_LowerFirstLine = Platform::Semaphore_Create();
++    Sema_UpperLastLine = Platform::Semaphore_Create();
+ 
+     Threaded = false;
+     RenderThreadRunning = false;
+@@ -99,15 +114,24 @@ void SoftRenderer::DeInit()
+     Platform::Semaphore_Free(Sema_RenderStart);
+     Platform::Semaphore_Free(Sema_RenderDone);
+     Platform::Semaphore_Free(Sema_ScanlineCount);
++    Platform::Semaphore_Free(Sema_LowerStart);
++    Platform::Semaphore_Free(Sema_LowerDone);
++    Platform::Semaphore_Free(Sema_LowerScanlines);
++    Platform::Semaphore_Free(Sema_LowerFirstLine);
++    Platform::Semaphore_Free(Sema_UpperLastLine);
+ }
+ 
+ void SoftRenderer::Reset()
+ {
+-    memset(ColorBuffer, 0, BufferSize * 2 * 4);
++    memset(ColorBuffers, 0, sizeof(ColorBuffers));
++    for (auto& buf : LineReady)
++        for (auto& ready : buf)
++            ready.store(1, std::memory_order_relaxed);
+     memset(DepthBuffer, 0, BufferSize * 2 * 4);
+     memset(AttrBuffer, 0, BufferSize * 2 * 4);
+ 
+-    PrevIsShadowMask = false;
++    Lanes[0].PrevIsShadowMask = false;
++    Lanes[1].PrevIsShadowMask = false;
+ 
+     SetupRenderThread();
+ }
+@@ -678,7 +702,7 @@ void SoftRenderer::SetupPolygon(SoftRenderer::RendererPolygon* rp, Polygon* poly
+     }
+ }
+ 
+-void SoftRenderer::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
++void SoftRenderer::RenderShadowMaskScanline(Lane* L, RendererPolygon* rp, s32 y)
+ {
+     Polygon* polygon = rp->PolyData;
+ 
+@@ -696,10 +720,10 @@ void SoftRenderer::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
+     else
+         fnDepthTest = DepthTest_LessThan;
+ 
+-    if (!PrevIsShadowMask)
+-        memset(&StencilBuffer[256 * (y&0x1)], 0, 256);
++    if (!L->PrevIsShadowMask)
++        memset(&L->StencilBuffer[256 * (y&0x1)], 0, 256);
+ 
+-    PrevIsShadowMask = true;
++    L->PrevIsShadowMask = true;
+ 
+     if (polygon->YTop != polygon->YBottom)
+     {
+@@ -821,13 +845,13 @@ void SoftRenderer::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
+             continue;
+ 
+         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+-            StencilBuffer[256*(y&0x1) + x] = 1;
++            L->StencilBuffer[256*(y&0x1) + x] = 1;
+ 
+         if (dstattr & 0x3)
+         {
+             pixeladdr += BufferSize;
+             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
++                L->StencilBuffer[256*(y&0x1) + x] |= 0x2;
+         }
+     }
+ 
+@@ -847,13 +871,13 @@ void SoftRenderer::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
+         u32 dstattr = AttrBuffer[pixeladdr];
+ 
+         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+-            StencilBuffer[256*(y&0x1) + x] = 1;
++            L->StencilBuffer[256*(y&0x1) + x] = 1;
+ 
+         if (dstattr & 0x3)
+         {
+             pixeladdr += BufferSize;
+             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
++                L->StencilBuffer[256*(y&0x1) + x] |= 0x2;
+         }
+     }
+ 
+@@ -876,13 +900,13 @@ void SoftRenderer::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
+             continue;
+ 
+         if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+-            StencilBuffer[256*(y&0x1) + x] = 1;
++            L->StencilBuffer[256*(y&0x1) + x] = 1;
+ 
+         if (dstattr & 0x3)
+         {
+             pixeladdr += BufferSize;
+             if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
++                L->StencilBuffer[256*(y&0x1) + x] |= 0x2;
+         }
+     }
+ 
+@@ -890,7 +914,7 @@ void SoftRenderer::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
+     rp->XR = rp->SlopeR.Step();
+ }
+ 
+-void SoftRenderer::RenderPolygonScanline(RendererPolygon* rp, s32 y)
++void SoftRenderer::RenderPolygonScanline(Lane* L, RendererPolygon* rp, s32 y)
+ {
+     Polygon* polygon = rp->PolyData;
+ 
+@@ -908,7 +932,7 @@ void SoftRenderer::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+     else
+         fnDepthTest = DepthTest_LessThan;
+ 
+-    PrevIsShadowMask = false;
++    L->PrevIsShadowMask = false;
+ 
+     if (polygon->YTop != polygon->YBottom)
+     {
+@@ -1049,7 +1073,7 @@ void SoftRenderer::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+         // check stencil buffer for shadows
+         if (polygon->IsShadow)
+         {
+-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
++            u8 stencil = L->StencilBuffer[256*(y&0x1) + x];
+             if (!stencil)
+                 continue;
+             if (!(stencil & 0x1))
+@@ -1145,7 +1169,7 @@ void SoftRenderer::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+         // check stencil buffer for shadows
+         if (polygon->IsShadow)
+         {
+-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
++            u8 stencil = L->StencilBuffer[256*(y&0x1) + x];
+             if (!stencil)
+                 continue;
+             if (!(stencil & 0x1))
+@@ -1220,7 +1244,7 @@ void SoftRenderer::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+         // check stencil buffer for shadows
+         if (polygon->IsShadow)
+         {
+-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
++            u8 stencil = L->StencilBuffer[256*(y&0x1) + x];
+             if (!stencil)
+                 continue;
+             if (!(stencil & 0x1))
+@@ -1304,19 +1328,19 @@ void SoftRenderer::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+     rp->XR = rp->SlopeR.Step();
+ }
+ 
+-void SoftRenderer::RenderScanline(s32 y, int npolys)
++void SoftRenderer::RenderScanline(Lane* L, s32 y, int npolys)
+ {
+     for (int i = 0; i < npolys; i++)
+     {
+-        RendererPolygon* rp = &PolygonList[i];
++        RendererPolygon* rp = &L->PolygonList[i];
+         Polygon* polygon = rp->PolyData;
+ 
+         if (y >= polygon->YTop && (y < polygon->YBottom || (y == polygon->YTop && polygon->YBottom == polygon->YTop)))
+         {
+             if (polygon->IsShadowMask)
+-                RenderShadowMaskScanline(rp, y);
++                RenderShadowMaskScanline(L, rp, y);
+             else
+-                RenderPolygonScanline(rp, y);
++                RenderPolygonScanline(L, rp, y);
+         }
+     }
+ }
+@@ -1527,10 +1551,14 @@ void SoftRenderer::ScanlineFinalPass(s32 y)
+             ColorBuffer[pixeladdr] = topR | (topG << 8) | (topB << 16) | (topA << 24);
+         }
+     }
++    MarkLineReady(y);
+ }
+ 
+ void SoftRenderer::ClearBuffers()
+ {
++    for (int i = 0; i < 192; i++)
++        LineReady[RenderTarget][i].store(0, std::memory_order_relaxed);
++
+     u32 clearz = ((RenderClearAttr2 & 0x7FFF) * 0x200) + 0x1FF;
+     u32 polyid = RenderClearAttr1 & 0x3F000000; // this sets the opaque polygonID
+ 
+@@ -1618,30 +1646,100 @@ void SoftRenderer::ClearBuffers()
+     }
+ }
+ 
+-void SoftRenderer::RenderPolygons(bool threaded, Polygon** polygons, int npolys)
++// Sets up the polygons of a lane for rendering from line y: edges of the
++// polygons already started are placed at y directly (Slope::Setup computes
++// the same position as stepping line by line).
++int SoftRenderer::SetupLane(Lane* L, Polygon** polygons, int npolys, s32 y)
+ {
+     int j = 0;
+     for (int i = 0; i < npolys; i++)
+     {
+-        if (polygons[i]->Degenerate) continue;
+-        SetupPolygon(&PolygonList[j++], polygons[i]);
++        Polygon* polygon = polygons[i];
++        if (polygon->Degenerate) continue;
++        RendererPolygon* rp = &L->PolygonList[j++];
++        SetupPolygon(rp, polygon);
++        if (polygon->YTop < y && polygon->YTop != polygon->YBottom)
++        {
++            SetupPolygonLeftEdge(rp, y);
++            SetupPolygonRightEdge(rp, y);
++        }
+     }
++    L->PrevIsShadowMask = false;
++    return j;
++}
+ 
+-    RenderScanline(0, j);
++// Lines [SplitLine, 192): the final pass of a line needs the raw lines above
++// and below it, so the first one (SplitLine) is finished last, once the upper
++// half has rendered SplitLine-1; its lines are released to GetLine together.
++void SoftRenderer::RenderLowerHalf()
++{
++    Lane* L = &Lanes[1];
++    int j = SetupLane(L, LowerPolygons, LowerNumPolygons, SplitLine);
+ 
+-    for (s32 y = 1; y < 192; y++)
++    RenderScanline(L, SplitLine, j);
++    Platform::Semaphore_Post(Sema_LowerFirstLine);
++
++    for (s32 y = SplitLine+1; y < 192; y++)
+     {
+-        RenderScanline(y, j);
+-        ScanlineFinalPass(y-1);
++        RenderScanline(L, y, j);
++        if (y-1 > SplitLine)
++            ScanlineFinalPass(y-1);
++    }
++    ScanlineFinalPass(191);
++
++    Platform::Semaphore_Wait(Sema_UpperLastLine);
++    ScanlineFinalPass(SplitLine);
++}
++
++void SoftRenderer::LowerThreadFunc()
++{
++    for (;;)
++    {
++        Platform::Semaphore_Wait(Sema_LowerStart);
++        if (!RenderThreadRunning) return;
++
++        RenderLowerHalf();
++        Platform::Semaphore_Post(Sema_LowerDone);
++    }
++}
++
++void SoftRenderer::RenderPolygons(bool threaded, Polygon** polygons, int npolys)
++{
++    Lane* L = &Lanes[0];
++
++    if (!threaded)
++    {
++        int j = SetupLane(L, polygons, npolys, 0);
++
++        RenderScanline(L, 0, j);
++        for (s32 y = 1; y < 192; y++)
++        {
++            RenderScanline(L, y, j);
++            ScanlineFinalPass(y-1);
++        }
++        ScanlineFinalPass(191);
++        return;
++    }
++
++    // the lower half starts now, on its own thread (buffers are cleared)
++    LowerPolygons = polygons;
++    LowerNumPolygons = npolys;
++    Platform::Semaphore_Post(Sema_LowerStart);
+ 
+-        if (threaded)
+-            Platform::Semaphore_Post(Sema_ScanlineCount);
++    int j = SetupLane(L, polygons, npolys, 0);
++
++    RenderScanline(L, 0, j);
++    for (s32 y = 1; y < SplitLine; y++)
++    {
++        RenderScanline(L, y, j);
++        ScanlineFinalPass(y-1);
+     }
++    Platform::Semaphore_Post(Sema_UpperLastLine);
+ 
+-    ScanlineFinalPass(191);
++    Platform::Semaphore_Wait(Sema_LowerFirstLine);
++    ScanlineFinalPass(SplitLine-1);
+ 
+-    if (threaded)
+-        Platform::Semaphore_Post(Sema_ScanlineCount);
++    Platform::Semaphore_Wait(Sema_LowerDone);
+ }
+ 
+ void SoftRenderer::VCount144()
+@@ -1659,6 +1757,8 @@ void SoftRenderer::RenderFrame()
+     {
+         RenderSkipped = true;
+         RenderIssued = false;
++        GPU3D::PendingBuf3D = RenderTarget;
++        GPU3D::PendingWait3D = false;
+         return;
+     }
+ 
+@@ -1671,6 +1771,16 @@ void SoftRenderer::RenderFrame()
+     FrameIdentical = !(textureChanged || texPalChanged) && RenderFrameIdentical && !RenderSkipped;
+     RenderSkipped = false;
+ 
++    // a new picture goes to the other buffer (the 2D engines may still be
++    // reading this frame's); an identical one is the buffer already shown
++    if (!FrameIdentical)
++    {
++        RenderTarget ^= 1;
++        ColorBuffer = ColorBuffers[RenderTarget];
++    }
++    GPU3D::PendingBuf3D = RenderTarget;
++    GPU3D::PendingWait3D = RenderThreadRunning.load(std::memory_order_relaxed);
++
+     if (RenderThreadRunning.load(std::memory_order_relaxed))
+     {
+         RenderIssued = true;
+@@ -1698,7 +1808,7 @@ void SoftRenderer::RenderThreadFunc()
+         RenderThreadRendering = true;
+         if (FrameIdentical)
+         {
+-            Platform::Semaphore_Post(Sema_ScanlineCount, 192);
++            // the buffer already holds this picture (its lines are ready)
+         }
+         else
+         {
+@@ -1714,13 +1824,15 @@ void SoftRenderer::RenderThreadFunc()
+ u32* SoftRenderer::GetLine(int line)
+ {
+     // no render was started for this frame (frameskip): the last picture
+-    if (RenderThreadRunning.load(std::memory_order_relaxed) && RenderIssued)
++    if (RenderThreadRunning.load(std::memory_order_relaxed) && GPU3D::Line3DWait && line < 192)
+     {
+-        if (line < 192)
+-            Platform::Semaphore_Wait(Sema_ScanlineCount);
++        std::atomic<u8>& ready = LineReady[GPU3D::Line3DBuf][line];
++        // the renderer is normally lines ahead of the 2D engines
++        while (!ready.load(std::memory_order_acquire))
++            std::this_thread::yield();
+     }
+ 
+-    return &ColorBuffer[(line * ScanlineWidth) + FirstPixelOffset];
++    return &ColorBuffers[GPU3D::Line3DBuf][(line * ScanlineWidth) + FirstPixelOffset];
+ }
+ 
+ }
+diff --git a/src/GPU3D_Soft.h b/src/GPU3D_Soft.h
+index 63b1ef7..107aa4f 100644
+--- a/src/GPU3D_Soft.h
++++ b/src/GPU3D_Soft.h
+@@ -455,16 +455,30 @@ private:
+ 
+     };
+ 
+-    RendererPolygon PolygonList[2048];
++    // Per-scanline state of one renderer lane. The threaded renderer splits
++    // the screen in two halves (nuubOS, H700: the A53 rasterizes Mario Kart
++    // DS in ~23 ms per frame on one core): lines [0, SplitLine) on the
++    // render thread, [SplitLine, 192) on a second one.
++    struct Lane
++    {
++        RendererPolygon PolygonList[2048];
++        u8 StencilBuffer[256*2];
++        bool PrevIsShadowMask;
++    };
++    static constexpr int SplitLine = 96;
++    Lane Lanes[2];
+     void TextureLookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha);
+     u32 RenderPixel(Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t);
+     void PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow);
+     void SetupPolygonLeftEdge(RendererPolygon* rp, s32 y);
+     void SetupPolygonRightEdge(RendererPolygon* rp, s32 y);
+     void SetupPolygon(RendererPolygon* rp, Polygon* polygon);
+-    void RenderShadowMaskScanline(RendererPolygon* rp, s32 y);
+-    void RenderPolygonScanline(RendererPolygon* rp, s32 y);
+-    void RenderScanline(s32 y, int npolys);
++    void RenderShadowMaskScanline(Lane* L, RendererPolygon* rp, s32 y);
++    void RenderPolygonScanline(Lane* L, RendererPolygon* rp, s32 y);
++    void RenderScanline(Lane* L, s32 y, int npolys);
++    int SetupLane(Lane* L, Polygon** polygons, int npolys, s32 y);
++    void RenderLowerHalf();
++    void LowerThreadFunc();
+     u32 CalculateFogDensity(u32 pixeladdr);
+     void ScanlineFinalPass(s32 y);
+     void ClearBuffers();
+@@ -483,7 +497,14 @@ private:
+     static constexpr int BufferSize = ScanlineWidth * NumScanlines;
+     static constexpr int FirstPixelOffset = ScanlineWidth + 1;
+ 
+-    u32 ColorBuffer[BufferSize * 2];
++    u32 ColorBuffers[2][BufferSize * 2];
++    u32* ColorBuffer = ColorBuffers[0];
++    int RenderTarget = 0;
++    // per buffer and line: final pass done (cleared when a render into that
++    // buffer starts). GetLine waits on these: line counting with semaphores
++    // drifted whenever a rendered frame was not drawn by the 2D engines.
++    std::atomic<u8> LineReady[2][192];
++    void MarkLineReady(s32 y) { LineReady[RenderTarget][y].store(1, std::memory_order_release); }
+     u32 DepthBuffer[BufferSize * 2];
+     u32 AttrBuffer[BufferSize * 2];
+ 
+@@ -496,15 +517,12 @@ private:
+     // bit22: translucent flag
+     // bit24-29: polygon ID for opaque pixels
+ 
+-    u8 StencilBuffer[256*2];
+-    bool PrevIsShadowMask;
+-
+     bool Enabled;
+ 
+     bool FrameIdentical;
+     // frameskip: a render was started for the frame being displayed / the
+     // last render was skipped (the buffer is older than the polygons)
+-    bool RenderIssued = false;
++    bool RenderIssued = false; // a render is in flight (VCount144 waits for it)
+     bool RenderSkipped = false;
+ 
+     // threading
+@@ -516,5 +534,14 @@ private:
+     Platform::Semaphore* Sema_RenderStart;
+     Platform::Semaphore* Sema_RenderDone;
+     Platform::Semaphore* Sema_ScanlineCount;
++    // lower half: its own thread, lines and handshakes with the upper half
++    Platform::Thread* LowerThread;
++    Platform::Semaphore* Sema_LowerStart;
++    Platform::Semaphore* Sema_LowerDone;
++    Platform::Semaphore* Sema_LowerScanlines;
++    Platform::Semaphore* Sema_LowerFirstLine; // raw line SplitLine rendered
++    Platform::Semaphore* Sema_UpperLastLine;  // raw line SplitLine-1 rendered
++    Polygon** LowerPolygons;
++    int LowerNumPolygons;
+ };
+ }
+\ No newline at end of file
+-- 
+2.56.0
+

@@ -1,0 +1,32 @@
+From 6dc95ba93953f820788eb56a45b602159a35d88d Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 19:37:25 +0200
+Subject: [PATCH] Report the core as melonDS-nuubOS (nuubOS)
+
+nuubOS bundles this patched build as melonds_nuubos and lets users
+download upstream melonDS next to it; RetroArch keeps per-core settings
+by library name, so the two must not share it.
+
+Upstream: not applicable (nuubOS naming).
+---
+ src/libretro/libretro.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index 48bc382..25d337c 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -148,7 +148,9 @@ unsigned retro_api_version(void)
+ void retro_get_system_info(struct retro_system_info *info)
+ {
+    memset(info, 0, sizeof(*info));
+-   info->library_name     = "melonDS";
++   /* nuubOS build (H700 performance patches): told apart from upstream
++    * melonDS, which users may download next to it */
++   info->library_name     = "melonDS-nuubOS";
+ #ifndef GIT_VERSION
+ #define GIT_VERSION ""
+ #endif
+-- 
+2.56.0
+

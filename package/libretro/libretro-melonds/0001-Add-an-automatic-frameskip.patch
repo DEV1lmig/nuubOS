@@ -1,0 +1,284 @@
+From 33dd340c4470a4488a2c19dc1109d7b3294d5458 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 12:51:49 +0200
+Subject: [PATCH] Add an automatic frameskip (nuubOS)
+
+Auto skips drawing the next frame (2D engines, sprites and the 3D
+render it would show) while RetroArch's audio buffer is below 33 % or
+about to underrun, never two frames in a row and never while the game
+captures the display. Emulation and audio keep full speed; skipped
+frames are duplicated (video_cb NULL). The threaded soft renderer only
+waits for a render it started.
+
+Upstream: not submitted (nuubOS H700 performance work).
+---
+ src/GPU.cpp                          | 11 +++--
+ src/GPU.h                            |  6 +++
+ src/GPU3D_Soft.cpp                   | 20 ++++++--
+ src/GPU3D_Soft.h                     |  4 ++
+ src/libretro/libretro.cpp            | 69 ++++++++++++++++++++++++++--
+ src/libretro/libretro_core_options.h | 14 ++++++
+ 6 files changed, 115 insertions(+), 9 deletions(-)
+
+diff --git a/src/GPU.cpp b/src/GPU.cpp
+index de229b3..3297ce7 100644
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -79,6 +79,8 @@ u8* VRAMPtr_BBG[0x8];
+ u8* VRAMPtr_BOBJ[0x8];
+ 
+ int FrontBuffer;
++bool FrameSkip = false;
++bool FrameSkipNext = false;
+ u32* Framebuffer[2][2];
+ int Renderer = 0;
+ 
+@@ -1021,14 +1023,17 @@ void StartHBlank(u32 line)
+     {
+         // draw
+         // note: this should start 48 cycles after the scanline start
+-        if (line < 192)
++        // a display capture writes VRAM the game reads back: always drawn
++        bool draw = !FrameSkip || GPU2D_A.CaptureLatch;
++
++        if (line < 192 && draw)
+         {
+             GPU2D_Renderer->DrawScanline(line, &GPU2D_A);
+             GPU2D_Renderer->DrawScanline(line, &GPU2D_B);
+         }
+ 
+         // sprites are pre-rendered one scanline in advance
+-        if (line < 191)
++        if (line < 191 && draw)
+         {
+             GPU2D_Renderer->DrawSprites(line+1, &GPU2D_A);
+             GPU2D_Renderer->DrawSprites(line+1, &GPU2D_B);
+@@ -1040,7 +1045,7 @@ void StartHBlank(u32 line)
+     {
+         GPU3D::VCount215();
+     }
+-    else if (VCount == 262)
++    else if (VCount == 262 && !FrameSkipNext)
+     {
+         GPU2D_Renderer->DrawSprites(0, &GPU2D_A);
+         GPU2D_Renderer->DrawSprites(0, &GPU2D_B);
+diff --git a/src/GPU.h b/src/GPU.h
+index f2d76ca..602a296 100644
+--- a/src/GPU.h
++++ b/src/GPU.h
+@@ -80,6 +80,12 @@ extern u8* VRAMPtr_BBG[0x8];
+ extern u8* VRAMPtr_BOBJ[0x8];
+ 
+ extern int FrontBuffer;
++
++// Frameskip (nuubOS): the frame being emulated is not drawn (2D engines,
++// sprites) / the next one will not be (its 3D picture is not rendered).
++// Set by the frontend before NDS::RunFrame(); emulation is unchanged.
++extern bool FrameSkip;
++extern bool FrameSkipNext;
+ extern u32* Framebuffer[2][2];
+ 
+ extern GPU2D::Unit GPU2D_A;
+diff --git a/src/GPU3D_Soft.cpp b/src/GPU3D_Soft.cpp
+index 2f0f825..4b0b9b0 100644
+--- a/src/GPU3D_Soft.cpp
++++ b/src/GPU3D_Soft.cpp
+@@ -63,6 +63,7 @@ void SoftRenderer::SetupRenderThread()
+         Platform::Semaphore_Reset(Sema_RenderStart);
+         Platform::Semaphore_Reset(Sema_ScanlineCount);
+ 
++        RenderIssued = true;
+         Platform::Semaphore_Post(Sema_RenderStart);
+     }
+     else
+@@ -1645,22 +1646,34 @@ void SoftRenderer::RenderPolygons(bool threaded, Polygon** polygons, int npolys)
+ 
+ void SoftRenderer::VCount144()
+ {
+-    if (RenderThreadRunning.load(std::memory_order_relaxed) && !GPU3D::AbortFrame)
++    if (RenderThreadRunning.load(std::memory_order_relaxed) && !GPU3D::AbortFrame && RenderIssued)
+         Platform::Semaphore_Wait(Sema_RenderDone);
++    RenderIssued = false;
+ }
+ 
+ void SoftRenderer::RenderFrame()
+ {
++    // the next frame is not drawn: nothing reads this picture (VRAM dirty
++    // state keeps accumulating for the next render)
++    if (GPU::FrameSkipNext && !GPU::GPU2D_A.CaptureLatch && !(GPU::GPU2D_A.CaptureCnt & (1u << 31)))
++    {
++        RenderSkipped = true;
++        RenderIssued = false;
++        return;
++    }
++
+     auto textureDirty = GPU::VRAMDirty_Texture.DeriveState(GPU::VRAMMap_Texture);
+     auto texPalDirty = GPU::VRAMDirty_TexPal.DeriveState(GPU::VRAMMap_TexPal);
+ 
+     bool textureChanged = GPU::MakeVRAMFlat_TextureCoherent(textureDirty);
+     bool texPalChanged = GPU::MakeVRAMFlat_TexPalCoherent(texPalDirty);
+ 
+-    FrameIdentical = !(textureChanged || texPalChanged) && RenderFrameIdentical;
++    FrameIdentical = !(textureChanged || texPalChanged) && RenderFrameIdentical && !RenderSkipped;
++    RenderSkipped = false;
+ 
+     if (RenderThreadRunning.load(std::memory_order_relaxed))
+     {
++        RenderIssued = true;
+         Platform::Semaphore_Post(Sema_RenderStart);
+     }
+     else if (!FrameIdentical)
+@@ -1700,7 +1713,8 @@ void SoftRenderer::RenderThreadFunc()
+ 
+ u32* SoftRenderer::GetLine(int line)
+ {
+-    if (RenderThreadRunning.load(std::memory_order_relaxed))
++    // no render was started for this frame (frameskip): the last picture
++    if (RenderThreadRunning.load(std::memory_order_relaxed) && RenderIssued)
+     {
+         if (line < 192)
+             Platform::Semaphore_Wait(Sema_ScanlineCount);
+diff --git a/src/GPU3D_Soft.h b/src/GPU3D_Soft.h
+index 61bf368..63b1ef7 100644
+--- a/src/GPU3D_Soft.h
++++ b/src/GPU3D_Soft.h
+@@ -502,6 +502,10 @@ private:
+     bool Enabled;
+ 
+     bool FrameIdentical;
++    // frameskip: a render was started for the frame being displayed / the
++    // last render was skipped (the buffer is older than the polygons)
++    bool RenderIssued = false;
++    bool RenderSkipped = false;
+ 
+     // threading
+ 
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index 2207849..a36198d 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -54,6 +54,39 @@ bool swap_screen_toggled = false;
+ const int SLOT_1_2_BOOT = 1;
+ 
+ static bool libretro_supports_option_categories = false;
++
++/* Frameskip (nuubOS): auto skips drawing the next frame while RetroArch's
++ * audio buffer is below FRAMESKIP_THRESHOLD % or about to underrun. */
++#define FRAMESKIP_THRESHOLD 33
++static bool frameskip_auto = false;
++static bool frameskip_cb_set = false;
++static bool can_dupe = false;
++static bool skip_current = false;
++static bool audio_buffer_active = false;
++static unsigned audio_buffer_occupancy = 0;
++static bool audio_underrun_likely = false;
++
++static void audio_buffer_status(bool active, unsigned occupancy, bool underrun_likely)
++{
++   audio_buffer_active = active;
++   audio_buffer_occupancy = occupancy;
++   audio_underrun_likely = underrun_likely;
++}
++
++static void update_frameskip(bool enable)
++{
++   struct retro_audio_buffer_status_callback cb = { audio_buffer_status };
++
++   if (enable == frameskip_cb_set)
++      return;
++   frameskip_cb_set = environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK,
++                                 enable ? &cb : NULL) && enable;
++   if (!frameskip_cb_set)
++   {
++      audio_buffer_active = false;
++      audio_underrun_likely = false;
++   }
++}
+ #ifdef HAVE_OPENGL
+ static bool opengl_options = true;
+ #endif
+@@ -99,6 +132,10 @@ void retro_init(void)
+ 
+ void retro_deinit(void)
+ {
++   update_frameskip(false);
++   skip_current = false;
++   GPU::FrameSkip = false;
++   GPU::FrameSkipNext = false;
+    libretro_supports_bitmasks = false;
+    libretro_supports_option_categories = false;
+ }
+@@ -419,6 +456,13 @@ static void check_variables(bool init)
+          Config::RandomizeMAC = 0;
+    }
+ 
++   var.key = "melonds_frameskip";
++   frameskip_auto = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
++                    !strcmp(var.value, "auto");
++   if (!environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &can_dupe))
++      can_dupe = false;
++   update_frameskip(frameskip_auto);
++
+ #ifdef HAVE_THREADS
+    var.key = "melonds_threaded_renderer";
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+@@ -749,9 +793,28 @@ void retro_run(void)
+       NDS::MicInputFrame(NULL, 0);
+    }
+ 
+-   if (current_renderer != CurrentRenderer::None) NDS::RunFrame();
+-
+-   render_frame();
++   {
++      bool skip_next = false;
++
++      /* never two in a row; never while the game captures the display
++       * (it reads the pictures back) */
++      if (frameskip_auto && frameskip_cb_set && audio_buffer_active && can_dupe &&
++          !skip_current && !(GPU::GPU2D_A.CaptureCnt & (1u << 31)))
++         skip_next = audio_underrun_likely || audio_buffer_occupancy < FRAMESKIP_THRESHOLD;
++      if (!frameskip_auto)
++         skip_current = false;
++      GPU::FrameSkip = skip_current;
++      GPU::FrameSkipNext = skip_next;
++
++      if (current_renderer != CurrentRenderer::None) NDS::RunFrame();
++
++      if (skip_current)
++         video_cb(NULL, screen_layout_data.buffer_width, screen_layout_data.buffer_height,
++                  screen_layout_data.buffer_width * sizeof(uint32_t));
++      else
++         render_frame();
++      skip_current = skip_next;
++   }
+ 
+    audio_callback();
+ 
+diff --git a/src/libretro/libretro_core_options.h b/src/libretro/libretro_core_options.h
+index e50715c..6535959 100644
+--- a/src/libretro/libretro_core_options.h
++++ b/src/libretro/libretro_core_options.h
+@@ -185,6 +185,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
+       "disabled"
+    },
+ #endif
++   {
++      "melonds_frameskip",
++      "Frameskip",
++      NULL,
++      "Auto: when emulation falls behind (RetroArch's audio buffer running low) the next frame is emulated without drawing it, never two in a row. Emulation and audio keep full speed.",
++      NULL,
++      "video",
++      {
++         { "disabled", NULL },
++         { "auto",     "Auto" },
++         { NULL, NULL },
++      },
++      "disabled"
++   },
+ #ifdef HAVE_OPENGL
+    {
+       "melonds_opengl_renderer",
+-- 
+2.56.0
+

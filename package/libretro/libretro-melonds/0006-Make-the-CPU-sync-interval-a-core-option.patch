@@ -1,0 +1,98 @@
+From c6181f7e791b07cf9c756938359f70947cb64e91 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 19:37:18 +0200
+Subject: [PATCH] Make the CPU sync interval a core option (nuubOS)
+
+The ARM9 and ARM7 run apart for at most kMaxIterationCycles before they
+are synchronised (upstream fixed at 64 cycles). Each stretch also runs
+the timers, the geometry engine and the event check and re-enters both
+JITs: Mario Kart DS took ~8,400 stretches a frame at 64, ~1,900 at 512.
+New core option melonds_sync_cycles (64 default, 128, 256, 512); a game
+relying on tight ARM9/ARM7 timing may need 64.
+
+Upstream: not submitted (nuubOS H700 performance work).
+---
+ src/NDS.cpp                          |  7 ++++++-
+ src/NDS.h                            |  1 +
+ src/libretro/libretro.cpp            |  7 +++++++
+ src/libretro/libretro_core_options.h | 16 ++++++++++++++++
+ 4 files changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index d55f7f5..52ec3c2 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -88,7 +88,12 @@ u64 FrameStartTimestamp;
+ 
+ int CurCPU;
+ 
+-const s32 kMaxIterationCycles = 64;
++// nuubOS: the longest stretch the two CPUs run apart before they are
++// synchronised (upstream fixed at 64 cycles). Every stretch also runs the
++// timers, the geometry engine and the event check and re-enters both JITs:
++// at 64, Mario Kart DS needed ~8,400 stretches a frame. Core option
++// melonds_sync_cycles.
++s32 kMaxIterationCycles = 64;
+ 
+ u32 ARM9ClockShift;
+ 
+diff --git a/src/NDS.h b/src/NDS.h
+index 33063c1..fa85fb2 100644
+--- a/src/NDS.h
++++ b/src/NDS.h
+@@ -175,6 +175,7 @@ extern u32 NumLagFrames;
+ extern bool LagFrameFlag;
+ 
+ extern u64 ARM9Timestamp, ARM9Target;
++extern s32 kMaxIterationCycles;
+ extern u64 ARM7Timestamp, ARM7Target;
+ extern u32 ARM9ClockShift;
+ 
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index 3fedf7d..48bc382 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -456,6 +456,13 @@ static void check_variables(bool init)
+          Config::RandomizeMAC = 0;
+    }
+ 
++   var.key = "melonds_sync_cycles";
++   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
++   {
++      int cycles = atoi(var.value);
++      NDS::kMaxIterationCycles = (cycles >= 16 && cycles <= 4096) ? cycles : 64;
++   }
++
+    var.key = "melonds_frameskip";
+    frameskip_auto = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+                     !strcmp(var.value, "auto");
+diff --git a/src/libretro/libretro_core_options.h b/src/libretro/libretro_core_options.h
+index 6535959..45a6757 100644
+--- a/src/libretro/libretro_core_options.h
++++ b/src/libretro/libretro_core_options.h
+@@ -185,6 +185,22 @@ struct retro_core_option_v2_definition option_defs_us[] = {
+       "disabled"
+    },
+ #endif
++   {
++      "melonds_sync_cycles",
++      "CPU Sync Interval",
++      NULL,
++      "Longest stretch (in cycles) the ARM9 and ARM7 run apart before they are synchronised. Larger is much faster; a game relying on tight timing between the two CPUs may misbehave (go back to 64).",
++      NULL,
++      "system",
++      {
++         { "64",  "64 (accurate)" },
++         { "128", NULL },
++         { "256", NULL },
++         { "512", NULL },
++         { NULL, NULL },
++      },
++      "64"
++   },
+    {
+       "melonds_frameskip",
+       "Frameskip",
+-- 
+2.56.0
+

@@ -1,0 +1,52 @@
+From 2c6efdd9504e5f34e08c781670fa866e847b0a79 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 20:33:24 +0200
+Subject: [PATCH] Map the DTCM into fast memory (nuubOS)
+
+MapAtAddress and Mapping::Unmap cut the DTCM out of the regions that
+overlap it, but the test also matched the DTCM region itself: mapping the
+DTCM then mapped nothing while its pages were marked mapped, so every
+DTCM access (the stack of most games) took a SIGSEGV and its JIT code was
+rewritten to the slow path for good (Mario Kart DS: ~6,500 rewrites,
+~41,000 slow DTCM accesses a frame; afterwards 78 rewrites). Unmapping the
+DTCM likewise unmapped nothing. Only on platforms that map the DTCM
+(not Windows).
+
+Upstream: should be submitted (bug in ARMJIT_Memory).
+---
+ src/ARMJIT_Memory.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/ARMJIT_Memory.cpp b/src/ARMJIT_Memory.cpp
+index 6d2e50a..655c024 100644
+--- a/src/ARMJIT_Memory.cpp
++++ b/src/ARMJIT_Memory.cpp
+@@ -412,7 +412,11 @@ struct Mapping
+ #ifndef __SWITCH__
+ #ifndef _WIN32
+         u32 dtcmEnd = dtcmStart + dtcmSize;
++        // the hole for the DTCM is cut out of the other regions only: the
++        // DTCM always "overlaps" itself, and this branch then unmapped
++        // nothing of it (nuubOS)
+         if (Num == 0
++            && region != memregion_DTCM
+             && dtcmEnd >= Addr
+             && dtcmStart < Addr + Size)
+         {
+@@ -594,7 +598,13 @@ bool MapAtAddress(u32 addr)
+     u32 dtcmEnd = dtcmStart + dtcmSize;
+ #ifndef __SWITCH__
+ #ifndef _WIN32
++    // the hole for the DTCM is cut out of the other regions only: the DTCM
++    // always "overlaps" itself, and this branch then mapped nothing of it
++    // while its pages were marked mapped. Every DTCM access (the stack of
++    // most games) faulted and was rewritten to the slow path for good
++    // (nuubOS; Windows builds never map the DTCM)
+     if (num == 0
++        && region != memregion_DTCM
+         && dtcmEnd >= mirrorStart
+         && dtcmStart < mirrorStart + mirrorSize)
+     {
+-- 
+2.56.0
+

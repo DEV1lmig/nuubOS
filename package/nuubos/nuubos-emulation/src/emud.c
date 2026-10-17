@@ -136,6 +136,12 @@
  * 1.5x, below the CRT look's 2x scanlines. display.conf field 3 overrides
  * it per system (0 = native resolution). The panel never uses it. */
 #define GAME_HDMI_LINES 360
+/* CRT look scanline strength on HDMI (crt.glsl, bezel-picture.glsl
+ * CRT_SCANLINES; the panel keeps the shaders' 0.25, user request
+ * 2026-10-11). The display engine scales the 480-line buffer 2.25x to
+ * 1080p with a filtering scaler, which smooths the 2-row beam/gap pattern
+ * away at 0.25 (user report 2026-10-17: "almost no CRT effect on HDMI"). */
+#define CRT_SCANLINES_HDMI 0.55
 #ifndef HDMI_ENABLED
 #define HDMI_ENABLED "/sys/class/drm/card0-HDMI-A-1/enabled"
 #endif
@@ -680,6 +686,45 @@ static void seed_tree(const char *src, const char *dst)
 			log_msg("emud: could not provide %s", to);
 	}
 	closedir(dir);
+}
+
+/* Support files of the image (SYSTEM_FILES, ~110 MB / 600 files: PPSSPP
+ * assets, ScummVM data, blueMSX databases, EmuTOS) are copied to BIOS_DIR
+ * by a low-priority child once per service start: a new image brings new
+ * files. Done inside LAUNCH it held the reply for tens of seconds after a
+ * flash (fsync per file on exFAT), past Home's 8 s wait: "could not be
+ * started", then the game came up anyway (user report 2026-10-17). */
+#define SYSTEM_FILE_CORES "ppsspp_nuubos,ppsspp,scummvm,hatari,bluemsx"
+
+static bool list_has(const char *list, const char *name);
+
+static pid_t seed_pid = -1;
+
+static void start_system_seed(void)
+{
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		if (nice(19) == -1) {
+			/* copies at normal priority */
+		}
+		seed_tree(SYSTEM_FILES, BIOS_DIR);
+		_exit(0);
+	}
+	if (pid < 0)
+		seed_tree(SYSTEM_FILES, BIOS_DIR);
+	else
+		seed_pid = pid;
+}
+
+/* A core that reads those files waits for a copy still running. */
+static void wait_system_seed(const char *core)
+{
+	if (seed_pid <= 0 || !list_has(SYSTEM_FILE_CORES, core))
+		return;
+	while (waitpid(seed_pid, NULL, 0) < 0 && errno == EINTR)
+		;
+	seed_pid = -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1648,18 +1693,25 @@ static void system_screen(const char *system, char *out, size_t size)
 /* Render height of a game of the system on the current output: the system's
  * HDMI lines while HDMI is the active output (the output policy turns the
  * panel off then), else 0 = native. */
-static int game_render_height(const char *system)
+static bool hdmi_active(void)
 {
 	char value[16] = "";
 	FILE *fp = fopen(HDMI_ENABLED, "r");
 
 	if (!fp)
-		return 0;
+		return false;
 	if (!fgets(value, sizeof(value), fp))
 		value[0] = '\0';
 	fclose(fp);
 	trim(value);
-	if (strcmp(value, "enabled") != 0)
+	return strcmp(value, "enabled") == 0;
+}
+
+static int game_render_height(const char *system)
+{
+	char value[16] = "";
+
+	if (!hdmi_active())
 		return 0;
 	display_field(system, 2, value, sizeof(value));
 	return value[0] ? atoi(value) : GAME_HDMI_LINES;
@@ -2063,6 +2115,7 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 		"video_shader_enable", "video_smooth", NULL,
 	};
 	char screen[16];
+	char scan[64] = "";
 	bool crt;
 	bool bezel = false;
 	bool integer = true;
@@ -2099,6 +2152,8 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 		!strcmp(o->filter, "smooth") ? "true" : "false");
 
 	shader[0] = '\0';
+	if (crt && hdmi_active())
+		snprintf(scan, sizeof(scan), "CRT_SCANLINES = \"%.2f\"\n", CRT_SCANLINES_HDMI);
 	if (bezel) {
 		char params[2048];
 		char icon[PATH_MAX];
@@ -2121,21 +2176,25 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 			 "BRAND_linear = \"false\"\n"
 			 "parameters = \"BEZEL_R;BEZEL_G;BEZEL_B;BEZEL_STYLE;HAS_ICON;CRT;OVERSCAN_X;"
 			 "MOOD_BG_R;MOOD_BG_G;MOOD_BG_B;MOOD_TEXT_R;MOOD_TEXT_G;MOOD_TEXT_B;"
-			 "MOOD_ACCENT_R;MOOD_ACCENT_G;MOOD_ACCENT_B\"\n"
+			 "MOOD_ACCENT_R;MOOD_ACCENT_G;MOOD_ACCENT_B%s\"\n"
 			 "BEZEL_R = \"%.3f\"\nBEZEL_G = \"%.3f\"\nBEZEL_B = \"%.3f\"\n"
 			 "BEZEL_STYLE = \"%d\"\nHAS_ICON = \"%d\"\nCRT = \"%d\"\nOVERSCAN_X = \"%d\"\n"
 			 "MOOD_BG_R = \"%.3f\"\nMOOD_BG_G = \"%.3f\"\nMOOD_BG_B = \"%.3f\"\n"
 			 "MOOD_TEXT_R = \"%.3f\"\nMOOD_TEXT_G = \"%.3f\"\nMOOD_TEXT_B = \"%.3f\"\n"
-			 "MOOD_ACCENT_R = \"%.3f\"\nMOOD_ACCENT_G = \"%.3f\"\nMOOD_ACCENT_B = \"%.3f\"\n",
-			 icon, rgb[0], rgb[1], rgb[2], !strcmp(screen, "lcd") ? 1 : 0,
+			 "MOOD_ACCENT_R = \"%.3f\"\nMOOD_ACCENT_G = \"%.3f\"\nMOOD_ACCENT_B = \"%.3f\"\n%s",
+			 icon, scan[0] ? ";CRT_SCANLINES" : "", rgb[0], rgb[1], rgb[2], !strcmp(screen, "lcd") ? 1 : 0,
 			 has_icon ? 1 : 0, crt ? 1 : 0, tv_overscan(session.system, o),
 			 mood.background[0], mood.background[1], mood.background[2],
 			 mood.text[0], mood.text[1], mood.text[2],
-			 mood.accent[0], mood.accent[1], mood.accent[2]);
+			 mood.accent[0], mood.accent[1], mood.accent[2], scan);
 		if (write_session_shader(SHADER_DIR "/bezel.glsl", true, params) == 0)
 			copy_text(shader, sizeof(shader), SESSION_SHADER);
 	} else if (crt) {
-		if (write_session_shader(SHADER_DIR "/crt.glsl", false, "") == 0)
+		char params[128] = "";
+
+		if (scan[0])
+			snprintf(params, sizeof(params), "parameters = \"CRT_SCANLINES\"\n%s", scan);
+		if (write_session_shader(SHADER_DIR "/crt.glsl", false, params) == 0)
 			copy_text(shader, sizeof(shader), SESSION_SHADER);
 	} else if (!o->filter[0] || !strcmp(o->filter, "sharp")) {
 		copy_text(shader, sizeof(shader), DEFAULT_SHADER_PRESET);
@@ -2931,6 +2990,13 @@ static int write_session_cfg(const char *ra_dir, const char *saves,
 			"input_player%d_reserved_device = \"0000:%04x\"\n",
 			player, player, player);
 	*shader = write_presentation(fp, o);
+	/* Threaded video for CPU-bound systems (2026-10-17, Mario Kart DS on the
+	 * CubeXX 39 -> 44 fps): the emulation thread no longer waits in
+	 * eglSwapBuffers for the display (3.6 -> 0.8 ms a frame), at the cost
+	 * of one frame of latency. Everything else keeps the user's value. */
+	remember_key("video_threaded");
+	if (!strcmp(session.system, "nds"))
+		fprintf(fp, "video_threaded = \"true\"\n");
 	/* The performance overlay line is drawn into the frame with the OSD
 	 * font (RetroArch notifications use widgets, not this font). */
 	remember_key("video_font_enable");
@@ -3182,15 +3248,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	    mkdir_p(DOWNLOADED_CORES) != 0 || mkdir_p(CACHE_DIR) != 0 ||
 	    mkdir_p(BIOS_DIR) != 0)
 		return "storage";
-	/* Once per service start: a new image brings new support files. */
-	{
-		static bool system_seeded;
-
-		if (!system_seeded) {
-			seed_tree(SYSTEM_FILES, BIOS_DIR);
-			system_seeded = true;
-		}
-	}
+	wait_system_seed(session.core);
 	snprintf(path, sizeof(path), "%s/retroarch.cfg", ra_dir);
 	if (seed_file(DEFAULT_RA_CFG, path) != 0)
 		return "storage";
@@ -3475,6 +3533,8 @@ static void reap_children(void)
 	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
 		if (pid == session.pid)
 			child_exited(status);
+		else if (pid == seed_pid)
+			seed_pid = -1;
 	}
 }
 
@@ -4540,6 +4600,8 @@ int main(void)
 	}
 	log_msg("emud: started pid=%ld", (long)getpid());
 	sync_low_latency(); /* a mark left by a crashed emud */
+	if (mkdir_p(BIOS_DIR) == 0)
+		start_system_seed();
 
 	while (!stop_requested) {
 		struct pollfd pfd[7 + MAX_CLIENTS];

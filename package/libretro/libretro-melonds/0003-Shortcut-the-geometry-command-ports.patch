@@ -1,0 +1,98 @@
+From 9e9faa5efab9b054c72f30b3998c933184d6ade0 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 15:00:28 +0200
+Subject: [PATCH] Shortcut the geometry command ports (nuubOS)
+
+Display lists reach the geometry engine one word at a time, from DMA or
+from STM, through ARM9Write32, the long ARM9IOWrite32 switch and
+GPU3D::Write32's own switch. ARM9IOWrite32 now sends 0x04000400-0x040005CB
+straight to GPU3D::WriteGXPort32 (same effect as Write32 for those
+addresses, GeometryEnabled included), and a 32-bit DMA from main RAM to
+those ports reads main RAM directly. Timing is unchanged (the DMA unit
+timings are still computed per word).
+
+Upstream: not submitted (nuubOS H700 performance work).
+---
+ src/DMA.cpp   |  3 +++
+ src/GPU3D.cpp | 16 ++++++++++++++++
+ src/GPU3D.h   |  4 ++++
+ src/NDS.cpp   |  7 +++++++
+ 4 files changed, 30 insertions(+)
+
+diff --git a/src/DMA.cpp b/src/DMA.cpp
+index e601871..6fa6092 100644
+--- a/src/DMA.cpp
++++ b/src/DMA.cpp
+@@ -583,6 +583,9 @@ void DMA::Run9()
+ 
+             if (ConsoleType == 1)
+                 DSi::ARM9Write32(CurDstAddr, DSi::ARM9Read32(CurSrcAddr));
++            else if ((CurSrcAddr & 0xFF000000) == 0x02000000 && CurDstAddr - 0x04000400 < 0x1CC)
++                // main RAM to the geometry ports (display lists): nuubOS
++                GPU3D::WriteGXPort32(CurDstAddr, *(u32*)&NDS::MainRAM[CurSrcAddr & NDS::MainRAMMask]);
+             else
+                 NDS::ARM9Write32(CurDstAddr, NDS::ARM9Read32(CurSrcAddr));
+ 
+diff --git a/src/GPU3D.cpp b/src/GPU3D.cpp
+index 3a36370..4b66545 100644
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -2654,6 +2654,22 @@ u32* GetLine(int line)
+ }
+ 
+ 
++void WriteToGXFIFO(u32 val);
++
++void WriteGXPort32(u32 addr, u32 val)
++{
++    if (!GeometryEnabled) return;
++    if (addr < 0x04000440)
++    {
++        WriteToGXFIFO(val);
++        return;
++    }
++    CmdFIFOEntry entry;
++    entry.Command = (addr & 0x1FC) >> 2;
++    entry.Param = val;
++    CmdFIFOWrite(entry);
++}
++
+ void WriteToGXFIFO(u32 val)
+ {
+     if (NumCommands == 0)
+diff --git a/src/GPU3D.h b/src/GPU3D.h
+index 567c20d..635603d 100644
+--- a/src/GPU3D.h
++++ b/src/GPU3D.h
+@@ -125,6 +125,10 @@ void RestartFrame();
+ void SetRenderXPos(u16 xpos);
+ u32* GetLine(int line);
+ 
++// nuubOS: geometry command ports (0x04000400-0x040005CB) without the
++// generic I/O dispatch; same effect as Write32 for those addresses.
++void WriteGXPort32(u32 addr, u32 val);
++
+ // nuubOS: the soft renderer's color buffer is double-buffered so the 2D
+ // engines (possibly on their worker thread) can read a frame's 3D lines
+ // while the next frame renders into the other buffer. Pending* = the render
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index 90b53b9..d55f7f5 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -3410,6 +3410,13 @@ void ARM9IOWrite16(u32 addr, u16 val)
+ 
+ void ARM9IOWrite32(u32 addr, u32 val)
+ {
++    // geometry command ports: the hottest I/O writes in 3D games (nuubOS)
++    if (addr - 0x04000400 < 0x1CC)
++    {
++        GPU3D::WriteGXPort32(addr, val);
++        return;
++    }
++
+     switch (addr)
+     {
+     case 0x04000004:
+-- 
+2.56.0
+

@@ -1,0 +1,69 @@
+From 25c8f03479fe94743538900b345d71f413285edf Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sat, 17 Oct 2026 15:26:56 +0200
+Subject: [PATCH] Cheaper polygon setup in the geometry engine (nuubOS)
+
+- ClipAgainstPlane: when no vertex lies outside the plane pair (the usual
+  case) return at once with the colour fix-up applied; the two passes
+  copied every vertex twice per axis without changing it.
+- Hi-res screen positions (two 64-bit divisions per vertex) are only
+  computed for the accelerated renderer, the only one reading them.
+
+Results are identical; geometry timing is unchanged.
+
+Upstream: not submitted (nuubOS H700 performance work).
+---
+ src/GPU3D.cpp | 30 +++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/src/GPU3D.cpp b/src/GPU3D.cpp
+index 4b66545..603ac56 100644
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -906,6 +906,32 @@ void ClipSegment(Vertex* outbuf, Vertex* vin, Vertex* vout)
+ template<int comp, bool attribs>
+ int ClipAgainstPlane(Vertex* vertices, int nverts, int clipstart)
+ {
++    // nothing outside this plane pair (the usual case): the two passes
++    // below would copy every vertex twice and change nothing but the
++    // colour fix-up (nuubOS)
++    bool inside = true;
++    for (int i = clipstart; i < nverts; i++)
++    {
++        if (vertices[i].Position[comp] > vertices[i].Position[3] ||
++            vertices[i].Position[comp] < -vertices[i].Position[3])
++        {
++            inside = false;
++            break;
++        }
++    }
++    if (inside)
++    {
++        for (int i = 0; i < nverts; i++)
++        {
++            Vertex* vtx = &vertices[i];
++
++            vtx->Color[0] &= ~0xFFF; vtx->Color[0] += 0xFFF;
++            vtx->Color[1] &= ~0xFFF; vtx->Color[1] += 0xFFF;
++            vtx->Color[2] &= ~0xFFF; vtx->Color[2] += 0xFFF;
++        }
++        return nverts;
++    }
++
+     Vertex temp[10];
+     int prev, next;
+     int c = clipstart;
+@@ -1210,7 +1236,9 @@ void SubmitPolygon()
+ 
+         // hi-res positions
+         // to consider: only do this when using the GL renderer? apply the aforementioned quirk to this?
+-        if (w != 0)
++        // nuubOS: only the accelerated (OpenGL) renderer reads them; two
++        // 64-bit divisions per vertex otherwise
++        if (w != 0 && CurrentRenderer->Accelerated)
+         {
+             posX = ((((s64)(vtx->Position[0] + w) * Viewport[4]) << 4) / (((s64)w) << 1)) + (Viewport[0] << 4);
+             posY = ((((s64)(-vtx->Position[1] + w) * Viewport[5]) << 4) / (((s64)w) << 1)) + (Viewport[3] << 4);
+-- 
+2.56.0
+

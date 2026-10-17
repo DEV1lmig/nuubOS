@@ -1670,7 +1670,13 @@ static const char *launch_steamlink(void)
 		return "busy";
 	if (!user[0])
 		return "no-user";
-	if (!steamlink_version[0] || steamlink_job() >= 0)
+	/* A running check (Home starts one on every page visit) does not hold
+	 * the launch: it only asks Valve, and its automatic update waits for
+	 * an idle session. Refused during one, the first Open after a boot
+	 * failed (user report 2026-10-17). Install/remove/rollback change the
+	 * app and do. */
+	if (!steamlink_version[0] ||
+	    (steamlink_job() >= 0 && jobs[steamlink_job()].kind != JOB_SL_CHECK))
 		return "unavailable";
 	copy_text(locale, sizeof(locale), steamlink_locale());
 

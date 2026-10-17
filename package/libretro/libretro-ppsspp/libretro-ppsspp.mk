@@ -13,7 +13,7 @@ LIBRETRO_PPSSPP_SITE_METHOD = git
 LIBRETRO_PPSSPP_GIT_SUBMODULES = YES
 LIBRETRO_PPSSPP_LICENSE = GPL-2.0+
 LIBRETRO_PPSSPP_LICENSE_FILES = LICENSE.TXT
-LIBRETRO_PPSSPP_DEPENDENCIES = libgles libegl
+LIBRETRO_PPSSPP_DEPENDENCIES = libgles libegl libretro-core-info
 LIBRETRO_PPSSPP_SUPPORTS_IN_SOURCE_BUILD = NO
 LIBRETRO_PPSSPP_CONF_OPTS = \
 	-DLIBRETRO=ON -DUSING_GLES2=ON -DUSING_EGL=OFF -DUSING_FBDEV=OFF \
@@ -24,11 +24,13 @@ LIBRETRO_PPSSPP_CONF_OPTS = \
 	-DUSE_SYSTEM_LIBPNG=OFF -DUSE_SYSTEM_LIBSDL2=OFF \
 	-DBUILD_SHARED_LIBS=OFF
 
-# The core loads its fonts/UI atlas from <system>/PPSSPP: shipped here and
-# copied into /userdata/bios by nuubos-emud when missing.
+# Bundled as PPSSPP-nuubOS (ppsspp_nuubos): patches 0001-0002 are nuubOS
+# Panfrost performance work (README "Patched cores"); upstream PPSSPP
+# remains a download. The core loads its fonts/UI atlas from
+# <system>/PPSSPP: shipped here and copied into /userdata/bios by
+# nuubos-emud when missing.
 define LIBRETRO_PPSSPP_INSTALL_TARGET_CMDS
-	$(INSTALL) -D -m 0755 $(LIBRETRO_PPSSPP_BUILDDIR)/lib/ppsspp_libretro.so \
-		$(TARGET_DIR)/usr/lib/libretro/ppsspp_libretro.so
+	$(call LIBRETRO_NUUBOS_CORE_INSTALL,ppsspp,ppsspp_nuubos,$(LIBRETRO_PPSSPP_BUILDDIR)/lib/ppsspp_libretro.so)
 	rm -rf $(TARGET_DIR)/usr/share/nuubos/emulation/system/PPSSPP
 	mkdir -p $(TARGET_DIR)/usr/share/nuubos/emulation/system/PPSSPP
 	cp -a $(@D)/assets/. $(TARGET_DIR)/usr/share/nuubos/emulation/system/PPSSPP/
