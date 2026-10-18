@@ -1,10 +1,12 @@
 #!/bin/sh
 # jit-bench.sh GAME SLOT ROUNDS VARIANT...  (bench builds: /tmp/melonds-V.so)
 G=$1; SL=$2; N=$3; shift 3
+nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
 U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
 rm -rf /tmp/jb-states; cp -a $U/states/nds /tmp/jb-states; cp $C /tmp/jb-opts.cfg
 sed -i 's/^melonds_frameskip = .*/melonds_frameskip = "disabled"/' $C
 sed -i '/^melonds_accuracy = /d' $C; echo 'melonds_accuracy = "fast"' >> $C
+for kv in $OPTS; do k=${kv%%=*}; v=$(echo "${kv#*=}" | tr _ ' '); sed -i "/^$k = /d" $C; echo "$k = \"$v\"" >> $C; done
 LIB=/usr/lib/libretro/melonds_nuubos_libretro.so
 r=1; while [ $r -le $N ]; do
   for x in "$@"; do
@@ -18,6 +20,9 @@ r=1; while [ $r -le $N ]; do
       t=0; while [ $t -lt 40 ] && [ "$(ls /proc/$(pidof retroarch)/task 2>/dev/null | wc -l)" -lt 8 ]; do sleep 1; t=$((t+1)); done
       sleep 1; P=$(pidof retroarch)
       /tmp/setaff 7 $(ls /proc/$P/task | grep -vx $P); /tmp/setaff 8 $P ;;
+    rt*)
+      t=0; while [ $t -lt 40 ] && [ "$(ls /proc/$(pidof retroarch)/task 2>/dev/null | wc -l)" -lt 8 ]; do sleep 1; t=$((t+1)); done
+      sleep 1; P=$(pidof retroarch); chrt -f -p ${m#rt} $P ;;
     pri*)
       t=0; while [ $t -lt 40 ] && [ "$(ls /proc/$(pidof retroarch)/task 2>/dev/null | wc -l)" -lt 8 ]; do sleep 1; t=$((t+1)); done
       sleep 1; P=$(pidof retroarch); renice -n -${m#pri} -p $P >/dev/null ;;

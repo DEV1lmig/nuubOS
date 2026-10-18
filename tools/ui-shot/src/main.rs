@@ -601,7 +601,11 @@ fn main() {
             ui.set_gen_rows(gen(&[(&s(ui, 773), "", "", false, -1), (&s(ui, 417), &s(ui, 346), "", true, -1),
                 (&s(ui, 418), &s(ui, 345), "", true, -1), (&s(ui, 779), &s(ui, 341), "", true, -1),
                 (&s(ui, 780), &s(ui, 342), "", true, -1), (&s(ui, 781), &s(ui, 339), "", true, -1),
-                (&s(ui, 422), &s(ui, 351), "", true, -1), (&s(ui, 592), &s(ui, 347), "", true, -1)]));
+                (&s(ui, 422), &s(ui, 351), "", true, -1), (&s(ui, 592), &s(ui, 347), "", true, -1),
+                (&s(ui, 1302), &s(ui, 352), "", true, -1), (&s(ui, 1307), &s(ui, 348), "", true, -1)]));
+        })),
+        ("game_hotkeys_end", Box::new(|ui| {
+            ui.set_gen_index(9); ui.set_gen_scroll(5);
         })),
         ("perf_overlay", Box::new(|ui| {
             ui.set_settings_view(56); ui.set_gen_index(0); ui.set_gen_scroll(0);
@@ -661,6 +665,16 @@ fn main() {
             ui.set_gen_rows(gen(&[(&s(ui, 525), &s(ui, 528).replace("{0}", "snes9x"), "", true, -1),
                 (&s(ui, 1253), "", "", true, -1),
                 (&s(ui, 526), "4:3", "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
+                (&s(ui, 535), "", &s(ui, 536), false, -1)]));
+        })),
+        ("game_settings_nds", Box::new(|ui| {
+            ui.set_gen_index(4);
+            ui.set_details_title("Mario Kart DS".into());
+            ui.set_details_subtitle("Nintendo DS".into());
+            ui.set_gen_rows(gen(&[(&s(ui, 525), &s(ui, 528).replace("{0}", "melonds_nuubos"), "", true, -1),
+                (&s(ui, 1253), "", "", true, -1),
+                (&s(ui, 526), &s(ui, 528).replace("{0}", &s(ui, 531)), "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
+                (&s(ui, 1314), &s(ui, 528).replace("{0}", &s(ui, 1315)), &s(ui, 1317), true, -1),
                 (&s(ui, 535), "", &s(ui, 536), false, -1)]));
         })),
         ("game_settings_core_download", Box::new(|ui| {

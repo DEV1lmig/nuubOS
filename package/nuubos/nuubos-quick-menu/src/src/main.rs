@@ -1900,6 +1900,36 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
             format_arg(&tr(ui, 423, "Slot {0}"), &n.int("slot").unwrap_or(0).to_string()),
             -1,
         ),
+        "game.screens" => (
+            ICON_CONTROLLER,
+            SEVERITY_INFO,
+            tr(ui, 1302, "Screen Layout"),
+            match n.text("layout") {
+                "large" => tr(ui, 1304, "Large Top Screen"),
+                "pip" => tr(ui, 1305, "Picture in Picture"),
+                "single" => tr(ui, 1306, "Single Screen"),
+                _ => tr(ui, 1303, "Two Screens"),
+            },
+            -1,
+        ),
+        "game.stylus" => {
+            let control = match n.text("state") {
+                "right" => Some(tr(ui, 1310, "Right Stick")),
+                "left" => Some(tr(ui, 1311, "Left Stick")),
+                "dpad" => Some(tr(ui, 1312, "D-Pad")),
+                _ => None,
+            };
+            match control {
+                Some(control) => (
+                    ICON_CONTROLLER,
+                    SEVERITY_INFO,
+                    tr(ui, 1308, "Stylus on"),
+                    format_arg(&tr(ui, 1313, "{0} moves it, L2 touches"), &control),
+                    -1,
+                ),
+                None => (ICON_CONTROLLER, SEVERITY_INFO, tr(ui, 1309, "Stylus off"), String::new(), -1),
+            }
+        }
         "game.fastforward" => (
             ICON_FAST_FORWARD,
             SEVERITY_INFO,

@@ -1,0 +1,427 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS bezel drawn once around the picture
+
+The nuubOS bezel was two full-screen shader passes (the decoration into
+a feedback FBO, then the picture and the bezel to the screen): on the
+H700's Mali-G31 they cost N64 and PSP games up to 40 % of their speed
+(God of War: Chains of Olympus 30.6 fps with them, 48 without).
+
+gl2 now draws the bezel itself when the session manager asks for it
+(NUUBOS_RA_BEZEL): the picture keeps the presentation it has without a
+bezel (and its single shader pass), the bezel is rendered on the CPU into
+a texture only when the screen or the picture rectangle changes (the
+same look: matte tinted with the system colour, lip, accent line,
+platform silhouette, dot-matrix logo, face-button dots) and each frame
+copies it into the bands around the picture with the stock shader
+(scissor). The GL state it touches is put back: a hardware rendered
+core (PPSSPP) caches it across frames and ran at 13 fps otherwise.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/gfx/drivers/gl2.c
++++ b/gfx/drivers/gl2.c
+@@ -2653,6 +2653,367 @@
+    return true;
+ }
+ 
++/*
++ * nuubOS bezel (replaces the bezel shader passes): the picture keeps the
++ * presentation RetroArch gives it without a bezel, and the bezel fills the
++ * rest of the screen. It is drawn on the CPU (the look of the former
++ * bezel.glsl: nuubOS matte tinted with the system colour, lip, accent line,
++ * platform silhouette, dot-matrix logo) into a texture only when the
++ * screen or the picture rectangle changes; every frame copies it into the
++ * bands around the picture (scissor) with the stock shader. The two
++ * full-screen shader passes cost N64 and PSP games up to 40 % of their
++ * speed on the H700's Mali-G31 (God of War 30.6 -> 48 fps without them).
++ * Enabled by the session manager with NUUBOS_RA_BEZEL="r g b style icon
++ * logo bg_r bg_g bg_b text_r text_g text_b accent_r accent_g accent_b"
++ * (colours 0..1, style 1 = handheld body, icon "-" = none).
++ */
++static struct
++{
++   bool parsed, enabled;
++   float sys[3], bg[3], text[3], accent[3];
++   bool handheld;
++   struct texture_image icon, logo;
++   GLuint tex;
++   unsigned w, h;
++   int vx, vy, vw, vh;
++} nuubos_bezel;
++
++static void nuubos_bezel_parse(void)
++{
++   char icon[512], logo[512];
++   const char *env = getenv("NUUBOS_RA_BEZEL");
++   int style       = 0;
++
++   nuubos_bezel.parsed = true;
++   if (!env || sscanf(env, "%f %f %f %d %511s %511s %f %f %f %f %f %f %f %f %f",
++            &nuubos_bezel.sys[0], &nuubos_bezel.sys[1], &nuubos_bezel.sys[2],
++            &style, icon, logo,
++            &nuubos_bezel.bg[0], &nuubos_bezel.bg[1], &nuubos_bezel.bg[2],
++            &nuubos_bezel.text[0], &nuubos_bezel.text[1], &nuubos_bezel.text[2],
++            &nuubos_bezel.accent[0], &nuubos_bezel.accent[1], &nuubos_bezel.accent[2]) != 15)
++      return;
++   nuubos_bezel.handheld = style == 1;
++   if (strcmp(icon, "-") && !image_texture_load(&nuubos_bezel.icon, icon))
++      memset(&nuubos_bezel.icon, 0, sizeof(nuubos_bezel.icon));
++   if (!image_texture_load(&nuubos_bezel.logo, logo))
++      return;
++   nuubos_bezel.enabled = true;
++}
++
++static float nb_clamp(float v, float lo, float hi)
++{
++   return v < lo ? lo : v > hi ? hi : v;
++}
++
++static float nb_smooth(float e0, float e1, float x)
++{
++   float t = nb_clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
++   return t * t * (3.0f - 2.0f * t);
++}
++
++static void nb_mix(float *c, const float *o, float a)
++{
++   c[0] += (o[0] - c[0]) * a;
++   c[1] += (o[1] - c[1]) * a;
++   c[2] += (o[2] - c[2]) * a;
++}
++
++/* Signed distance to a rounded box of half size (bx, by), radius r. */
++static float nb_round_box(float px, float py, float bx, float by, float r)
++{
++   float qx = fabsf(px) - bx + r, qy = fabsf(py) - by + r;
++   float mx = qx > 0.0f ? qx : 0.0f, my = qy > 0.0f ? qy : 0.0f;
++   float in = qx > qy ? qx : qy;
++   return sqrtf(mx * mx + my * my) + (in < 0.0f ? in : 0.0f) - r;
++}
++
++/* Coverage of the system icon drawn in a box of side b at (ox, oy): its
++ * alpha averaged over the pixel's footprint (the shader used mipmaps). */
++static float nb_stamp(float px, float py, float ox, float oy, float b)
++{
++   const struct texture_image *im = &nuubos_bezel.icon;
++   float u = (px - ox) / b, v = (py - oy) / b;
++   float fx, fy;
++   int x0, x1, y0, y1, x, y, n = 0;
++   unsigned sum = 0;
++
++   if (!im->pixels || u < 0.0f || v < 0.0f || u > 1.0f || v > 1.0f)
++      return 0.0f;
++   fx = (float)im->width / b;
++   fy = (float)im->height / b;
++   x0 = (int)(u * im->width - fx * 0.5f);
++   x1 = (int)(u * im->width + fx * 0.5f);
++   y0 = (int)(v * im->height - fy * 0.5f);
++   y1 = (int)(v * im->height + fy * 0.5f);
++   for (y = y0; y <= y1; y++)
++      for (x = x0; x <= x1; x++)
++      {
++         if (x < 0 || y < 0 || x >= (int)im->width || y >= (int)im->height)
++            continue;
++         sum += im->pixels[y * im->width + x] >> 24;
++         n++;
++      }
++   return n ? (float)sum / (255.0f * n) : 0.0f;
++}
++
++/* The dot-matrix logo at dot pitch k; (qx, qy) in logo pixels (x along
++ * the word, y down the letters). Returns the coverage, rgb the colour. */
++static float nb_logo(float qx, float qy, float k, float *rgb)
++{
++   const struct texture_image *im = &nuubos_bezel.logo;
++   float cx = floorf(qx / k), cy = floorf(qy / k), s, d;
++   uint32_t t;
++
++   if (cx < 0.0f || cy < 0.0f || cx >= (float)im->width || cy >= (float)im->height)
++      return 0.0f;
++   t = im->pixels[(unsigned)cy * im->width + (unsigned)cx];
++   if ((t >> 24) < 128)
++      return 0.0f;
++   s = k - (floorf(k / 6.0f) > 1.0f ? floorf(k / 6.0f) : 1.0f);
++   d = nb_round_box(qx - cx * k - s * 0.5f, qy - cy * k - s * 0.5f,
++         s * 0.5f, s * 0.5f, s * 0.25f);
++   memcpy(rgb, nuubos_bezel.text, sizeof(float) * 3);
++   nb_mix(rgb, nuubos_bezel.accent, ((t >> 8) & 0xFF) / 255.0f);
++   return nb_clamp(0.5f - d, 0.0f, 1.0f);
++}
++
++/* The four face-button dots, south one filled. */
++static float nb_dots(float px, float py, float cx, float cy, float r, float aa,
++      float *filled)
++{
++   float g = r * 2.6f, qx = px - cx, qy = py - cy, best;
++   float n = fabsf(sqrtf(qx * qx + (qy + g) * (qy + g)) - r * 0.78f);
++   float w = fabsf(sqrtf((qx + g) * (qx + g) + qy * qy) - r * 0.78f);
++   float e = fabsf(sqrtf((qx - g) * (qx - g) + qy * qy) - r * 0.78f);
++   best = n < w ? n : w;
++   best = best < e ? best : e;
++   *filled = 1.0f - nb_smooth(r - aa, r + aa, sqrtf(qx * qx + (qy - g) * (qy - g)));
++   return 1.0f - nb_smooth(r * 0.22f - aa, r * 0.22f + aa, best);
++}
++
++/* The bezel of a W x H screen around the picture at (ox, oy) size sw x sh
++ * (top-left origin), RGBA, picture pixels left untouched. */
++static void nuubos_bezel_render(uint8_t *out, int W, int H,
++      float ox, float oy, float sw, float sh)
++{
++   const float lw = (float)nuubos_bezel.logo.width;
++   const float lh = (float)nuubos_bezel.logo.height;
++   float u      = H / 480.0f, aa = 0.75f;
++   float cx     = ox + sw * 0.5f, cy = oy + sh * 0.5f;
++   float left   = ox > 0.0f ? ox : 0.0f;
++   float right  = W - ox - sw > 0.0f ? W - ox - sw : 0.0f;
++   float bottom = H - oy - sh > 0.0f ? H - oy - sh : 0.0f;
++   float panel  = left < right ? left : right;
++   bool sides   = panel >= 56.0f * u;
++   bool strip   = bottom >= 26.0f * u;
++   float lip    = (nuubos_bezel.handheld ? 5.0f : 3.0f) * u;
++   float base[3], ink[3], one[3] = { 1.0f, 1.0f, 1.0f }, dark[3] = { 0.02f, 0.02f, 0.02f };
++   int x, y;
++
++   if (nuubos_bezel.handheld)
++   {
++      base[0] = 0.17f; base[1] = 0.18f; base[2] = 0.19f;
++      nb_mix(base, nuubos_bezel.sys, 0.34f);
++   }
++   else
++   {
++      memcpy(base, nuubos_bezel.bg, sizeof(base));
++      nb_mix(base, nuubos_bezel.sys, 0.14f);
++   }
++   memcpy(ink, nuubos_bezel.sys, sizeof(ink));
++   nb_mix(ink, one, 0.30f);
++
++   for (y = 0; y < H; y++)
++      for (x = 0; x < W; x++)
++      {
++         float px = x + 0.5f, py = y + 0.5f;
++         float ux = px / W - 0.5f, uy = py / H - 0.5f;
++         float col[3], shade, d, under;
++         uint8_t *o = out + ((size_t)y * W + x) * 4;
++
++         if (px >= ox && py >= oy && px < ox + sw && py < oy + sh)
++            continue;
++         shade  = 1.06f - 0.16f * (py / H) - 0.35f * (ux * ux + uy * uy);
++         col[0] = base[0] * shade; col[1] = base[1] * shade; col[2] = base[2] * shade;
++         /* lip around the picture: a darker recess, softly shadowed */
++         d = nb_round_box(px - cx, py - cy, sw * 0.5f, sh * 0.5f, 2.0f * u);
++         {
++            float s = nb_smooth(lip, lip + 6.0f * u, d);
++            float k = 0.45f + 0.55f * s;
++            col[0] *= k; col[1] *= k; col[2] *= k;
++         }
++         nb_mix(col, dark, 1.0f - nb_smooth(0.0f, lip, d));
++         /* the Mood's accent line under the picture */
++         under = py - (oy + sh);
++         if (bottom >= 6.0f * u && under >= 0.0f)
++         {
++            float line = 1.0f - nb_smooth(1.5f * u - aa, 1.5f * u + aa, fabsf(under - 3.0f * u));
++            float span = 1.0f - nb_smooth(sw * 0.5f - 1.0f, sw * 0.5f + 1.0f, fabsf(px - cx));
++            nb_mix(col, nuubos_bezel.accent, line * span);
++         }
++         if (sides && py < oy + sh)
++         {
++            if (px < left)
++            {
++               float box = panel * 0.86f < sh * 0.62f ? panel * 0.86f : sh * 0.62f;
++               nb_mix(col, ink, 0.92f * nb_stamp(px, py, (left - box) * 0.5f, cy - box * 0.5f, box));
++            }
++            else
++            {
++               /* the logo standing on the right panel, reading upwards */
++               float x0 = W - right;
++               float k  = floorf(fminf((right - 24.0f * u) / lh, sh * 0.72f / lw));
++               if (k >= 2.0f)
++               {
++                  float bw = lh * k, bh = lw * k, rgb[3], a;
++                  float lx = x0 + floorf((right - bw) * 0.5f), ly = floorf(cy - bh * 0.5f);
++                  a = nb_logo(ly + bh - py, px - lx, k, rgb);
++                  nb_mix(col, rgb, a);
++               }
++               else
++               {
++                  float filled, ring, ink2[3] = { ink[0] * 0.85f, ink[1] * 0.85f, ink[2] * 0.85f };
++                  float r = fminf(right * 0.085f, 10.0f * u);
++                  ring = nb_dots(px, py, x0 + right * 0.5f, cy, r, aa, &filled);
++                  nb_mix(col, ink2, ring);
++                  nb_mix(col, nuubos_bezel.accent, filled);
++               }
++            }
++         }
++         else if (strip && py > oy + sh)
++         {
++            /* bottom strip: silhouette at the left end (unless a side
++             * panel shows it), the logo at the right end */
++            float y0 = oy + sh + 6.0f * u, h = bottom - 12.0f * u;
++            float k  = fmaxf(floorf(fminf(h * 0.5f, 28.0f * u) / lh), 2.0f);
++            float bw = lw * k, bh = lh * k, rgb[3], a;
++            float lx = floorf(W - right - 10.0f * u - bw), ly = floorf(y0 + (h - bh) * 0.5f);
++            if (!sides)
++            {
++               float box = fminf(h, 64.0f * u);
++               nb_mix(col, ink, 0.92f * nb_stamp(px, py, left + 10.0f * u, y0 + (h - box) * 0.5f, box));
++            }
++            a = nb_logo(px - lx, py - ly, k, rgb);
++            nb_mix(col, rgb, a);
++         }
++         o[0] = (uint8_t)(nb_clamp(col[0], 0.0f, 1.0f) * 255.0f + 0.5f);
++         o[1] = (uint8_t)(nb_clamp(col[1], 0.0f, 1.0f) * 255.0f + 0.5f);
++         o[2] = (uint8_t)(nb_clamp(col[2], 0.0f, 1.0f) * 255.0f + 0.5f);
++         o[3] = 255;
++      }
++}
++
++/* Redraws the texture when the screen or the picture moved. */
++static void nuubos_bezel_update(gl2_t *gl)
++{
++   unsigned W = gl->video_width, H = gl->video_height;
++   uint8_t *buf;
++   GLint unpack[4] = { 0, 0, 0, 4 };
++
++   if (     nuubos_bezel.tex && nuubos_bezel.w == W && nuubos_bezel.h == H
++         && nuubos_bezel.vx == gl->vp.x && nuubos_bezel.vy == gl->vp.y
++         && nuubos_bezel.vw == (int)gl->vp.width && nuubos_bezel.vh == (int)gl->vp.height)
++      return;
++   if (!(buf = (uint8_t*)calloc((size_t)W * H, 4)))
++      return;
++   nuubos_bezel_render(buf, W, H, (float)gl->vp.x,
++         (float)H - gl->vp.y - gl->vp.height, (float)gl->vp.width, (float)gl->vp.height);
++   if (!nuubos_bezel.tex)
++      glGenTextures(1, &nuubos_bezel.tex);
++   glBindTexture(GL_TEXTURE_2D, nuubos_bezel.tex);
++   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++   /* a threaded core renderer can leave unpack state behind (patch 0004) */
++#if defined(HAVE_OPENGLES3) || !defined(HAVE_OPENGLES)
++   glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack[0]);
++   glGetIntegerv(GL_UNPACK_ROW_LENGTH, &unpack[1]);
++   glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++   glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
++#endif
++   glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack[3]);
++   glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
++   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, buf);
++   glPixelStorei(GL_UNPACK_ALIGNMENT, unpack[3]);
++#if defined(HAVE_OPENGLES3) || !defined(HAVE_OPENGLES)
++   glPixelStorei(GL_UNPACK_ROW_LENGTH, unpack[1]);
++   glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)unpack[0]);
++#endif
++   free(buf);
++   nuubos_bezel.w  = W;
++   nuubos_bezel.h  = H;
++   nuubos_bezel.vx = gl->vp.x;
++   nuubos_bezel.vy = gl->vp.y;
++   nuubos_bezel.vw = gl->vp.width;
++   nuubos_bezel.vh = gl->vp.height;
++}
++
++/* Copies the bezel into the bands around the picture. */
++static void nuubos_bezel_draw(gl2_t *gl)
++{
++   static const GLfloat vertex[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
++   static const GLfloat tex[8]    = { 0, 0, 1, 0, 0, 1, 1, 1 };
++   int W = gl->video_width, H = gl->video_height;
++   int x0 = gl->vp.x, y0 = gl->vp.y;
++   int x1 = gl->vp.x + (int)gl->vp.width, y1 = gl->vp.y + (int)gl->vp.height;
++   int band[4][4];
++   int i;
++   GLboolean scissor_on;
++   GLint scissor_box[4];
++   GLint bound;
++
++   if (!nuubos_bezel.parsed)
++      nuubos_bezel_parse();
++   if (!nuubos_bezel.enabled)
++      return;
++   x0 = x0 < 0 ? 0 : x0; y0 = y0 < 0 ? 0 : y0;
++   x1 = x1 > W ? W : x1; y1 = y1 > H ? H : y1;
++   if (x0 == 0 && y0 == 0 && x1 == W && y1 == H)
++      return;
++   nuubos_bezel_update(gl);
++   if (!nuubos_bezel.tex)
++      return;
++   /* GL window coordinates: below, above, left and right of the picture */
++   band[0][0] = 0;  band[0][1] = 0;  band[0][2] = W;      band[0][3] = y0;
++   band[1][0] = 0;  band[1][1] = y1; band[1][2] = W;      band[1][3] = H - y1;
++   band[2][0] = 0;  band[2][1] = y0; band[2][2] = x0;     band[2][3] = y1 - y0;
++   band[3][0] = x1; band[3][1] = y0; band[3][2] = W - x1; band[3][3] = y1 - y0;
++
++   /* a hardware rendered core (PPSSPP) caches GL state across frames:
++    * whatever this changes is put back */
++   scissor_on = glIsEnabled(GL_SCISSOR_TEST);
++   glGetIntegerv(GL_SCISSOR_BOX, scissor_box);
++   glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
++
++   glViewport(0, 0, W, H);
++   gl->shader->use(gl, gl->shader_data, VIDEO_SHADER_STOCK_BLEND, true);
++   gl->coords.vertex    = vertex;
++   gl->coords.tex_coord = tex;
++   gl->coords.color     = gl->white_color_ptr;
++   gl->coords.vertices  = 4;
++   gl->shader->set_coords(gl->shader_data, &gl->coords);
++   gl->shader->set_mvp(gl->shader_data, &gl->mvp_no_rot);
++   glBindTexture(GL_TEXTURE_2D, nuubos_bezel.tex);
++   glEnable(GL_SCISSOR_TEST);
++   for (i = 0; i < 4; i++)
++   {
++      if (band[i][2] <= 0 || band[i][3] <= 0)
++         continue;
++      glScissor(band[i][0], band[i][1], band[i][2], band[i][3]);
++      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++   }
++   glScissor(scissor_box[0], scissor_box[1], scissor_box[2], scissor_box[3]);
++   if (!scissor_on)
++      glDisable(GL_SCISSOR_TEST);
++   glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
++   gl->coords.vertex    = gl->vertex_ptr;
++   gl->coords.tex_coord = gl->tex_info.coord;
++   gl->coords.color     = gl->white_color_ptr;
++   gl->coords.vertices  = 4;
++   glViewport(gl->vp.x, gl->vp.y, gl->vp.width, gl->vp.height);
++}
++
+ #ifdef HAVE_OVERLAY
+ static void gl2_free_overlay(gl2_t *gl)
+ {
+@@ -2725,6 +3086,7 @@
+    tex[7]       = y + h;
+ }
+ 
++
+ static void gl2_render_overlay(gl2_t *gl)
+ {
+    unsigned i;
+@@ -3596,6 +3958,9 @@
+    gl2_renderchain_bind_prev_texture(gl,
+          chain, &gl->tex_info);
+ 
++   /* nuubOS bezel around the picture */
++   nuubos_bezel_draw(gl);
++
+ #ifdef HAVE_OVERLAY
+    if ((gl->flags & GL2_FLAG_OVERLAY_ENABLE) && overlay_behind_menu)
+       gl2_render_overlay(gl);
+@@ -3823,6 +4188,9 @@
+    gl->shader->deinit(gl->shader_data);
+ 
+    glDeleteTextures(gl->textures, gl->texture);
++   if (nuubos_bezel.tex)
++      glDeleteTextures(1, &nuubos_bezel.tex);
++   nuubos_bezel.tex = 0;
+ 
+ #if defined(HAVE_MENU)
+    if (gl->menu_texture)
+@@ -4272,6 +4640,8 @@
+    char *error_string                   = NULL;
+    recording_state_t *recording_st      = recording_state_get_ptr();
+    gl2_t *gl                            = (gl2_t*)calloc(1, sizeof(gl2_t));
++   /* a new context: the bezel texture is drawn again */
++   nuubos_bezel.tex                     = 0;
+    const gfx_ctx_driver_t *ctx_driver   = gl2_get_context(gl);
+ 
+    if (!gl || !ctx_driver)

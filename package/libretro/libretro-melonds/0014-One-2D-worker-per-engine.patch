@@ -1,0 +1,297 @@
+From f55a508700f596b00744b19ea2e7bc0b8ae32d2f Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 08:50:24 +0200
+Subject: [PATCH] One 2D worker per engine (nuubOS)
+
+The threaded 2D renderer (patch 0002) draws engine A and engine B on two
+workers from the same jobs, each with its own renderer (engine B:
+Renderer2DB), palette/OAM copy and unit copy; a job slot is free once
+both are done and a fence waits for both. NUUB_2D_WORKERS 1 builds the
+single worker drawing both engines.
+
+The job ring holds 256 jobs (was 64): games with a raster effect on
+every line (New Super Mario Bros. menus) make one job per line, and with
+the 3D lanes busy on the other cores the emulation thread waited 1.8 ms
+a frame for a free slot. Now the workers catch up during VBlank:
+18.5 -> 17.3 ms a frame there.
+---
+ src/GPU.cpp | 124 ++++++++++++++++++++++++++++++++++++----------------
+ src/GPU2D.h |   1 +
+ 2 files changed, 88 insertions(+), 37 deletions(-)
+
+diff --git a/src/GPU.cpp b/src/GPU.cpp
+index 5b338e9..e76e6a3 100644
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -22,6 +22,7 @@
+ #include "GPU.h"
+ 
+ #include "GPU2D_Soft.h"
++#include <functional>
+ #include "Platform.h"
+ #include <atomic>
+ 
+@@ -171,9 +172,10 @@ struct Job2D
+     s32 Buf3D;
+     alignas(16) u8 Units[2][sizeof(GPU2D::Unit)];
+     alignas(16) u8 PalOAM[4096];
++    std::atomic<u32> Done{0};   // workers through with it (the slot frees at 2)
+ };
+ enum { Job_Line, Job_Sprites0, Job_Fence };
+-constexpr u32 Job2DCount = 64;
++constexpr u32 Job2DCount = 256;   // a whole frame of one-line jobs (the workers catch up in VBlank)
+ 
+ struct OwnedFields
+ {
+@@ -181,10 +183,18 @@ struct OwnedFields
+     u8 BGMosaicY, BGMosaicYMax, OBJMosaicY, OBJMosaicYCount;
+ };
+ 
++// one worker per engine (nuubOS): worker n draws unit n with its own
++// renderer (A: GPU2D_Renderer, B: Renderer2DB) from the same jobs; with
++// NUUB_2D_WORKERS 1 a single worker draws both
++#ifndef NUUB_2D_WORKERS
++#define NUUB_2D_WORKERS 2
++#endif
++constexpr int NumWorkers2D = NUUB_2D_WORKERS;
+ Job2D* Jobs2D = nullptr;
+-u32 Job2DHead = 0, Job2DTail = 0;
+-Platform::Thread* Thread2D = nullptr;
+-Platform::Semaphore *Sema2DJobs, *Sema2DFree, *Sema2DFence;
++u32 Job2DHead = 0, Job2DTail[2] = { 0, 0 };
++Platform::Thread* Thread2D[2] = { nullptr, nullptr };
++Platform::Semaphore *Sema2DJobs[2], *Sema2DFree, *Sema2DFence;
++std::unique_ptr<GPU2D::Renderer2D> Renderer2DB;
+ std::atomic_bool Thread2DRunning{false};
+ bool Threaded2D = false;    // setting (threaded software renderer)
+ bool Sync2D = true;         // this frame is drawn on the emulation thread
+@@ -195,7 +205,7 @@ constexpr u32 Job2DBatch = 16;  // lines per job at most (the worker starts earl
+ u32 PalOAMGenSent = ~0u;
+ GPU2D::Unit* WorkUnits[2] = { nullptr, nullptr };
+ u32 LastOwnedGen[2][5];
+-alignas(16) u8 WorkPalOAM[4096];
++alignas(16) u8 WorkPalOAM[2][4096];
+ 
+ OwnedFields GetOwned(const GPU2D::Unit* u)
+ {
+@@ -241,31 +251,44 @@ void MergeUnit(int n, const u8* snap)
+     memcpy(last, s->OwnedGen, sizeof(s->OwnedGen));
+ }
+ 
+-void Worker2D()
++void Job2DDone(Job2D& j)
+ {
+-    GPU2D::Renderer2D* r = GPU2D_Renderer.get();
++    if (j.Done.fetch_add(1, std::memory_order_acq_rel) == NumWorkers2D - 1)
++    {
++        j.Done.store(0, std::memory_order_relaxed);
++        Platform::Semaphore_Post(Sema2DFree);
++    }
++}
++
++void Worker2D(int w)
++{
++    GPU2D::Renderer2D* r = w ? Renderer2DB.get() : GPU2D_Renderer.get();
++    GPU2D::Unit* unit = WorkUnits[w];
+     for (;;)
+     {
+-        Platform::Semaphore_Wait(Sema2DJobs);
++        Platform::Semaphore_Wait(Sema2DJobs[w]);
+         if (!Thread2DRunning.load(std::memory_order_acquire))
+             return;
+ 
+-        Job2D& j = Jobs2D[Job2DTail % Job2DCount];
+-        Job2DTail++;
++        Job2D& j = Jobs2D[Job2DTail[w] % Job2DCount];
++        Job2DTail[w]++;
+ 
+         if (j.Kind == Job_Fence)
+         {
+-            Platform::Semaphore_Post(Sema2DFree);
+             Platform::Semaphore_Post(Sema2DFence);
++            Job2DDone(j);
+             continue;
+         }
+ 
+         if (j.PalChanged)
+-            memcpy(WorkPalOAM, j.PalOAM, sizeof(WorkPalOAM));
+-        if (j.UnitChanged[0]) MergeUnit(0, j.Units[0]);
+-        if (j.UnitChanged[1]) MergeUnit(1, j.Units[1]);
+-        GPU3D::Line3DBuf = j.Buf3D;
+-        GPU3D::Line3DWait = j.Wait3D;
++            memcpy(WorkPalOAM[w], j.PalOAM, sizeof(WorkPalOAM[w]));
++        if (j.UnitChanged[w]) MergeUnit(w, j.Units[w]);
++        if (NumWorkers2D == 1 && j.UnitChanged[1]) MergeUnit(1, j.Units[1]);
++        if (w == 0)
++        {
++            GPU3D::Line3DBuf = j.Buf3D;
++            GPU3D::Line3DWait = j.Wait3D;
++        }
+ 
+         if (j.Kind == Job_Line)
+         {
+@@ -274,24 +297,24 @@ void Worker2D()
+                 r->JobVCount = j.VCount + (line - j.First);
+                 if (j.DrawLine)
+                 {
+-                    r->DrawScanline(line, WorkUnits[0]);
+-                    r->DrawScanline(line, WorkUnits[1]);
++                    r->DrawScanline(line, unit);
++                    if (NumWorkers2D == 1) r->DrawScanline(line, WorkUnits[1]);
+                 }
+                 if (j.DrawSprites)
+                 {
+-                    r->DrawSprites(line+1, WorkUnits[0]);
+-                    r->DrawSprites(line+1, WorkUnits[1]);
++                    r->DrawSprites(line+1, unit);
++                    if (NumWorkers2D == 1) r->DrawSprites(line+1, WorkUnits[1]);
+                 }
+             }
+         }
+         else
+         {
+             r->JobVCount = j.VCount;
+-            r->DrawSprites(0, WorkUnits[0]);
+-            r->DrawSprites(0, WorkUnits[1]);
++            r->DrawSprites(0, unit);
++            if (NumWorkers2D == 1) r->DrawSprites(0, WorkUnits[1]);
+         }
+ 
+-        Platform::Semaphore_Post(Sema2DFree);
++        Job2DDone(j);
+     }
+ }
+ 
+@@ -324,7 +347,8 @@ void Publish2D()
+     JobOpen = false;
+     Job2DHead++;
+     Queued2D = true;
+-    Platform::Semaphore_Post(Sema2DJobs);
++    for (int w = 0; w < NumWorkers2D; w++)
++        Platform::Semaphore_Post(Sema2DJobs[w]);
+ }
+ 
+ // Opens a job at Job2DHead with what changed since the previous one.
+@@ -405,8 +429,15 @@ void Configure2D(bool worker)
+     GPU2D::Renderer2D* r = GPU2D_Renderer.get();
+     r->DeferVRAMSync = worker;
+     r->UseJobVCount = worker;
+-    r->PalBase = worker ? WorkPalOAM : Palette;
+-    r->OAMBase = worker ? WorkPalOAM + 2048 : OAM;
++    r->PalBase = worker ? WorkPalOAM[0] : Palette;
++    r->OAMBase = worker ? WorkPalOAM[0] + 2048 : OAM;
++}
++
++void SetFramebuffer2D(u32* unitA, u32* unitB)
++{
++    GPU2D_Renderer->SetFramebuffer(unitA, unitB);
++    if (Renderer2DB)
++        Renderer2DB->SetFramebuffer(unitA, unitB);
+ }
+ 
+ // Worker units start as copies of the emulation side.
+@@ -425,16 +456,29 @@ void Start2DThread()
+     if (Thread2DRunning.load()) return;
+     if (!Jobs2D) Jobs2D = new Job2D[Job2DCount];
+     if (!WorkUnits[0]) { WorkUnits[0] = new GPU2D::Unit(0); WorkUnits[1] = new GPU2D::Unit(1); }
+-    Sema2DJobs = Platform::Semaphore_Create();
++    if (!Renderer2DB)
++    {
++        Renderer2DB = std::make_unique<GPU2D::SoftRenderer>();
++        Renderer2DB->DeferVRAMSync = true;
++        Renderer2DB->UseJobVCount = true;
++        Renderer2DB->PalBase = WorkPalOAM[1];
++        Renderer2DB->OAMBase = WorkPalOAM[1] + 2048;
++    }
++    Renderer2DB->SetFramebuffer(GPU2D_Renderer->GetFramebuffer(0), GPU2D_Renderer->GetFramebuffer(1));
++    for (u32 i = 0; i < Job2DCount; i++)
++        Jobs2D[i].Done.store(0, std::memory_order_relaxed);
++    Sema2DJobs[0] = Platform::Semaphore_Create();
++    Sema2DJobs[1] = Platform::Semaphore_Create();
+     Sema2DFree = Platform::Semaphore_Create();
+     Sema2DFence = Platform::Semaphore_Create();
+     Platform::Semaphore_Post(Sema2DFree, Job2DCount);
+-    Job2DHead = Job2DTail = 0;
++    Job2DHead = Job2DTail[0] = Job2DTail[1] = 0;
+     Queued2D = false;
+     JobOpen = false;
+     Thread2DRunning = true;
+-    Thread2D = Platform::Thread_Create(Worker2D);
+     ResyncWorkUnits();
++    for (int w = 0; w < NumWorkers2D; w++)
++        Thread2D[w] = Platform::Thread_Create(std::bind(Worker2D, w));
+ }
+ 
+ void Stop2DThread()
+@@ -442,10 +486,14 @@ void Stop2DThread()
+     if (!Thread2DRunning.load()) return;
+     Drain2D();
+     Thread2DRunning.store(false, std::memory_order_release);
+-    Platform::Semaphore_Post(Sema2DJobs);
+-    Platform::Thread_Wait(Thread2D);
+-    Platform::Thread_Free(Thread2D);
+-    Platform::Semaphore_Free(Sema2DJobs);
++    for (int w = 0; w < NumWorkers2D; w++)
++    {
++        Platform::Semaphore_Post(Sema2DJobs[w]);
++        Platform::Thread_Wait(Thread2D[w]);
++        Platform::Thread_Free(Thread2D[w]);
++    }
++    for (int w = 0; w < 2; w++)
++        Platform::Semaphore_Free(Sema2DJobs[w]);
+     Platform::Semaphore_Free(Sema2DFree);
+     Platform::Semaphore_Free(Sema2DFence);
+     Sync2D = true;
+@@ -458,7 +506,8 @@ void Drain2D()
+     if (!Queued2D || !Thread2DRunning.load())
+         return;
+     Push2D(Job_Fence, 0, false, false);
+-    Platform::Semaphore_Wait(Sema2DFence);
++    for (int w = 0; w < NumWorkers2D; w++)
++        Platform::Semaphore_Wait(Sema2DFence);
+     Queued2D = false;
+ }
+ 
+@@ -485,6 +534,7 @@ void DeInit()
+     delete[] Jobs2D; Jobs2D = nullptr;
+     delete WorkUnits[0]; delete WorkUnits[1];
+     WorkUnits[0] = WorkUnits[1] = nullptr;
++    Renderer2DB.reset();
+     GPU2D_Renderer.reset();
+     GPU3D::DeInit();
+ 
+@@ -595,7 +645,7 @@ void Reset()
+     GPU3D::Reset();
+ 
+     int backbuf = FrontBuffer ? 0 : 1;
+-    GPU2D_Renderer->SetFramebuffer(Framebuffer[backbuf][1], Framebuffer[backbuf][0]);
++    SetFramebuffer2D(Framebuffer[backbuf][1], Framebuffer[backbuf][0]);
+ 
+     ResetRenderer();
+ 
+@@ -702,11 +752,11 @@ void AssignFramebuffers()
+     int backbuf = FrontBuffer ? 0 : 1;
+     if (NDS::PowerControl9 & (1<<15))
+     {
+-        GPU2D_Renderer->SetFramebuffer(Framebuffer[backbuf][0], Framebuffer[backbuf][1]);
++        SetFramebuffer2D(Framebuffer[backbuf][0], Framebuffer[backbuf][1]);
+     }
+     else
+     {
+-        GPU2D_Renderer->SetFramebuffer(Framebuffer[backbuf][1], Framebuffer[backbuf][0]);
++        SetFramebuffer2D(Framebuffer[backbuf][1], Framebuffer[backbuf][0]);
+     }
+ }
+ 
+diff --git a/src/GPU2D.h b/src/GPU2D.h
+index 4bbdf06..cea3982 100644
+--- a/src/GPU2D.h
++++ b/src/GPU2D.h
+@@ -142,6 +142,7 @@ public:
+         Framebuffer[0] = unitA;
+         Framebuffer[1] = unitB;
+     }
++    u32* GetFramebuffer(int n) const { return Framebuffer[n]; }
+ 
+     // Threaded 2D (nuubOS): a worker thread draws from per-line copies of
+     // the units, VCount, palette and OAM; the emulation thread keeps the

@@ -1,0 +1,73 @@
+From 0ad6f6cba68a51463d22c90f4f632236e72f4591 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 08:50:24 +0200
+Subject: [PATCH] Cheaper condition and flag code in the A64 JIT (nuubOS)
+
+- Conditions HI..LE: one or two ALU operations fold the condition into a
+  bit of W1 that TBZ/TBNZ tests, instead of the 1 << (flags >> 28) table
+  lookup (LSR, MOV, LSLV, AND, CBZ).
+- Adjacent flags set by an instruction are copied from NZCV with one MRS,
+  LSR and BFI instead of a CSET and BFI per flag.
+---
+ src/ARMJIT_A64/ARMJIT_ALU.cpp      | 14 ++++++++++++++
+ src/ARMJIT_A64/ARMJIT_Compiler.cpp | 22 ++++++++++++++++------
+ 2 files changed, 30 insertions(+), 6 deletions(-)
+
+diff --git a/src/ARMJIT_A64/ARMJIT_ALU.cpp b/src/ARMJIT_A64/ARMJIT_ALU.cpp
+index 1bd427f..40b6609 100644
+--- a/src/ARMJIT_A64/ARMJIT_ALU.cpp
++++ b/src/ARMJIT_A64/ARMJIT_ALU.cpp
+@@ -164,6 +164,20 @@ void Compiler::Comp_RetriveFlags(bool retriveCV)
+     if (CurInstr.SetFlags)
+         CPSRDirty = true;
+ 
++    // several adjacent flags: copy them from NZCV in one go
++    u32 mask = CurInstr.SetFlags & (retriveCV ? 0xF : 0xC);
++    if (mask)
++    {
++        int lo = __builtin_ctz(mask), width = 32 - __builtin_clz(mask) - lo;
++        if (width >= 2 && (mask >> lo) == (1u << width) - 1)
++        {
++            MRS(X0, FIELD_NZCV);
++            LSR(W0, W0, 28 + lo);
++            BFI(RCPSR, W0, 28 + lo, width);
++            return;
++        }
++    }
++
+     if (CurInstr.SetFlags & 0x4)
+     {
+         CSET(W0, CC_EQ);
+diff --git a/src/ARMJIT_A64/ARMJIT_Compiler.cpp b/src/ARMJIT_A64/ARMJIT_Compiler.cpp
+index 5941656..85ae174 100644
+--- a/src/ARMJIT_A64/ARMJIT_Compiler.cpp
++++ b/src/ARMJIT_A64/ARMJIT_Compiler.cpp
+@@ -523,12 +523,22 @@ FixupBranch Compiler::CheckCondition(u32 cond)
+ {
+     if (cond >= 0x8)
+     {
+-        LSR(W1, RCPSR, 28);
+-        MOVI2R(W2, 1);
+-        LSLV(W2, W2, W1);
+-        ANDI2R(W2, W2, ARM::ConditionTable[cond], W3);
+-
+-        return CBZ(W2);
++        // N31 Z30 C29 V28: fold the condition into one bit and test it
++        switch (cond)
++        {
++        case 0x8: // HI: C && !Z
++        case 0x9: // LS
++            BIC(W1, RCPSR, RCPSR, ArithOption(RCPSR, ST_LSR, 1));
++            return cond == 0x8 ? TBZ(W1, 29) : TBNZ(W1, 29);
++        case 0xA: // GE: N == V
++        case 0xB: // LT
++            EOR(W1, RCPSR, RCPSR, ArithOption(RCPSR, ST_LSL, 3));
++            return cond == 0xA ? TBNZ(W1, 31) : TBZ(W1, 31);
++        default: // GT: !Z && N == V, LE
++            EOR(W1, RCPSR, RCPSR, ArithOption(RCPSR, ST_LSL, 3));
++            ORR(W1, W1, RCPSR, ArithOption(RCPSR, ST_LSL, 1));
++            return cond == 0xC ? TBNZ(W1, 31) : TBZ(W1, 31);
++        }
+     }
+     else
+     {

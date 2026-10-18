@@ -1,0 +1,21 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: 400x300 and 480x360 GLideN64 resolutions
+
+The 4:3 resolution option jumps from native 320x240 to 640x480, four
+times the pixels: on the H700 (Mali-G31 MP1) that halves the frame rate.
+1.25x and 1.5x let a game render sharper while keeping full speed; the
+core already parses any WxH.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/libretro/libretro_core_options.h
++++ b/libretro/libretro_core_options.h
+@@ -92,6 +92,8 @@
+         "gliden64",
+         {
+             {"320x240", NULL},
++            {"400x300", NULL},
++            {"480x360", NULL},
+             {"640x480", NULL},
+             {"960x720", NULL},
+             {"1280x960", NULL},

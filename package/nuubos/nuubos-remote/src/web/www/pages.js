@@ -1202,7 +1202,8 @@ async function lightingPage() {
 /* =========================================================== GAMING */
 
 const HOTKEYS = [['save_state', 417, 'Save State'], ['load_state', 418, 'Load State'], ['slot_next', 779, 'Next Slot'], ['slot_prev', 780, 'Previous Slot'],
-  ['fast_forward', 781, 'Fast Forward'], ['quit', 422, 'Quit Game'], ['screenshot', 592, 'Screenshot']];
+  ['fast_forward', 781, 'Fast Forward'], ['quit', 422, 'Quit Game'], ['screenshot', 592, 'Screenshot'],
+  ['screen_layout', 1302, 'Screen Layout'], ['stylus', 1307, 'Stylus']];
 const CONTROLS = [['menu_confirm', 337, 'Face South'], ['menu_back', 338, 'Face East'], ['face_north', 339, 'Face North'], ['face_west', 340, 'Face West'],
   ['menu_up', 341, 'D-Pad Up'], ['menu_down', 342, 'D-Pad Down'], ['menu_left', 343, 'D-Pad Left'], ['menu_right', 344, 'D-Pad Right'],
   ['l1', 345, 'L1'], ['r1', 346, 'R1'], ['l2', 347, 'L2'], ['r2', 348, 'R2'], ['l3', 349, 'L3'], ['r3', 350, 'R3'], ['settings', 351, 'Start'], ['select', 352, 'Select']];

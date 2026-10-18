@@ -1,0 +1,20 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: report the core as ParaLLEl N64-nuubOS
+
+The nuubOS build carries H700 patches and is bundled next to the
+upstream core users can download: RetroArch (netplay, per-core
+settings) tells them apart by library_name.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -1207,7 +1207,7 @@
+ 
+ void retro_get_system_info(struct retro_system_info *info)
+ {
+-   info->library_name = "ParaLLEl N64";
++   info->library_name = "ParaLLEl N64-nuubOS";
+    info->library_version = "1.0" GIT_VERSION;
+    info->valid_extensions = "n64|v64|z64|bin|u1|ndd|zip";
+    /* fullpath + block_extract: the frontend hands us the file untouched, so

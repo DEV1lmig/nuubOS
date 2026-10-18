@@ -1,0 +1,176 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS overlay with threaded video, SET_CORE_OPTION command
+
+- The performance overlay line (patch 0004) was added to the frame info
+  in video_driver_frame only; with video_threaded the video thread
+  builds its own frame info, so the overlay never showed (NDS sessions
+  run threaded). video_driver_nuubos_osd adds it in both places.
+- SET_CORE_OPTION <key> <value> sets a core option of the running core
+  like its menu does (the core sees it at its next variable update and
+  RetroArch saves it with the other options), for the session manager's
+  live shortcuts. Replies "SET_CORE_OPTION OK|FAILED".
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/gfx/video_driver.c
++++ b/gfx/video_driver.c
+@@ -560,6 +560,38 @@
+    return lines;
+ }
+ 
++/* nuubOS performance overlay: white text with a dark shadow at the
++ * bottom left, about 15 px high on a 480-line screen (scaled with the
++ * output), wrapped between items onto as many lines as the width needs
++ * (they grow upwards), through the statistics path (RetroArch's own
++ * statistics win). At the bottom it stays clear of a picture cropped at
++ * the sides and of the top of the game (user request 2026-10-11).
++ * Called for every frame the driver draws: by video_driver_frame, and by
++ * the threaded video wrapper, which builds its own frame info (with
++ * video_threaded the overlay was never drawn: NDS sessions). */
++void video_driver_nuubos_osd(video_frame_info_t *video_info)
++{
++   if (     !video_info->statistics_show
++         && nuubos_osd_text[0])
++   {
++      float scale    = ((float)video_info->height / 480.0f)
++            * (15.0f / video_info->font_size);
++      unsigned lines = nuubos_osd_wrap(video_info->stat_text,
++            sizeof(video_info->stat_text), video_info->width, scale);
++      video_info->osd_stat_params.x           = 0.012f;
++      video_info->osd_stat_params.y           = (8.0f + 19.0f * (lines - 1)) / 480.0f;
++      video_info->osd_stat_params.text_align  = TEXT_ALIGN_LEFT;
++      video_info->osd_stat_params.scale       = scale;
++      video_info->osd_stat_params.full_screen = true;
++      video_info->osd_stat_params.drop_x      = 1;
++      video_info->osd_stat_params.drop_y      = -1;
++      video_info->osd_stat_params.drop_mod    = 0.0f;
++      video_info->osd_stat_params.drop_alpha  = 1.0f;
++      video_info->osd_stat_params.color       = COLOR_ABGR(255, 255, 255, 255);
++      video_info->statistics_show             = true;
++   }
++}
++
+ video_driver_state_t *video_state_get_ptr(void)
+ {
+    return &video_driver_st;
+@@ -4442,32 +4474,9 @@
+       }
+    }
+ 
+-   /* nuubOS performance overlay: white text with a dark shadow at the
+-    * bottom left, about 15 px high on a 480-line screen (scaled with the
+-    * output), wrapped between items onto as many lines as the width needs
+-    * (they grow upwards), through the statistics path (RetroArch's own
+-    * statistics win). At the bottom it stays clear of a picture cropped at
+-    * the sides and of the top of the game (user request 2026-10-11). */
+-   if (     render_frame
+-         && !video_info.statistics_show
+-         && nuubos_osd_text[0])
+-   {
+-      float scale    = ((float)video_info.height / 480.0f)
+-            * (15.0f / video_info.font_size);
+-      unsigned lines = nuubos_osd_wrap(video_info.stat_text,
+-            sizeof(video_info.stat_text), video_info.width, scale);
+-      video_info.osd_stat_params.x           = 0.012f;
+-      video_info.osd_stat_params.y           = (8.0f + 19.0f * (lines - 1)) / 480.0f;
+-      video_info.osd_stat_params.text_align  = TEXT_ALIGN_LEFT;
+-      video_info.osd_stat_params.scale       = scale;
+-      video_info.osd_stat_params.full_screen = true;
+-      video_info.osd_stat_params.drop_x      = 1;
+-      video_info.osd_stat_params.drop_y      = -1;
+-      video_info.osd_stat_params.drop_mod    = 0.0f;
+-      video_info.osd_stat_params.drop_alpha  = 1.0f;
+-      video_info.osd_stat_params.color       = COLOR_ABGR(255, 255, 255, 255);
+-      video_info.statistics_show             = true;
+-   }
++   /* nuubOS performance overlay (video_driver_nuubos_osd) */
++   if (render_frame)
++      video_driver_nuubos_osd(&video_info);
+ 
+    if (render_frame
+          && video_st->current_video
+--- a/gfx/video_driver.h
++++ b/gfx/video_driver.h
+@@ -984,6 +984,9 @@
+ /* nuubOS performance overlay line ("" hides it). */
+ void video_driver_set_nuubos_osd(const char *text);
+ 
++/* nuubOS: puts the overlay line into a frame's statistics text. */
++void video_driver_nuubos_osd(video_frame_info_t *video_info);
++
+ bool video_driver_set_rotation(unsigned rotation);
+ 
+ bool video_driver_set_video_mode(unsigned width,
+--- a/gfx/video_thread_wrapper.c
++++ b/gfx/video_thread_wrapper.c
+@@ -465,6 +465,9 @@
+                /* TODO/FIXME - not thread-safe - should get
+                 * rid of this */
+                video_driver_build_info(&video_info);
++               /* nuubOS: the performance overlay, which
++                * video_driver_frame adds to its own frame info */
++               video_driver_nuubos_osd(&video_info);
+ 
+                ret = thr->driver->frame(thr->driver_data,
+                   thr->frame.buffer, thr->frame.width, thr->frame.height,
+--- a/command.c
++++ b/command.c
+@@ -894,6 +894,40 @@
+    return ret;
+ }
+ 
++/* nuubOS: SET_CORE_OPTION <key> <value>: sets a core option of the
++ * running core as its menu would (the core sees the change at its next
++ * variable update; RetroArch saves it with the other options). Used for
++ * the session manager's live shortcuts (melonDS screen layout, stylus).
++ * Replies "SET_CORE_OPTION OK|FAILED". */
++bool command_set_core_option(command_t *cmd, const char *arg)
++{
++   char reply[64];
++   char key[128];
++   size_t _len;
++   size_t idx, val_idx;
++   bool ret                       = false;
++   runloop_state_t *runloop_st    = runloop_state_get_ptr();
++   core_option_manager_t *opt     = runloop_st->core_options;
++   const char *value              = arg ? strchr(arg, ' ') : NULL;
++
++   if (     opt && value
++         && (size_t)(value - arg) < sizeof(key))
++   {
++      strlcpy(key, arg, (size_t)(value - arg) + 1);
++      value++;
++      if (     core_option_manager_get_idx(opt, key, &idx)
++            && core_option_manager_get_val_idx(opt, idx, value, &val_idx))
++      {
++         core_option_manager_set_val(opt, idx, val_idx, false);
++         ret = true;
++      }
++   }
++   _len = snprintf(reply, sizeof(reply), "SET_CORE_OPTION %s\n",
++         ret ? "OK" : "FAILED");
++   cmd->replier(cmd, reply, _len);
++   return ret;
++}
++
+ /* nuubOS: an unsolicited line for the session manager on the stdin
+  * command interface's output ("NETPLAY joined <nick>"...). */
+ void command_nuubos_event(const char *fmt, ...)
+--- a/command.h
++++ b/command.h
+@@ -436,6 +436,7 @@
+ bool command_osd_text(command_t *cmd, const char* arg);
+ bool command_cheats_load(command_t *cmd, const char* arg);
+ bool command_netplay_stop(command_t *cmd, const char* arg);
++bool command_set_core_option(command_t *cmd, const char* arg);
+ bool command_play_replay_slot(command_t *cmd, const char* arg);
+ bool command_seek_replay(command_t *cmd, const char *arg);
+ bool command_save_savefiles(command_t *cmd, const char* arg);
+@@ -472,6 +473,7 @@
+    { "OSD_TEXT",       command_osd_text,        "<text>"},
+    { "CHEATS_LOAD",    command_cheats_load,     "<cheat file>"},
+    { "NETPLAY_STOP",   command_netplay_stop,    "No argument"},
++   { "SET_CORE_OPTION", command_set_core_option, "<key> <value>"},
+    { "PLAY_REPLAY_SLOT",command_play_replay_slot, "<slot number>"},
+    { "SEEK_REPLAY",command_seek_replay, "<frame number>"},
+ 

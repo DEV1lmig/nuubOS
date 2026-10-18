@@ -49,7 +49,8 @@
  * change them. Only overrides are stored, per user, in
  * /userdata/users/<id>/appdata/nuubos-emulation/games/<game>.conf. They
  * apply at the next launch: core choice, aspect ratio and video filter on
- * top of the user's RetroArch configuration. RetroArch saves its whole
+ * top of the user's RetroArch configuration, and the emulation accuracy of
+ * melonDS-nuubOS in the user's core options for the session. RetroArch saves its whole
  * configuration on exit, so the keys a session overrode are put back to
  * the user's own values when it ends.
  *
@@ -136,7 +137,7 @@
  * 1.5x, below the CRT look's 2x scanlines. display.conf field 3 overrides
  * it per system (0 = native resolution). The panel never uses it. */
 #define GAME_HDMI_LINES 360
-/* CRT look scanline strength on HDMI (crt.glsl, bezel-picture.glsl
+/* CRT look scanline strength on HDMI (crt.glsl
  * CRT_SCANLINES; the panel keeps the shaders' 0.25, user request
  * 2026-10-11). The display engine scales the 480-line buffer 2.25x to
  * 1080p with a filtering scaler, which smooths the 2-row beam/gap pattern
@@ -232,7 +233,7 @@ enum pending_kind {
  *   boot_screens  start with the console's own boot sequence (BIOS logo)
  *   slots         save state slots per game
  *   slot_rotation each save goes to the next slot, wrapping to 0
- *   bezels, crt   picture presentation (bezel.glsl, crt.glsl)
+ *   bezels, crt   picture presentation (RetroArch patch 0010, crt.glsl)
  *   overlay       performance overlay over games, overlay_items its fields
  *   hotkey_<action> chord control, held with the Quick Menu button
  */
@@ -244,17 +245,20 @@ enum hotkey_index {
 	HK_FAST_FORWARD,
 	HK_QUIT,
 	HK_SCREENSHOT,
+	HK_SCREEN_LAYOUT,
+	HK_STYLUS,
 	HK_COUNT,
 };
 
 static const char *const hotkey_actions[HK_COUNT] = {
 	"save_state", "load_state", "slot_next", "slot_prev",
-	"fast_forward", "quit", "screenshot",
+	"fast_forward", "quit", "screenshot", "screen_layout", "stylus",
 };
 
 /* nuubos-controllersd control ids (the user's mapping applies). */
 static const char *const hotkey_defaults[HK_COUNT] = {
 	"r1", "l1", "menu_up", "menu_down", "face_north", "settings", "l2",
+	"select", "r2",
 };
 
 static const char *const hotkey_controls[] = {
@@ -262,6 +266,21 @@ static const char *const hotkey_controls[] = {
 	"menu_up", "menu_down", "menu_left", "menu_right",
 	"l1", "r1", "l2", "r2", "l3", "r3", "settings", "select", NULL,
 };
+
+/* melonDS-nuubOS (patches 0010+): the screen layouts the hotkey cycles
+ * through (core option melonds_screen_layout; R2 in the game swaps the
+ * two screens of each) and their notification names. */
+#define MELONDS_NUUBOS "melonds_nuubos"
+static const struct {
+	const char *value;
+	const char *name;
+} nds_layouts[] = {
+	{ "Top/Bottom", "two" },
+	{ "Large Top", "large" },
+	{ "Picture in Picture Top", "pip" },
+	{ "Top Only", "single" },
+};
+#define NDS_LAYOUTS (int)(sizeof(nds_layouts) / sizeof(nds_layouts[0]))
 
 static const char *const overlay_fields[] = {
 	"fps", "cpu", "gpu", "ram", "temp", "power", "battery", "clock", NULL,
@@ -366,6 +385,19 @@ struct session {
 	int net_peers;
 	char net_peer[40];
 	bool relaunch_host;
+	/* melonDS-nuubOS: the user's core options file, the screen layout the
+	 * hotkey cycles through (nds_layouts), the stylus mode, and the
+	 * user's accuracy to put back at exit when the game overrides it. */
+	char core_options[PATH_MAX];
+	/* NUUBOS_RA_BEZEL for RetroArch (patch 0010), "" = no bezel. */
+	char bezel_env[1024];
+	int nds_layout;
+	bool stylus;
+	/* Core options this session set in the user's file (per-game
+	 * accuracy) and their values to put back at exit. */
+	int opt_restore_count;
+	char opt_restore_key[8][64];
+	char opt_restore_value[8][128];
 };
 
 /* LAN discovery of netplay hosts (NETPLAY_HOSTS): one at a time, every
@@ -392,6 +424,7 @@ struct game_overrides {
 	char core[64];
 	char aspect[16];
 	char filter[16];
+	char accuracy[16];
 	char cheat_file[PATH_MAX];
 	char cheats[512];
 };
@@ -656,6 +689,85 @@ static void apply_core_option_updates(const char *path, const char *done_path)
 	fclose(in);
 }
 
+/* The value of key in a core options file. */
+static bool read_core_option(const char *path, const char *key, char *out, size_t size)
+{
+	char line[1024];
+	bool found = false;
+	FILE *in = fopen(path, "r");
+
+	if (!in)
+		return false;
+	while (!found && fgets(line, sizeof(line), in)) {
+		char k[128], v[256];
+
+		if (sscanf(line, " %127[^ =#] = \"%255[^\"]\"", k, v) == 2 && !strcmp(k, key)) {
+			copy_text(out, size, v);
+			found = true;
+		}
+	}
+	fclose(in);
+	return found;
+}
+
+/* Sets key to value in a core options file (appended when missing). */
+static void write_core_option(const char *path, const char *key, const char *value)
+{
+	char tmp[PATH_MAX + 8];
+	char line[1024];
+	bool done = false;
+	FILE *in = fopen(path, "r");
+	FILE *out;
+
+	if (!in)
+		return;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	out = fopen(tmp, "w");
+	if (!out) {
+		fclose(in);
+		return;
+	}
+	while (fgets(line, sizeof(line), in)) {
+		char k[128];
+
+		if (sscanf(line, " %127[^ =#] =", k) == 1 && !strcmp(k, key)) {
+			if (!done)
+				fprintf(out, "%s = \"%s\"\n", key, value);
+			done = true;
+		} else {
+			fputs(line, out);
+		}
+	}
+	if (!done)
+		fprintf(out, "%s = \"%s\"\n", key, value);
+	fclose(in);
+	if (fclose(out) != 0 || rename(tmp, path) != 0)
+		unlink(tmp);
+}
+
+/* Sets a core option for this session only: the user's value comes back
+ * when the game ends (after RetroArch wrote its options). */
+static void session_core_option(const char *key, const char *value)
+{
+	int n = session.opt_restore_count;
+
+	if (n >= 8 || !read_core_option(session.core_options, key,
+					 session.opt_restore_value[n],
+					 sizeof(session.opt_restore_value[n])))
+		return;
+	copy_text(session.opt_restore_key[n], sizeof(session.opt_restore_key[n]), key);
+	session.opt_restore_count++;
+	write_core_option(session.core_options, key, value);
+}
+
+static void restore_session_core_options(void)
+{
+	for (int i = session.opt_restore_count - 1; i >= 0; i--)
+		write_core_option(session.core_options, session.opt_restore_key[i],
+				  session.opt_restore_value[i]);
+	session.opt_restore_count = 0;
+}
+
 /* Copies every file of src missing in dst (recursively). Existing files are
  * the user's and are never replaced. */
 static void seed_tree(const char *src, const char *dst)
@@ -794,6 +906,25 @@ static void notify_fast_forward(bool on)
 
 	nuubos_notify_begin(&n, "POST", "game.fastforward", "game.fastforward");
 	nuubos_notify_str(&n, "state", on ? "on" : "off");
+	(void)nuubos_notify_send(&n);
+}
+
+static void notify_screens(int layout)
+{
+	struct nuubos_notify n;
+
+	nuubos_notify_begin(&n, "POST", "game.screens", "game.screens");
+	nuubos_notify_str(&n, "layout", nds_layouts[layout].name);
+	(void)nuubos_notify_send(&n);
+}
+
+/* state=off|right|left|dpad: the control moving the stylus. */
+static void notify_stylus(const char *state)
+{
+	struct nuubos_notify n;
+
+	nuubos_notify_begin(&n, "POST", "game.stylus", "game.stylus");
+	nuubos_notify_str(&n, "state", state);
 	(void)nuubos_notify_send(&n);
 }
 
@@ -1334,6 +1465,8 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 			copy_text(o->aspect, sizeof(o->aspect), eq);
 		else if (!strcmp(line, "filter"))
 			copy_text(o->filter, sizeof(o->filter), eq);
+		else if (!strcmp(line, "accuracy"))
+			copy_text(o->accuracy, sizeof(o->accuracy), eq);
 		else if (!strcmp(line, "cheat_file"))
 			copy_text(o->cheat_file, sizeof(o->cheat_file), eq);
 		else if (!strcmp(line, "cheats"))
@@ -1352,7 +1485,8 @@ static int save_overrides(const char *user, const char *game, const struct game_
 
 	overrides_path(user, game, path, sizeof(path));
 	/* Nothing overridden: no file, the game inherits everything. */
-	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->cheat_file[0] && !o->cheats[0])
+	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
+	    !o->cheat_file[0] && !o->cheats[0])
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
 	if (mkdir_p(dir) != 0)
@@ -1367,6 +1501,8 @@ static int save_overrides(const char *user, const char *game, const struct game_
 		fprintf(fp, "aspect=%s\n", o->aspect);
 	if (o->filter[0])
 		fprintf(fp, "filter=%s\n", o->filter);
+	if (o->accuracy[0])
+		fprintf(fp, "accuracy=%s\n", o->accuracy);
 	if (o->cheat_file[0])
 		fprintf(fp, "cheat_file=%s\n", o->cheat_file);
 	if (o->cheats[0])
@@ -1757,7 +1893,7 @@ static bool square_panel(void)
 
 /* A TV system's picture fills a square handheld screen's height as far as
  * at most a share of its width (a TV's overscan) is cropped (RetroArch patch
- * 0006, NUUBOS_RA_OVERSCAN_X; bezel.glsl OVERSCAN_X): with the default 8 %
+ * 0006, NUUBOS_RA_OVERSCAN_X): with the default 8 %
  * (4 % a side) a 4:3 game on the 720x720 RG CubeXX is 783x587, not an
  * integer 2x with large margins (user decisions 2026-10-11: square screens
  * only, never HDMI or 4:3/3:2 panels; integer 3x cropped PS1 too much).
@@ -2063,10 +2199,7 @@ static void restore_user_keys(void)
 }
 
 /* Shader preset of the session: one pass, its parameters. */
-/* The session preset: one pass of shader, or for the bezel (cached = true)
- * that pass into a feedback FBO and bezel-picture.glsl to the screen (bezel.glsl;
- * the last pass has no scale: with one RetroArch would add a pass after it). */
-static int write_session_shader(const char *shader, bool cached, const char *params)
+static int write_session_shader(const char *shader, const char *params)
 {
 	char tmp[] = SESSION_SHADER ".tmp";
 	FILE *fp = fopen(tmp, "w");
@@ -2074,13 +2207,7 @@ static int write_session_shader(const char *shader, bool cached, const char *par
 
 	if (!fp)
 		return -1;
-	fprintf(fp, "shaders = \"%d\"\nshader0 = \"%s\"\nfilter_linear0 = \"false\"\n",
-		cached ? 2 : 1, shader);
-	if (cached)
-		fputs("scale_type0 = \"viewport\"\nscale0 = \"1.000000\"\n"
-		      "feedback_pass = \"0\"\n"
-		      "shader1 = \"" SHADER_DIR "/bezel-picture.glsl\"\n"
-		      "filter_linear1 = \"false\"\n", fp);
+	fprintf(fp, "shaders = \"1\"\nshader0 = \"%s\"\nfilter_linear0 = \"false\"\n", shader);
 	fputs(params, fp);
 	rc = ferror(fp) ? -1 : 0;
 	if (fclose(fp) != 0)
@@ -2098,9 +2225,10 @@ static int write_session_shader(const char *shader, bool cached, const char *par
  * 640x480) is scaled to fit with its aspect instead (stock smart mode),
  * through sharp bilinear so no pixel is uneven. The picture is centred
  * horizontally and at the top of the screen (RetroArch patch 0003); the
- * per-game "integer" aspect is the same picture without bezels. Bezels
- * make the viewport the whole screen and bezel.glsl places the picture
- * the same way; the CRT look applies to TV systems (display.conf) unless
+ * per-game "integer" aspect is the same picture without bezels. A bezel
+ * leaves the picture as it is: RetroArch (patch 0010) draws it into the
+ * rest of the screen from NUUBOS_RA_BEZEL (session.bezel_env); the CRT
+ * look applies to TV systems (display.conf) unless
  * the game has its own filter. Returns the --set-shader argument ("" =
  * none).
  */
@@ -2134,8 +2262,6 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 	} else if (!strcmp(o->aspect, "integer")) {
 		/* the default presentation, without bezels */
 	} else if (session.settings.bezels) {
-		index = 24;
-		integer = false;
 		bezel = true;
 	}
 	fprintf(fp,
@@ -2154,47 +2280,31 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 	shader[0] = '\0';
 	if (crt && hdmi_active())
 		snprintf(scan, sizeof(scan), "CRT_SCANLINES = \"%.2f\"\n", CRT_SCANLINES_HDMI);
+	session.bezel_env[0] = '\0';
 	if (bezel) {
-		char params[2048];
 		char icon[PATH_MAX];
 		struct mood_colours mood;
 		float rgb[3];
-		bool has_icon;
 
 		system_colour(session.system, rgb);
 		mood_colours(&mood);
 		snprintf(icon, sizeof(icon), SYSTEM_ICONS "/%s.png", session.system);
-		has_icon = file_exists(icon);
-		/* An unused sampler still needs an image: the logo map. */
-		if (!has_icon)
-			copy_text(icon, sizeof(icon), SHADER_DIR "/bezel-logo.png");
-		snprintf(params, sizeof(params),
-			 "textures = \"SYSICON;BRAND\"\n"
-			 "SYSICON = \"%s\"\nSYSICON_linear = \"true\"\n"
-			 "SYSICON_mipmap = \"true\"\n"
-			 "BRAND = \"" SHADER_DIR "/bezel-logo.png\"\n"
-			 "BRAND_linear = \"false\"\n"
-			 "parameters = \"BEZEL_R;BEZEL_G;BEZEL_B;BEZEL_STYLE;HAS_ICON;CRT;OVERSCAN_X;"
-			 "MOOD_BG_R;MOOD_BG_G;MOOD_BG_B;MOOD_TEXT_R;MOOD_TEXT_G;MOOD_TEXT_B;"
-			 "MOOD_ACCENT_R;MOOD_ACCENT_G;MOOD_ACCENT_B%s\"\n"
-			 "BEZEL_R = \"%.3f\"\nBEZEL_G = \"%.3f\"\nBEZEL_B = \"%.3f\"\n"
-			 "BEZEL_STYLE = \"%d\"\nHAS_ICON = \"%d\"\nCRT = \"%d\"\nOVERSCAN_X = \"%d\"\n"
-			 "MOOD_BG_R = \"%.3f\"\nMOOD_BG_G = \"%.3f\"\nMOOD_BG_B = \"%.3f\"\n"
-			 "MOOD_TEXT_R = \"%.3f\"\nMOOD_TEXT_G = \"%.3f\"\nMOOD_TEXT_B = \"%.3f\"\n"
-			 "MOOD_ACCENT_R = \"%.3f\"\nMOOD_ACCENT_G = \"%.3f\"\nMOOD_ACCENT_B = \"%.3f\"\n%s",
-			 icon, scan[0] ? ";CRT_SCANLINES" : "", rgb[0], rgb[1], rgb[2], !strcmp(screen, "lcd") ? 1 : 0,
-			 has_icon ? 1 : 0, crt ? 1 : 0, tv_overscan(session.system, o),
+		if (!file_exists(icon))
+			copy_text(icon, sizeof(icon), "-");
+		snprintf(session.bezel_env, sizeof(session.bezel_env),
+			 "%.3f %.3f %.3f %d %s " SHADER_DIR "/bezel-logo.png "
+			 "%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+			 rgb[0], rgb[1], rgb[2], !strcmp(screen, "lcd") ? 1 : 0, icon,
 			 mood.background[0], mood.background[1], mood.background[2],
 			 mood.text[0], mood.text[1], mood.text[2],
-			 mood.accent[0], mood.accent[1], mood.accent[2], scan);
-		if (write_session_shader(SHADER_DIR "/bezel.glsl", true, params) == 0)
-			copy_text(shader, sizeof(shader), SESSION_SHADER);
-	} else if (crt) {
+			 mood.accent[0], mood.accent[1], mood.accent[2]);
+	}
+	if (crt) {
 		char params[128] = "";
 
 		if (scan[0])
 			snprintf(params, sizeof(params), "parameters = \"CRT_SCANLINES\"\n%s", scan);
-		if (write_session_shader(SHADER_DIR "/crt.glsl", false, params) == 0)
+		if (write_session_shader(SHADER_DIR "/crt.glsl", params) == 0)
 			copy_text(shader, sizeof(shader), SESSION_SHADER);
 	} else if (!o->filter[0] || !strcmp(o->filter, "sharp")) {
 		copy_text(shader, sizeof(shader), DEFAULT_SHADER_PRESET);
@@ -2479,7 +2589,8 @@ static void handle_ra_reply(char *line)
 			finish_pending(strcmp(result, "OK") == 0);
 		return;
 	}
-	if (!strcmp(line, "CHEATS_LOAD FAILED") || !strcmp(line, "NETPLAY_STOP FAILED")) {
+	if (!strcmp(line, "CHEATS_LOAD FAILED") || !strcmp(line, "NETPLAY_STOP FAILED") ||
+	    !strcmp(line, "SET_CORE_OPTION FAILED")) {
 		log_msg("emud: retroarch refused %s", line);
 		return;
 	}
@@ -3263,6 +3374,20 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		apply_core_option_updates(path, done);
 	}
 	apply_boot_options(path, session.settings.boot_screens);
+	copy_text(session.core_options, sizeof(session.core_options), path);
+	if (!strcmp(session.core, MELONDS_NUUBOS)) {
+		char value[64];
+
+		/* The stylus starts off; the layout is the user's last one. */
+		write_core_option(path, "melonds_nuubos_stylus", "off");
+		if (read_core_option(path, "melonds_screen_layout", value, sizeof(value)))
+			for (int i = 0; i < NDS_LAYOUTS; i++)
+				if (!strcmp(value, nds_layouts[i].value))
+					session.nds_layout = i;
+		if (overrides.accuracy[0])
+			session_core_option("melonds_accuracy", overrides.accuracy);
+	}
+
 	snprintf(path, sizeof(path), "%s/config/global.glslp", ra_dir);
 	(void)seed_file(DEFAULT_SHADER_PRESET, path);
 	content_base_name(session.content, path, sizeof(path));
@@ -3377,6 +3502,8 @@ static const char *launch(const char *game, const char *mode, const char *net)
 			snprintf(lines, sizeof(lines), "%d", render_height);
 			setenv("NUUBOS_RA_RENDER_HEIGHT", lines, 1);
 		}
+		if (session.bezel_env[0])
+			setenv("NUUBOS_RA_BEZEL", session.bezel_env, 1);
 		execv(RETROARCH_BIN, argv);
 		_exit(127);
 	}
@@ -3504,6 +3631,8 @@ static void child_exited(int status)
 	if (session.shot_fd > 0)
 		notify_screenshot(false);
 	restore_user_keys();
+	/* After RetroArch wrote its options at exit. */
+	restore_session_core_options();
 	copy_text(game, sizeof(game), session.game);
 	reset_session();
 	if (relaunch) {
@@ -3701,6 +3830,27 @@ static void handle_hotkey(const char *action)
 		notify_subscribers();
 	} else if (!strcmp(action, "screenshot")) {
 		(void)begin_screenshot();
+	} else if (!strcmp(action, "screen_layout")) {
+		/* melonDS-nuubOS only: the next layout, live (RetroArch 0009). */
+		if (strcmp(session.core, MELONDS_NUUBOS) != 0)
+			return;
+		session.nds_layout = (session.nds_layout + 1) % NDS_LAYOUTS;
+		ra_command("SET_CORE_OPTION melonds_screen_layout %s",
+			   nds_layouts[session.nds_layout].value);
+		notify_screens(session.nds_layout);
+	} else if (!strncmp(action, "stylus", 6)) {
+		/* "stylus <right|left|dpad>": inputd names the control of the
+		 * controller used; the hotkey turns the stylus on and off. */
+		const char *control = action[6] == ' ' ? action + 7 : "right";
+
+		if (strcmp(session.core, MELONDS_NUUBOS) != 0)
+			return;
+		if (strcmp(control, "right") && strcmp(control, "left") && strcmp(control, "dpad"))
+			control = "right";
+		session.stylus = !session.stylus;
+		ra_command("SET_CORE_OPTION melonds_nuubos_stylus %s",
+			   session.stylus ? control : "off");
+		notify_stylus(session.stylus ? control : "off");
 	} else if (!strcmp(action, "fast_forward")) {
 		session.fast_forward = !session.fast_forward;
 		ra_command("FAST_FORWARD");
@@ -3782,6 +3932,7 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 	available_cores(fields[1], cores, sizeof(cores));
 	if (!strcmp(verb, "GAME_SETTINGS")) {
 		char out[1024];
+		char accuracy_default[16];
 		const char *effective;
 		struct emu_settings settings;
 		char screen[16];
@@ -3793,26 +3944,41 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 		def_core[0] = '\0';
 		(void)resolve_core(fields[1], def_core, sizeof(def_core), def_path, sizeof(def_path));
 		effective = o.core[0] && list_has(cores, o.core) ? o.core : def_core;
+		/* Emulation accuracy: melonDS-nuubOS only; the default is the
+		 * user's core option (nuubOS ships "fast"). */
+		snprintf(def_path, sizeof(def_path),
+			 USERS_DIR "/%s/appdata/retroarch/retroarch-core-options.cfg", user);
+		if (!read_core_option(def_path, "melonds_accuracy", accuracy_default,
+				      sizeof(accuracy_default)))
+			copy_text(accuracy_default, sizeof(accuracy_default), "fast");
 		len = snprintf(out, sizeof(out),
 			       "core=%s\ncore_default=%s\ncore_override=%s\ncores=%s\n"
-			       "aspect=%s\nfilter=%s\nfilter_default=%s\nend=1\n",
+			       "aspect=%s\nfilter=%s\nfilter_default=%s\n"
+			       "accuracy_supported=%d\naccuracy=%s\naccuracy_default=%s\nend=1\n",
 			       effective, def_core, o.core, cores, o.aspect, o.filter,
-			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp");
+			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp",
+			       !strcmp(effective, MELONDS_NUUBOS), o.accuracy, accuracy_default);
 		if (len > 0 && write_all(c->fd, out, (size_t)len) != 0)
 			close_client(c);
 		return;
 	}
-	/* GAME_SET */
-	if (!fields[2] || !fields[3]) {
+	/* GAME_SET; an empty value (inherit) arrives without its field: the
+	 * request line loses its trailing tab with the other white space. */
+	if (!fields[2]) {
 		reply(c, "ERR args\n");
 		return;
 	}
+	if (!fields[3])
+		fields[3] = fields[2] + strlen(fields[2]);
 	if (!strcmp(fields[2], "core") && (!fields[3][0] || list_has(cores, fields[3])))
 		copy_text(o.core, sizeof(o.core), fields[3]);
 	else if (!strcmp(fields[2], "aspect") && (!fields[3][0] || valid_aspect(fields[3])))
 		copy_text(o.aspect, sizeof(o.aspect), fields[3]);
 	else if (!strcmp(fields[2], "filter") && (!fields[3][0] || valid_filter(fields[3])))
 		copy_text(o.filter, sizeof(o.filter), fields[3]);
+	else if (!strcmp(fields[2], "accuracy") &&
+		 (!fields[3][0] || !strcmp(fields[3], "fast") || !strcmp(fields[3], "accurate")))
+		copy_text(o.accuracy, sizeof(o.accuracy), fields[3]);
 	else {
 		reply(c, "ERR value\n");
 		return;
@@ -4433,6 +4599,12 @@ static void handle_command(struct client *c, char *line)
 		if (!running(c))
 			return;
 		reply(c, begin_screenshot() ? "OK\n" : "ERR busy\n");
+	} else if (!strcmp(line, "HOTKEY") && arg) {
+		/* A game hotkey by name, as inputd sends it (tests, remote). */
+		if (!running(c))
+			return;
+		handle_hotkey(arg);
+		reply(c, "OK\n");
 	} else if ((!strcmp(line, "GAME_SETTINGS") || !strcmp(line, "GAME_SET") ||
 		    !strcmp(line, "GAME_RESET")) && arg) {
 		handle_game_settings(c, line, arg);

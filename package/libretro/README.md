@@ -20,9 +20,9 @@ the game does not start.
 | SNES, Satellaview, Sufami Turbo | Snes9x | **non-commercial** | BS-X / Sufami: BIOS |
 | Game Boy / Color | Gambatte | GPL-2.0 | |
 | Game Boy Advance | mGBA | MPL-2.0 | |
-| Nintendo 64 | Mupen64Plus-Next (GLES3, 320x240) | GPL-2.0 | partial; homebrew built with libdragon's open-source IPL3 (2023+) does not boot (the ARM64 dynarec exits on it) |
-| Nintendo 64 (alternative, per game) | ParaLLEl N64 (GLES3 Glide64/gln64/Rice, 320x240; no GLideN64, no Vulkan) | GPL-2.0 | lighter renderers, less accurate; Glide64 is the shipped renderer |
-| Nintendo DS | melonDS-nuubOS (`melonds_nuubos`: melonDS + nuubOS H700 patches, ARM64 JIT, touch on right stick; upstream melonDS downloadable) | GPL-3.0 | partial |
+| Nintendo 64 | ParaLLEl N64-nuubOS (`parallel_n64_nuubos`: gln64 at 320x240, nuubOS AI audio fix; upstream ParaLLEl N64 downloadable; no GLideN64, no Vulkan) | GPL-2.0 | full speed on the CubeXX for every tested title; Yoshi's Story draws wrong with gln64 (switch the game to Mupen64Plus-Next) |
+| Nintendo 64 (alternative, per game) | Mupen64Plus-Next-nuubOS (`mupen64plus_next_nuubos`: GLES3 GLideN64, 320x240, extra 400x300/480x360 options; upstream downloadable) | GPL-2.0 | more accurate, slower on Mali-G31 (F-Zero X, Doom 64, MK4 below full speed); libdragon IPL3 (2023+) homebrew does not boot |
+| Nintendo DS | melonDS-nuubOS (`melonds_nuubos`: melonDS + nuubOS H700 patches, ARM64 JIT, stylus mode and screen layouts on hotkeys; upstream melonDS downloadable) | GPL-3.0 | partial |
 | Virtual Boy | Beetle VB | GPL-2.0 | |
 | Pokémon Mini | PokeMini | GPL-3.0 | free BIOS built in |
 | SG-1000, Master System, Game Gear, Mega Drive, Mega-CD | Genesis Plus GX | **non-commercial** | Mega-CD: BIOS |

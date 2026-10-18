@@ -72,6 +72,7 @@ while [ $# -gt 0 ]; do
 done
 echo "$core" > "%s/launched-core"
 echo "${NUUBOS_RA_RENDER_HEIGHT:-}" > "%s/render-height"
+echo "${NUUBOS_RA_BEZEL:-}" > "%s/bezel"
 cp "$app" "%s/last-session.cfg"
 grep -q -- '--host' "%s/args" && { echo "NETPLAY hosting"; echo "NETPLAY joined bob"; }
 shots=$(sed -n 's/^screenshot_directory = "\(.*\)"/\1/p' "$app")
@@ -90,7 +91,7 @@ done
 # config_save_on_exit: the appended keys end up in the user file.
 awk -F' = ' 'NR==FNR{v[$1]=$0; next} ($1 in v){print v[$1]; delete v[$1]; next} {print} END{for(k in v) print v[k]}' "$app" "$cfg" > "$cfg.new" && mv "$cfg.new" "$cfg"
 exit 0
-''' % (t, t, t, t, t, t))
+''' % (t, t, t, t, t, t, t))
 os.chmod(fake, 0o755)
 
 common = ['-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-Wno-format-truncation',
@@ -160,6 +161,12 @@ try:
     check('set core', cmd('emud.sock', 'GAME_SET\t%s\tsnes\tcore\tbsnes' % game).startswith('OK'))
     check('set aspect', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taspect\t4:3' % game).startswith('OK'))
     check('set filter', cmd('emud.sock', 'GAME_SET\t%s\tsnes\tfilter\tpixel' % game).startswith('OK'))
+    # Emulation accuracy: a melonDS-nuubOS setting (stored for any game).
+    check('accuracy not for snes9x', 'accuracy_supported=0\n' in gs and 'accuracy_default=fast\n' in gs)
+    check('reject bad accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\tturbo' % game).startswith('ERR'))
+    check('set accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\taccurate' % game).startswith('OK'))
+    check('accuracy listed', 'accuracy=accurate\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
+    check('clear accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\t' % game).startswith('OK'))
     conf = open('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)).read()
     check('only overrides stored', conf == 'core=bsnes\naspect=4:3\nfilter=pixel\n')
 
@@ -248,6 +255,9 @@ try:
     sdir = '%s/users/%s/states/snes/' % (ud, user)
     # Start from no states.
     for f in os.listdir(sdir): os.remove(sdir + f)
+    # Bezels are on by default (2026-10-15); the presentation checks below
+    # are the plain picture.
+    check('bezels off', cmd('emud.sock', 'SET\tbezels\t0').startswith('OK'))
     check('launch new', launch('new'))
     check('panel renders native', wait(lambda: open(t + '/render-height').read() == '\n'))
     sess = session()
@@ -314,10 +324,10 @@ try:
     check('set bezels', cmd('emud.sock', 'SET\tbezels\t1').startswith('OK'))
     launch('new')
     glslp = open(run + '/emulation/session.glslp').read()
-    check('bezel shader', 'bezel.glsl' in glslp and 'CRT = "1"' in glslp and 'BEZEL_STYLE = "0"' in glslp
-          and 'aspect_ratio_index = "24"' in session()
-          and 'textures = "SYSICON;BRAND"' in glslp and 'HAS_ICON = "0"' in glslp
-          and 'bezel-logo.png' in glslp)
+    # RetroArch draws the bezel (patch 0010); the picture keeps its shader.
+    bz = open(t + '/bezel').read().split()
+    check('bezel', 'crt.glsl' in glslp and 'aspect_ratio_index = "22"' in session()
+          and len(bz) == 15 and bz[3] == '0' and bz[4] == '-' and bz[5].endswith('/bezel-logo.png'))
     cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
     # Cheats.
     cmd('emud.sock', 'SET\tbezels\t0')

@@ -13,7 +13,7 @@ LIBRETRO_PARALLEL_N64_VERSION = 862071a8b786224905a763e8b15bdcaf75739341
 LIBRETRO_PARALLEL_N64_SITE = $(call github,libretro,parallel-n64,$(LIBRETRO_PARALLEL_N64_VERSION))
 LIBRETRO_PARALLEL_N64_LICENSE = GPL-2.0
 LIBRETRO_PARALLEL_N64_LICENSE_FILES = mupen64plus-core/LICENSES
-LIBRETRO_PARALLEL_N64_DEPENDENCIES = libgles
+LIBRETRO_PARALLEL_N64_DEPENDENCIES = libgles libretro-core-info
 
 define LIBRETRO_PARALLEL_N64_BUILD_CMDS
 	$(TARGET_MAKE_ENV) $(LIBRETRO_CORE_ENV) $(MAKE) -C $(@D) -f Makefile \
@@ -21,9 +21,11 @@ define LIBRETRO_PARALLEL_N64_BUILD_CMDS
 		HAVE_PARALLEL=0 HAVE_PARALLEL_RSP=0 HAVE_GLIDEN64=0 GIT_VERSION=" $(LIBRETRO_PARALLEL_N64_VERSION)"
 endef
 
+# Bundled as ParaLLEl N64-nuubOS (parallel_n64_nuubos, the N64 default):
+# patch 0001 fixes the audio stream of games that poll AI_LEN, 0002 the
+# library_name; upstream ParaLLEl N64 remains a download.
 define LIBRETRO_PARALLEL_N64_INSTALL_TARGET_CMDS
-	$(INSTALL) -D -m 0755 $(@D)/parallel_n64_libretro.so \
-		$(TARGET_DIR)/usr/lib/libretro/parallel_n64_libretro.so
+	$(call LIBRETRO_NUUBOS_CORE_INSTALL,parallel_n64,parallel_n64_nuubos,$(@D)/parallel_n64_libretro.so)
 endef
 
 $(eval $(generic-package))

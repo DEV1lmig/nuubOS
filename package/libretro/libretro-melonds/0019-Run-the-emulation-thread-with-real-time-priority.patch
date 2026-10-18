@@ -1,0 +1,91 @@
+From f6004c2165b1f85ccb165dc101f089f4cefee8a3 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 10:48:56 +0200
+Subject: [PATCH] Run the emulation thread with real-time priority
+ (nuubOS)
+
+The emulation thread is the limit on the H700 and shared its four cores
+with the 3D lanes and 2D workers, which preempted it about nine times a
+frame (85 % of a core). It now runs SCHED_FIFO at priority 5 (below
+PipeWire's audio threads) from the first retro_run until the game
+unloads; the core's own threads reset themselves to SCHED_OTHER (they
+would inherit it). Mario Kart DS 18.5 -> 17.4 ms a frame, New Super
+Mario Bros. 19.1 -> 18.55 (fast-forward bench).
+---
+ src/libretro/libretro.cpp | 24 ++++++++++++++++++++++++
+ src/libretro/platform.cpp |  8 ++++++++
+ 2 files changed, 32 insertions(+)
+
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index 00f563a..a603cac 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -1,5 +1,7 @@
+ #include <algorithm>
+ #include <ctime>
++#include <pthread.h>
++#include <sched.h>
+ #include <string>
+ #include <vector>
+ 
+@@ -811,8 +813,28 @@ static void render_frame(void)
+ #endif
+ }
+ 
++/* nuubOS (H700): the emulation thread is the limit and shared four cores
++ * with the renderer threads, which preempted it ~9 times a frame (85 % of
++ * a core). A low real-time priority (below PipeWire's audio threads) keeps
++ * it on its core: Mario Kart DS 18.4 -> 17.4 ms a frame. Set on the first
++ * frame (RetroArch's main thread) and dropped when the game unloads. */
++static bool emu_thread_rt = false;
++
++static void set_emu_thread_rt(bool on)
++{
++#if defined(__linux__)
++   struct sched_param sp = {};
++   sp.sched_priority = on ? 5 : 0;
++   if (pthread_setschedparam(pthread_self(), on ? SCHED_FIFO : SCHED_OTHER, &sp) == 0)
++      emu_thread_rt = on;
++#endif
++}
++
+ void retro_run(void)
+ {
++   if (!emu_thread_rt)
++      set_emu_thread_rt(true);
++
+    update_input(&input_state);
+ 
+    if (input_state.swap_screens_btn != swapped_screens)
+@@ -1051,6 +1073,8 @@ bool retro_load_game(const struct retro_game_info *info)
+ 
+ void retro_unload_game(void)
+ {
++   if (emu_thread_rt)
++      set_emu_thread_rt(false);
+    NDS::DeInit();
+ }
+ 
+diff --git a/src/libretro/platform.cpp b/src/libretro/platform.cpp
+index c480fb2..ec96b6c 100644
+--- a/src/libretro/platform.cpp
++++ b/src/libretro/platform.cpp
+@@ -1,3 +1,5 @@
++#include <pthread.h>
++#include <sched.h>
+ #include <cstdio>
+ #include <cstring>
+ #include <string>
+@@ -203,6 +205,12 @@ namespace Platform
+ 
+    void function_trampoline(void* param) {
+       ThreadData* data = (ThreadData*)param;
++   #if defined(__linux__)
++      // nuubOS: the emulation thread runs SCHED_FIFO (libretro.cpp); the
++      // core's own threads are ordinary ones whoever creates them
++      struct sched_param sp = {};
++      pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
++   #endif
+       data->fn();
+       delete data;
+    }

@@ -1,0 +1,202 @@
+From a8e08c80121b8350badad54ee8d6428741a9929d Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 09:05:12 +0200
+Subject: [PATCH] Map the ROM file instead of copying it (nuubOS)
+
+RetroArch read the whole ROM into memory (the core's content override
+asked for it) and the core copied it again: Pokemon Black 2 (512 MB) was
+killed by the OOM killer on the 1 GB H700 devices. The core now opens
+the ROM by path (need_fullpath, no content override) and maps it
+privately (MAP_PRIVATE over a zeroed region of the power-of-two size):
+the pages are page cache, copied only where the emulator writes (secure
+area). Reset reloads from the path. Pokemon Black 2: RSS 210 MB.
+---
+ src/NDSCart.cpp           | 72 ++++++++++++++++++++++++++++++++++-----
+ src/libretro/libretro.cpp | 26 +++++++-------
+ 2 files changed, 76 insertions(+), 22 deletions(-)
+
+diff --git a/src/NDSCart.cpp b/src/NDSCart.cpp
+index d0affcb..a5de1c8 100644
+--- a/src/NDSCart.cpp
++++ b/src/NDSCart.cpp
+@@ -32,6 +32,10 @@
+ #ifdef __LIBRETRO__
+ #undef __LIBRETRO_SDK_FILE_STREAM_TRANSFORMS_H
+ #include <streams/file_stream_transforms.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
+ #endif
+ 
+ namespace NDSCart
+@@ -1399,6 +1403,58 @@ void CartHomebrew::ReadROM_B7(u32 addr, u32 len, u8* data, u32 offset)
+ 
+ 
+ 
++// nuubOS: a ROM loaded from a file is a private mapping of it (page cache,
++// copied only where the emulator writes): a 512 MB ROM no longer takes
++// 512 MB of the 1 GB of RAM. CartROMMapSize is its length, 0 for new[].
++size_t CartROMMapSize = 0;
++
++void FreeCartROM()
++{
++    if (CartROM && CartROMMapSize)
++        munmap(CartROM, CartROMMapSize);
++    else if (CartROM)
++        delete[] CartROM;
++    CartROM = nullptr;
++    CartROMMapSize = 0;
++}
++
++// The file at the start of a zeroed region of CartROMSize bytes.
++bool MapCartROM(const char* path, u32* len)
++{
++    struct stat st;
++    int fd = ::open(path, O_RDONLY | O_CLOEXEC);
++    if (fd < 0)
++        return false;
++    if (fstat(fd, &st) != 0 || st.st_size <= 0 || st.st_size > 0x40000000)
++    {
++        ::close(fd);
++        return false;
++    }
++
++    u32 size = 0x200;
++    while (size < (u32)st.st_size)
++        size <<= 1;
++    void* base = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (base == MAP_FAILED)
++    {
++        ::close(fd);
++        return false;
++    }
++    if (mmap(base, st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 0) == MAP_FAILED)
++    {
++        munmap(base, size);
++        ::close(fd);
++        return false;
++    }
++    ::close(fd);
++
++    CartROM = (u8*)base;
++    CartROMSize = size;
++    CartROMMapSize = size;
++    *len = (u32)st.st_size;
++    return true;
++}
++
+ bool Init()
+ {
+     CartROM = nullptr;
+@@ -1409,15 +1465,14 @@ bool Init()
+ 
+ void DeInit()
+ {
+-    if (CartROM) delete[] CartROM;
++    FreeCartROM();
+     if (Cart) delete Cart;
+ }
+ 
+ void Reset()
+ {
+     CartInserted = false;
+-    if (CartROM) delete[] CartROM;
+-    CartROM = nullptr;
++    FreeCartROM();
+     CartROMSize = 0;
+     CartID = 0;
+     CartIsHomebrew = false;
+@@ -1665,9 +1720,12 @@ bool LoadROMCommon(u32 filelength, const char *sram, bool direct)
+ 
+ bool LoadROM(const char* path, const char* sram, bool direct)
+ {
+-    // TODO: streaming mode? for really big ROMs or systems with limited RAM
+-    // for now we're lazy
+-    // also TODO: validate what we're loading!!
++    // TODO: validate what we're loading!!
++
++    NDS::Reset();
++    u32 maplen;
++    if (MapCartROM(path, &maplen))
++        return LoadROMCommon(maplen, sram, direct);
+ 
+     FILE* f = Platform::OpenFile(path, "rb");
+     if (!f)
+@@ -1675,8 +1733,6 @@ bool LoadROM(const char* path, const char* sram, bool direct)
+         return false;
+     }
+ 
+-    NDS::Reset();
+-
+     fseek(f, 0, SEEK_END);
+     u32 len = (u32)ftell(f);
+ 
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index 04c0f37..fa43fca 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -156,7 +156,9 @@ void retro_get_system_info(struct retro_system_info *info)
+ #define GIT_VERSION ""
+ #endif
+    info->library_version  = MELONDS_VERSION GIT_VERSION;
+-   info->need_fullpath    = false;
++   /* nuubOS: the core maps the ROM file itself (NDSCart.cpp): RetroArch
++    * reading it into memory took as much RAM as the ROM (512 MB) */
++   info->need_fullpath    = true;
+    info->valid_extensions = "nds|ids|dsi";
+ }
+ 
+@@ -271,16 +273,8 @@ void retro_set_environment(retro_environment_t cb)
+    update_display_cb.callback = update_option_visibility;
+    environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK, &update_display_cb);
+ 
+-   static const struct retro_system_content_info_override content_overrides[] = {
+-      {
+-         "nds|dsi|gba",
+-         false,
+-         true
+-      },
+-      { NULL, false, false}
+-   };
+-
+-   environ_cb(RETRO_ENVIRONMENT_SET_CONTENT_INFO_OVERRIDE, (void*)content_overrides);
++   /* nuubOS: no content override; the ROM is opened by path (need_fullpath,
++    * retro_get_system_info) instead of a copy of it in memory */
+ 
+    if (cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &logging))
+       log_cb = logging.log;
+@@ -358,10 +352,12 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
+    log_cb(RETRO_LOG_INFO, "Plugging device %u into port %u.\n", device, port);
+ }
+ 
++static std::string rom_path;
++
+ void retro_reset(void)
+ {
+    NDS::Reset();
+-   NDS::LoadROM((u8*)cached_info->data, cached_info->size, save_path.c_str(), Config::DirectBoot);
++   NDS::LoadROM(rom_path.c_str(), save_path.c_str(), Config::DirectBoot);
+ }
+ 
+ static void check_variables(bool init)
+@@ -1024,7 +1020,9 @@ static bool _handle_load_game(unsigned type, const struct retro_game_info *info)
+    SPU::SetInterpolation(Config::AudioInterp);
+    NDS::SetConsoleType(Config::ConsoleType);
+    Frontend::LoadBIOS();
+-   NDS::LoadROM((u8*)info->data, info->size, save_path.c_str(), Config::DirectBoot);
++   rom_path = info->path;
++   if (!NDS::LoadROM(rom_path.c_str(), save_path.c_str(), Config::DirectBoot))
++      return false;
+    
+    if (type == SLOT_1_2_BOOT)
+    {
+@@ -1039,7 +1037,7 @@ static bool _handle_load_game(unsigned type, const struct retro_game_info *info)
+ 
+       gba_save_path = std::string(retro_saves_directory) + std::string(1, PLATFORM_DIR_SEPERATOR) + std::string(gba_game_name) + ".srm";
+ 
+-      NDS::LoadGBAROM((u8*)info[1].data, info[1].size, gba_game_name, gba_save_path.c_str());
++      NDS::LoadGBAROM(info[1].path, gba_save_path.c_str());
+    }
+ 
+    return true;

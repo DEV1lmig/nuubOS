@@ -1448,7 +1448,7 @@ struct game_hotkey {
 	const char *action;
 };
 
-#define GAME_HOTKEY_COUNT 7
+#define GAME_HOTKEY_COUNT 9
 
 /* Defaults; the Emulation Service sends the user's chords (HOTKEYS) when it
  * takes the gamepads, and again when the user changes them. */
@@ -1460,6 +1460,8 @@ static const struct game_hotkey default_game_hotkeys[GAME_HOTKEY_COUNT] = {
 	{ PAD_NORTH, "fast_forward" },
 	{ PAD_START, "quit" },
 	{ PAD_L2, "screenshot" },
+	{ PAD_SELECT, "screen_layout" },
+	{ PAD_R2, "stylus" },
 };
 static struct game_hotkey game_hotkeys[GAME_HOTKEY_COUNT];
 /* Chord controls held through an axis (hat D-pad, analog trigger): edge
@@ -1945,6 +1947,18 @@ static bool game_modifier_event(const struct input_dev *input,
 	return true;
 }
 
+/* "stylus <control>": the control of this controller that moves the
+ * stylus cursor (Nintendo DS touch screen): the right stick, else the left
+ * stick, else the D-pad. */
+static const char *stylus_hotkey(const struct padmap *map)
+{
+	if (map->src[PAD_RX].code >= 0 && map->src[PAD_RY].code >= 0)
+		return "stylus right";
+	if (map->src[PAD_LX].code >= 0 && map->src[PAD_LY].code >= 0)
+		return "stylus left";
+	return "stylus dpad";
+}
+
 /* While the modifier is held, game controls are chords and never reach the
  * game. Returns true if consumed. */
 static bool game_hotkey_event(const struct input_dev *input,
@@ -1978,7 +1992,10 @@ static bool game_hotkey_event(const struct input_dev *input,
 		}
 		if (fire) {
 			hotkey_used = true;
-			send_game_hotkey(game_hotkeys[i].action);
+			if (!strcmp(game_hotkeys[i].action, "stylus"))
+				send_game_hotkey(stylus_hotkey(map));
+			else
+				send_game_hotkey(game_hotkeys[i].action);
 		}
 	}
 	return true;

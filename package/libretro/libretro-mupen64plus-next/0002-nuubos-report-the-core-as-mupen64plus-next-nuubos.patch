@@ -1,0 +1,20 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: report the core as Mupen64Plus-Next-nuubOS
+
+The nuubOS build carries H700 patches and is bundled next to the
+upstream core users can download: RetroArch (netplay, per-core
+settings) tells them apart by library_name.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -653,7 +653,7 @@
+ 
+ void retro_get_system_info(struct retro_system_info *info)
+ {
+-    info->library_name = "Mupen64Plus-Next";
++    info->library_name = "Mupen64Plus-Next-nuubOS";
+     info->library_version = "3.0" FLAVOUR_VERSION GIT_VERSION;
+     info->valid_extensions = "n64|v64|z64|bin|u1";
+     info->need_fullpath = false;

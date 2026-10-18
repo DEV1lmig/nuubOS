@@ -94,6 +94,10 @@ struct Details {
     aspect: String,
     filter: String,
     filter_default: String,
+    /* Emulation accuracy (melonDS-nuubOS only): override and default. */
+    accuracy_supported: bool,
+    accuracy: String,
+    accuracy_default: String,
     /* nuubos-biosctl: missing required firmware for the system. */
     bios_missing: bool,
 }
@@ -308,6 +312,9 @@ fn parse_game_settings(reply: &str, d: &mut Details) {
             "aspect" => d.aspect = value.into(),
             "filter" => d.filter = value.into(),
             "filter_default" => d.filter_default = value.into(),
+            "accuracy_supported" => d.accuracy_supported = value == "1",
+            "accuracy" => d.accuracy = value.into(),
+            "accuracy_default" => d.accuracy_default = value.into(),
             _ => {}
         }
     }
@@ -365,7 +372,7 @@ fn emu_get(st: &State, key: &str) -> String {
 }
 
 /* Game hotkey actions in page order, with their labels. */
-const HOTKEYS: [(&str, usize, &str); 7] = [
+const HOTKEYS: [(&str, usize, &str); 9] = [
     ("save_state", 417, "Save State"),
     ("load_state", 418, "Load State"),
     ("slot_next", 779, "Next Slot"),
@@ -373,6 +380,9 @@ const HOTKEYS: [(&str, usize, &str); 7] = [
     ("fast_forward", 781, "Fast Forward"),
     ("quit", 422, "Quit Game"),
     ("screenshot", 592, "Screenshot"),
+    /* Nintendo DS (melonDS-nuubOS) */
+    ("screen_layout", 1302, "Screen Layout"),
+    ("stylus", 1307, "Stylus"),
 ];
 
 /* Controls a hotkey can use (Quick Menu button + this control). */
@@ -498,6 +508,16 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
             rows.push(("aspect".into(), nav(tr(ui, 526, "Aspect Ratio"), aspect), true));
             let filter = if d.filter.is_empty() { default_label(ui, &filter_label(ui, &d.filter_default)) } else { filter_label(ui, &d.filter) };
             rows.push(("filter".into(), nav(tr(ui, 527, "Video Filter"), filter), true));
+            if d.accuracy_supported {
+                let accuracy = if d.accuracy.is_empty() {
+                    default_label(ui, &accuracy_label(ui, &d.accuracy_default))
+                } else {
+                    accuracy_label(ui, &d.accuracy)
+                };
+                let mut r = nav(tr(ui, 1314, "Emulation Accuracy"), accuracy);
+                r.detail = tr(ui, 1317, "Choose Accurate if the game misbehaves").into();
+                rows.push(("accuracy".into(), r, true));
+            }
             rows.push(("reset".into(), row(tr(ui, 535, "Reset Game Settings"), String::new(),
                 armed_detail(&st.armed, "reset", tr(ui, 598, "Press again to reset"),
                     tr(ui, 536, "Changes apply the next time the game starts"))), true));
@@ -1254,6 +1274,19 @@ fn open_aspect_choice(ui: &HomeWindow) {
     open_settings_choice(ui, "game-aspect", &tr(ui, 526, "Aspect Ratio"), options, &d.aspect);
 }
 
+fn accuracy_label(ui: &HomeWindow, v: &str) -> String {
+    if v == "accurate" { tr(ui, 1316, "Accurate") } else { tr(ui, 1315, "Fast") }
+}
+
+fn open_accuracy_choice(ui: &HomeWindow) {
+    let d = STATE.with(|st| st.borrow().details.clone());
+    let mut options = vec![(String::new(), default_label(ui, &accuracy_label(ui, &d.accuracy_default)))];
+    for v in ["fast", "accurate"] {
+        options.push((v.to_owned(), accuracy_label(ui, v)));
+    }
+    open_settings_choice(ui, "game-accuracy", &tr(ui, 1314, "Emulation Accuracy"), options, &d.accuracy);
+}
+
 fn open_filter_choice(ui: &HomeWindow) {
     let d = STATE.with(|st| st.borrow().details.clone());
     let mut options = vec![(String::new(), default_label(ui, &filter_label(ui, &d.filter_default)))];
@@ -1287,6 +1320,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-core-get" => install_core(ui, value),
         "game-aspect" => game_set(ui, "aspect", value),
         "game-filter" => game_set(ui, "filter", value),
+        "game-accuracy" => game_set(ui, "accuracy", value),
         "emu-slots" => emu_set(ui, "slots", value),
         "game-fill" => start_bulk(ui, value),
         "update-channel" => {
@@ -1404,6 +1438,7 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
         }
         "aspect" => open_aspect_choice(ui),
         "filter" => open_filter_choice(ui),
+        "accuracy" => open_accuracy_choice(ui),
         "reset" => {
             if arm_or(ui, "reset") {
                 let line = format!("GAME_RESET\t{}", d.id);

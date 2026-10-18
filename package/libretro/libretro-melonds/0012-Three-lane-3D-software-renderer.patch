@@ -1,0 +1,351 @@
+From eabd04c7201e63564efdf155a9e2ce4a60ea1e96 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 08:50:24 +0200
+Subject: [PATCH] Three-lane 3D software renderer (nuubOS)
+
+The threaded 3D renderer (patch 0002: two halves) renders bands of lines
+on three threads. Each frame the band edges move halfway towards an even
+split of the previous frame's thread CPU time per band (BalanceLanes), at
+least 8 lines a band, so the lanes finish together. At each edge the
+final pass of the line before it waits for the raw first line of the
+band below, and the band's first line is finished last.
+Mario Kart DS: the emulation thread no longer waits for the 3D render at
+VCount 144 (3-4 ms a frame with two halves, 0.2 ms with three lanes).
+---
+ src/GPU3D_Soft.cpp | 173 +++++++++++++++++++++++++++++++--------------
+ src/GPU3D_Soft.h   |  37 +++++-----
+ 2 files changed, 140 insertions(+), 70 deletions(-)
+
+diff --git a/src/GPU3D_Soft.cpp b/src/GPU3D_Soft.cpp
+index c022dfb..3206709 100644
+--- a/src/GPU3D_Soft.cpp
++++ b/src/GPU3D_Soft.cpp
+@@ -17,6 +17,7 @@
+ */
+ 
+ #include "GPU3D_Soft.h"
++#include <time.h>
+ 
+ #include <algorithm>
+ #include <thread>
+@@ -41,9 +42,12 @@ void SoftRenderer::StopRenderThread()
+         Platform::Semaphore_Post(Sema_RenderStart);
+         Platform::Thread_Wait(RenderThread);
+         Platform::Thread_Free(RenderThread);
+-        Platform::Semaphore_Post(Sema_LowerStart);
+-        Platform::Thread_Wait(LowerThread);
+-        Platform::Thread_Free(LowerThread);
++        for (int k = 1; k < NumLanes; k++)
++        {
++            Platform::Semaphore_Post(Sema_LaneStart[k]);
++            Platform::Thread_Wait(LaneThreads[k]);
++            Platform::Thread_Free(LaneThreads[k]);
++        }
+     }
+ }
+ 
+@@ -55,7 +59,8 @@ void SoftRenderer::SetupRenderThread()
+         {
+             RenderThreadRunning = true;
+             RenderThread = Platform::Thread_Create(std::bind(&SoftRenderer::RenderThreadFunc, this));
+-            LowerThread = Platform::Thread_Create(std::bind(&SoftRenderer::LowerThreadFunc, this));
++            for (int k = 1; k < NumLanes; k++)
++                LaneThreads[k] = Platform::Thread_Create(std::bind(&SoftRenderer::LaneThreadFunc, this, k));
+         }
+ 
+         // otherwise more than one frame can be queued up at once
+@@ -67,9 +72,11 @@ void SoftRenderer::SetupRenderThread()
+         Platform::Semaphore_Reset(Sema_RenderDone);
+         Platform::Semaphore_Reset(Sema_RenderStart);
+         Platform::Semaphore_Reset(Sema_ScanlineCount);
+-        Platform::Semaphore_Reset(Sema_LowerScanlines);
+-        Platform::Semaphore_Reset(Sema_LowerFirstLine);
+-        Platform::Semaphore_Reset(Sema_UpperLastLine);
++        for (int k = 0; k < NumLanes; k++)
++        {
++            Platform::Semaphore_Reset(Sema_FirstLine[k]);
++            Platform::Semaphore_Reset(Sema_LastLine[k]);
++        }
+ 
+         RenderIssued = true;
+         GPU3D::PendingBuf3D = RenderTarget;
+@@ -94,11 +101,16 @@ bool SoftRenderer::Init()
+     Sema_RenderStart = Platform::Semaphore_Create();
+     Sema_RenderDone = Platform::Semaphore_Create();
+     Sema_ScanlineCount = Platform::Semaphore_Create();
+-    Sema_LowerStart = Platform::Semaphore_Create();
+-    Sema_LowerDone = Platform::Semaphore_Create();
+-    Sema_LowerScanlines = Platform::Semaphore_Create();
+-    Sema_LowerFirstLine = Platform::Semaphore_Create();
+-    Sema_UpperLastLine = Platform::Semaphore_Create();
++    for (int k = 0; k < NumLanes; k++)
++    {
++        Sema_LaneStart[k] = Platform::Semaphore_Create();
++        Sema_LaneDone[k] = Platform::Semaphore_Create();
++        Sema_FirstLine[k] = Platform::Semaphore_Create();
++        Sema_LastLine[k] = Platform::Semaphore_Create();
++        LaneStart[k] = (192 * k) / NumLanes;
++        LaneTime[k] = 0;
++    }
++    LaneStart[NumLanes] = 192;
+ 
+     Threaded = false;
+     RenderThreadRunning = false;
+@@ -114,11 +126,13 @@ void SoftRenderer::DeInit()
+     Platform::Semaphore_Free(Sema_RenderStart);
+     Platform::Semaphore_Free(Sema_RenderDone);
+     Platform::Semaphore_Free(Sema_ScanlineCount);
+-    Platform::Semaphore_Free(Sema_LowerStart);
+-    Platform::Semaphore_Free(Sema_LowerDone);
+-    Platform::Semaphore_Free(Sema_LowerScanlines);
+-    Platform::Semaphore_Free(Sema_LowerFirstLine);
+-    Platform::Semaphore_Free(Sema_UpperLastLine);
++    for (int k = 0; k < NumLanes; k++)
++    {
++        Platform::Semaphore_Free(Sema_LaneStart[k]);
++        Platform::Semaphore_Free(Sema_LaneDone[k]);
++        Platform::Semaphore_Free(Sema_FirstLine[k]);
++        Platform::Semaphore_Free(Sema_LastLine[k]);
++    }
+ }
+ 
+ void SoftRenderer::Reset()
+@@ -130,8 +144,8 @@ void SoftRenderer::Reset()
+     memset(DepthBuffer, 0, BufferSize * 2 * 4);
+     memset(AttrBuffer, 0, BufferSize * 2 * 4);
+ 
+-    Lanes[0].PrevIsShadowMask = false;
+-    Lanes[1].PrevIsShadowMask = false;
++    for (Lane& lane : Lanes)
++        lane.PrevIsShadowMask = false;
+ 
+     SetupRenderThread();
+ }
+@@ -1668,47 +1682,105 @@ int SoftRenderer::SetupLane(Lane* L, Polygon** polygons, int npolys, s32 y)
+     return j;
+ }
+ 
+-// Lines [SplitLine, 192): the final pass of a line needs the raw lines above
+-// and below it, so the first one (SplitLine) is finished last, once the upper
+-// half has rendered SplitLine-1; its lines are released to GetLine together.
+-void SoftRenderer::RenderLowerHalf()
++static s64 LaneClock()
+ {
+-    Lane* L = &Lanes[1];
+-    int j = SetupLane(L, LowerPolygons, LowerNumPolygons, SplitLine);
++    struct timespec t;
++    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++    return (s64)t.tv_sec * 1000000000 + t.tv_nsec;
++}
+ 
+-    RenderScanline(L, SplitLine, j);
+-    Platform::Semaphore_Post(Sema_LowerFirstLine);
++// Renders the band of lane k. The final pass of a line needs the raw lines
++// above and below it: at each band edge the line before it is finished by
++// the lane above once this lane has rendered its first line, and the first
++// line is finished here last, once the lane above has rendered its last one.
++void SoftRenderer::RenderLane(int k)
++{
++    Lane* L = &Lanes[k];
++    s32 y0 = LaneStart[k], y1 = LaneStart[k+1];
++    s64 t0 = LaneClock();
++
++    int j = SetupLane(L, LanePolygons, LaneNumPolygons, y0);
+ 
+-    for (s32 y = SplitLine+1; y < 192; y++)
++    RenderScanline(L, y0, j);
++    if (k > 0)
++        Platform::Semaphore_Post(Sema_FirstLine[k]);
++
++    for (s32 y = y0+1; y < y1; y++)
+     {
+         RenderScanline(L, y, j);
+-        if (y-1 > SplitLine)
++        if (k == 0 || y-1 > y0)
+             ScanlineFinalPass(y-1);
+     }
+-    ScanlineFinalPass(191);
+ 
+-    Platform::Semaphore_Wait(Sema_UpperLastLine);
+-    ScanlineFinalPass(SplitLine);
++    if (k < NumLanes-1)
++    {
++        Platform::Semaphore_Post(Sema_LastLine[k]);
++        Platform::Semaphore_Wait(Sema_FirstLine[k+1]);
++    }
++    ScanlineFinalPass(y1-1);
++
++    if (k > 0)
++    {
++        Platform::Semaphore_Wait(Sema_LastLine[k-1]);
++        ScanlineFinalPass(y0);
++    }
++
++    LaneTime[k] = LaneClock() - t0;
+ }
+ 
+-void SoftRenderer::LowerThreadFunc()
++void SoftRenderer::LaneThreadFunc(int k)
+ {
+     for (;;)
+     {
+-        Platform::Semaphore_Wait(Sema_LowerStart);
++        Platform::Semaphore_Wait(Sema_LaneStart[k]);
+         if (!RenderThreadRunning) return;
+ 
+-        RenderLowerHalf();
+-        Platform::Semaphore_Post(Sema_LowerDone);
++        RenderLane(k);
++        Platform::Semaphore_Post(Sema_LaneDone[k]);
+     }
+ }
+ 
+-void SoftRenderer::RenderPolygons(bool threaded, Polygon** polygons, int npolys)
++// Moves the band edges halfway towards an even split of the last frame's
++// cost (taken as uniform within each band), at least MinLines per band.
++void SoftRenderer::BalanceLanes()
+ {
+-    Lane* L = &Lanes[0];
++    constexpr int MinLines = 8;
++    double cost[NumLanes], total = 0;
++    for (int k = 0; k < NumLanes; k++)
++    {
++        if (LaneTime[k] <= 0) return;
++        cost[k] = (double)LaneTime[k] / (LaneStart[k+1] - LaneStart[k]);
++        total += LaneTime[k];
++    }
+ 
++    int edges[NumLanes+1];
++    edges[0] = 0;
++    edges[NumLanes] = 192;
++    int k = 0;
++    double acc = 0;
++    for (int m = 1; m < NumLanes; m++)
++    {
++        double target = total * m / NumLanes;
++        while (k < NumLanes && acc + LaneTime[k] < target)
++            acc += LaneTime[k++];
++        double line = (k < NumLanes) ? LaneStart[k] + (target - acc) / cost[k] : 192;
++        edges[m] = (int)(line + 0.5);
++    }
++
++    for (int m = 1; m < NumLanes; m++)
++    {
++        int e = (LaneStart[m] + edges[m] + 1) / 2;
++        int lo = LaneStart[m-1] + MinLines;
++        int hi = 192 - (NumLanes - m) * MinLines;
++        LaneStart[m] = std::clamp(e, lo, hi);
++    }
++}
++
++void SoftRenderer::RenderPolygons(bool threaded, Polygon** polygons, int npolys)
++{
+     if (!threaded)
+     {
++        Lane* L = &Lanes[0];
+         int j = SetupLane(L, polygons, npolys, 0);
+ 
+         RenderScanline(L, 0, j);
+@@ -1721,25 +1793,18 @@ void SoftRenderer::RenderPolygons(bool threaded, Polygon** polygons, int npolys)
+         return;
+     }
+ 
+-    // the lower half starts now, on its own thread (buffers are cleared)
+-    LowerPolygons = polygons;
+-    LowerNumPolygons = npolys;
+-    Platform::Semaphore_Post(Sema_LowerStart);
++    // the other lanes start now, on their threads (buffers are cleared)
++    LanePolygons = polygons;
++    LaneNumPolygons = npolys;
++    for (int k = 1; k < NumLanes; k++)
++        Platform::Semaphore_Post(Sema_LaneStart[k]);
+ 
+-    int j = SetupLane(L, polygons, npolys, 0);
+-
+-    RenderScanline(L, 0, j);
+-    for (s32 y = 1; y < SplitLine; y++)
+-    {
+-        RenderScanline(L, y, j);
+-        ScanlineFinalPass(y-1);
+-    }
+-    Platform::Semaphore_Post(Sema_UpperLastLine);
++    RenderLane(0);
+ 
+-    Platform::Semaphore_Wait(Sema_LowerFirstLine);
+-    ScanlineFinalPass(SplitLine-1);
++    for (int k = 1; k < NumLanes; k++)
++        Platform::Semaphore_Wait(Sema_LaneDone[k]);
+ 
+-    Platform::Semaphore_Wait(Sema_LowerDone);
++    BalanceLanes();
+ }
+ 
+ void SoftRenderer::VCount144()
+diff --git a/src/GPU3D_Soft.h b/src/GPU3D_Soft.h
+index 107aa4f..d5acd84 100644
+--- a/src/GPU3D_Soft.h
++++ b/src/GPU3D_Soft.h
+@@ -456,17 +456,21 @@ private:
+     };
+ 
+     // Per-scanline state of one renderer lane. The threaded renderer splits
+-    // the screen in two halves (nuubOS, H700: the A53 rasterizes Mario Kart
+-    // DS in ~23 ms per frame on one core): lines [0, SplitLine) on the
+-    // render thread, [SplitLine, 192) on a second one.
++    // the screen in bands of lines (nuubOS, H700: the A53 rasterizes Mario
++    // Kart DS in ~23 ms per frame on one core): lane k renders lines
++    // [LaneStart[k], LaneStart[k+1]), lane 0 on the render thread, each
++    // other one on its own thread. The bands follow the cost of the last
++    // frame (BalanceLanes) so that the lanes finish together.
+     struct Lane
+     {
+         RendererPolygon PolygonList[2048];
+         u8 StencilBuffer[256*2];
+         bool PrevIsShadowMask;
+     };
+-    static constexpr int SplitLine = 96;
+-    Lane Lanes[2];
++    static constexpr int NumLanes = 3;
++    Lane Lanes[NumLanes];
++    int LaneStart[NumLanes+1];
++    s64 LaneTime[NumLanes];
+     void TextureLookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha);
+     u32 RenderPixel(Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t);
+     void PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow);
+@@ -477,8 +481,9 @@ private:
+     void RenderPolygonScanline(Lane* L, RendererPolygon* rp, s32 y);
+     void RenderScanline(Lane* L, s32 y, int npolys);
+     int SetupLane(Lane* L, Polygon** polygons, int npolys, s32 y);
+-    void RenderLowerHalf();
+-    void LowerThreadFunc();
++    void RenderLane(int k);
++    void LaneThreadFunc(int k);
++    void BalanceLanes();
+     u32 CalculateFogDensity(u32 pixeladdr);
+     void ScanlineFinalPass(s32 y);
+     void ClearBuffers();
+@@ -534,14 +539,14 @@ private:
+     Platform::Semaphore* Sema_RenderStart;
+     Platform::Semaphore* Sema_RenderDone;
+     Platform::Semaphore* Sema_ScanlineCount;
+-    // lower half: its own thread, lines and handshakes with the upper half
+-    Platform::Thread* LowerThread;
+-    Platform::Semaphore* Sema_LowerStart;
+-    Platform::Semaphore* Sema_LowerDone;
+-    Platform::Semaphore* Sema_LowerScanlines;
+-    Platform::Semaphore* Sema_LowerFirstLine; // raw line SplitLine rendered
+-    Platform::Semaphore* Sema_UpperLastLine;  // raw line SplitLine-1 rendered
+-    Polygon** LowerPolygons;
+-    int LowerNumPolygons;
++    // lanes 1..NumLanes-1: their threads and the handshakes at the band
++    // edges (index 0 unused for the thread and start/done)
++    Platform::Thread* LaneThreads[NumLanes];
++    Platform::Semaphore* Sema_LaneStart[NumLanes];
++    Platform::Semaphore* Sema_LaneDone[NumLanes];
++    Platform::Semaphore* Sema_FirstLine[NumLanes]; // raw line LaneStart[k] rendered
++    Platform::Semaphore* Sema_LastLine[NumLanes];  // raw line LaneStart[k+1]-1 rendered
++    Polygon** LanePolygons;
++    int LaneNumPolygons;
+ };
+ }
+\ No newline at end of file

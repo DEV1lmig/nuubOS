@@ -61,11 +61,10 @@ define NUUBOS_EMULATION_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/share/nuubos/emulation/shaders/global.glslp
 	$(INSTALL) -D -m 0644 $(@D)/shaders/crt.glsl \
 		$(TARGET_DIR)/usr/share/nuubos/emulation/shaders/crt.glsl
-	$(INSTALL) -D -m 0644 $(@D)/shaders/bezel.glsl \
-		$(TARGET_DIR)/usr/share/nuubos/emulation/shaders/bezel.glsl
-	$(INSTALL) -D -m 0644 $(@D)/shaders/bezel-picture.glsl \
+	# the bezel is drawn by RetroArch since 2026-10-18 (patch 0010)
+	rm -f $(TARGET_DIR)/usr/share/nuubos/emulation/shaders/bezel-wordmark.png \
+		$(TARGET_DIR)/usr/share/nuubos/emulation/shaders/bezel.glsl \
 		$(TARGET_DIR)/usr/share/nuubos/emulation/shaders/bezel-picture.glsl
-	rm -f $(TARGET_DIR)/usr/share/nuubos/emulation/shaders/bezel-wordmark.png
 	$(INSTALL) -D -m 0644 $(@D)/shaders/bezel-logo.png \
 		$(TARGET_DIR)/usr/share/nuubos/emulation/shaders/bezel-logo.png
 	$(INSTALL) -D -m 0644 $(@D)/display.conf \

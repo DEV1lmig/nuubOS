@@ -1,0 +1,559 @@
+From 91bb5bdf9976efa39e294d1295dc146c2770f81c Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 08:53:34 +0200
+Subject: [PATCH] Screen layouts and stylus mode for nuubOS
+
+- Layouts Large Top/Large Bottom (one screen at twice the size across
+  the width, the other one below it at its own size) and Picture in
+  Picture Top/Bottom (one screen filling the picture at three times the
+  size, the other one at its own size over its bottom right corner, three
+  parts opaque to one). R2 swaps them like the others; a toggled swap
+  stays across option changes. The geometry's maximum is the largest
+  layout, so changing layouts never reinitialises the video.
+- Core option melonds_nuubos_stylus (off, right, left, dpad): a cursor
+  moved with that control (sticks: dead zone, then quadratic up to
+  5 px a frame; D-pad: slow, then faster while held), L2 touches; it
+  overrides the touch mode and the D-pad stops reaching the game when it
+  moves the cursor. nuubOS switches it live with a hotkey.
+- The left stick works as the D-pad in the core (RetroArch stops doing
+  it once a core reads an analog stick).
+- The cursor is a white cross-hair with a black border, scaled with the
+  touch screen (the 4x4 inverted square disappeared on mid greys).
+---
+ src/libretro/input.cpp               | 102 ++++++++++++++++++++++++---
+ src/libretro/input.h                 |  13 ++++
+ src/libretro/libretro.cpp            |  45 ++++++++++--
+ src/libretro/libretro_core_options.h |  20 ++++++
+ src/libretro/screenlayout.cpp        |  52 ++++++++++++++
+ src/libretro/screenlayout.h          |  17 +++++
+ src/libretro/utils.cpp               |  83 ++++++++++++++++++----
+ src/libretro/utils.h                 |   3 +-
+ 8 files changed, 308 insertions(+), 27 deletions(-)
+
+diff --git a/src/libretro/input.cpp b/src/libretro/input.cpp
+index 5d710f8..8195759 100644
+--- a/src/libretro/input.cpp
++++ b/src/libretro/input.cpp
+@@ -1,3 +1,5 @@
++#include <algorithm>
++
+ #include "input.h"
+ #include "libretro_state.h"
+ #include "utils.h"
+@@ -12,7 +14,62 @@ static bool has_touched = false;
+ 
+ bool cursor_enabled(InputState *state)
+ {
+-   return state->current_touch_mode == TouchMode::Mouse || state->current_touch_mode == TouchMode::Joystick;
++   return state->stylus != Stylus::Off ||
++          state->current_touch_mode == TouchMode::Mouse || state->current_touch_mode == TouchMode::Joystick;
++}
++
++// One stick axis as cursor speed in 1/256 px per frame: a dead zone, then
++// quadratic up to 5 px a frame (fine aiming near the centre).
++static int stick_speed(int16_t v)
++{
++   const int dead = 4096;
++   int a = v < 0 ? -v : v;
++   if (a <= dead)
++      return 0;
++   long long m = (long long)(a - dead) * 256 / (32767 - dead);   // 0..256
++   int speed = (int)(m * m * 5 / 256);
++   return v < 0 ? -speed : speed;
++}
++
++// nuubOS stylus: moves the cursor with the chosen control; the D-pad
++// starts slow and speeds up while held.
++static void move_stylus(InputState *state, u32 *joypad_bits, int16_t lx, int16_t ly)
++{
++   int dx = 0, dy = 0;
++
++   switch (state->stylus)
++   {
++      case Stylus::RightStick:
++         dx = stick_speed(input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X));
++         dy = stick_speed(input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y));
++         break;
++      case Stylus::LeftStick:
++         dx = stick_speed(lx);
++         dy = stick_speed(ly);
++         break;
++      case Stylus::Dpad:
++      {
++         u32 dirs = (1 << RETRO_DEVICE_ID_JOYPAD_LEFT) | (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT) |
++                    (1 << RETRO_DEVICE_ID_JOYPAD_UP) | (1 << RETRO_DEVICE_ID_JOYPAD_DOWN);
++         int step = state->dpad_frames < 12 ? 384 : std::min(1280, 384 + (state->dpad_frames - 12) * 32);
++
++         if (*joypad_bits & (1 << RETRO_DEVICE_ID_JOYPAD_LEFT))  dx -= step;
++         if (*joypad_bits & (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT)) dx += step;
++         if (*joypad_bits & (1 << RETRO_DEVICE_ID_JOYPAD_UP))    dy -= step;
++         if (*joypad_bits & (1 << RETRO_DEVICE_ID_JOYPAD_DOWN))  dy += step;
++         state->dpad_frames = (*joypad_bits & dirs) ? state->dpad_frames + 1 : 0;
++         *joypad_bits &= ~dirs;   // the D-pad is the cursor now
++         break;
++      }
++      default:
++         break;
++   }
++
++   state->cursor_fx = Clamp(state->cursor_fx + dx, 0, ((VIDEO_WIDTH - 1) << 8));
++   state->cursor_fy = Clamp(state->cursor_fy + dy, 0, ((VIDEO_HEIGHT - 1) << 8));
++   state->touch_x = state->cursor_fx >> 8;
++   state->touch_y = state->cursor_fy >> 8;
++   state->touching = !!(*joypad_bits & (1 << RETRO_DEVICE_ID_JOYPAD_L2));
+ }
+ 
+ void update_input(InputState *state)
+@@ -33,6 +90,25 @@ void update_input(InputState *state)
+          joypad_bits |= input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, i) ? (1 << i) : 0;
+    }
+    
++   /* nuubOS: the left stick works as the D-pad unless it moves the stylus
++    * (RetroArch stops doing that itself once a core reads an analog stick) */
++   int16_t lx = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
++   int16_t ly = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
++   if (state->stylus != Stylus::LeftStick)
++   {
++      if (lx <= -16384) joypad_bits |= 1 << RETRO_DEVICE_ID_JOYPAD_LEFT;
++      if (lx >= 16384)  joypad_bits |= 1 << RETRO_DEVICE_ID_JOYPAD_RIGHT;
++      if (ly <= -16384) joypad_bits |= 1 << RETRO_DEVICE_ID_JOYPAD_UP;
++      if (ly >= 16384)  joypad_bits |= 1 << RETRO_DEVICE_ID_JOYPAD_DOWN;
++   }
++
++   bool stylus_touch = false;
++   if (state->stylus != Stylus::Off)
++   {
++      move_stylus(state, &joypad_bits, lx, ly);
++      stylus_touch = state->touching;
++   }
++
+    ADD_KEY_TO_MASK(RETRO_DEVICE_ID_JOYPAD_A,      0,  joypad_bits);
+    ADD_KEY_TO_MASK(RETRO_DEVICE_ID_JOYPAD_B,      1,  joypad_bits);
+    ADD_KEY_TO_MASK(RETRO_DEVICE_ID_JOYPAD_SELECT, 2,  joypad_bits);
+@@ -55,10 +131,16 @@ void update_input(InputState *state)
+       state->lid_closed = lid_closed_btn;
+    }
+ 
+-   state->holding_noise_btn = !!input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2);
++   // L2 touches in stylus mode, else it blows into the microphone
++   state->holding_noise_btn = state->stylus == Stylus::Off &&
++                              !!input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2);
+    state->swap_screens_btn = !!input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2);
+ 
+-   if(current_screen_layout != ScreenLayout::TopOnly)
++   if(current_screen_layout != ScreenLayout::TopOnly && state->stylus != Stylus::Off)
++   {
++      state->touching = stylus_touch;
++   }
++   else if(current_screen_layout != ScreenLayout::TopOnly)
+    {
+       switch(state->current_touch_mode)
+       {
+@@ -83,18 +165,18 @@ void update_input(InputState *state)
+                int16_t pointer_x = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+                int16_t pointer_y = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+ 
+-               unsigned int touch_scale = screen_layout_data.displayed_layout == ScreenLayout::HybridBottom ? screen_layout_data.hybrid_ratio : 1;
++               unsigned int touch_scale = screen_layout_data.touch_scale;
+ 
+-               unsigned int x = ((int)pointer_x + 0x8000) * screen_layout_data.buffer_width / 0x10000 / touch_scale;
+-               unsigned int y = ((int)pointer_y + 0x8000) * screen_layout_data.buffer_height / 0x10000 / touch_scale;
++               unsigned int x = ((int)pointer_x + 0x8000) * screen_layout_data.buffer_width / 0x10000;
++               unsigned int y = ((int)pointer_y + 0x8000) * screen_layout_data.buffer_height / 0x10000;
+ 
+-               if ((x >= screen_layout_data.touch_offset_x) && (x < screen_layout_data.touch_offset_x + screen_layout_data.screen_width) &&
+-                     (y >= screen_layout_data.touch_offset_y) && (y < screen_layout_data.touch_offset_y + screen_layout_data.screen_height))
++               if ((x >= screen_layout_data.touch_offset_x) && (x < screen_layout_data.touch_offset_x + screen_layout_data.screen_width * touch_scale) &&
++                     (y >= screen_layout_data.touch_offset_y) && (y < screen_layout_data.touch_offset_y + screen_layout_data.screen_height * touch_scale))
+                {
+                   state->touching = true;
+ 
+-                  state->touch_x = Clamp((x - screen_layout_data.touch_offset_x) * VIDEO_WIDTH / screen_layout_data.screen_width, 0, VIDEO_WIDTH - 1);
+-                  state->touch_y = Clamp((y - screen_layout_data.touch_offset_y) * VIDEO_HEIGHT / screen_layout_data.screen_height, 0, VIDEO_HEIGHT - 1);
++                  state->touch_x = Clamp((x - screen_layout_data.touch_offset_x) / touch_scale * VIDEO_WIDTH / screen_layout_data.screen_width, 0, VIDEO_WIDTH - 1);
++                  state->touch_y = Clamp((y - screen_layout_data.touch_offset_y) / touch_scale * VIDEO_HEIGHT / screen_layout_data.screen_height, 0, VIDEO_HEIGHT - 1);
+                }
+             }
+             else if(state->touching)
+diff --git a/src/libretro/input.h b/src/libretro/input.h
+index 450bbde..27d316e 100644
+--- a/src/libretro/input.h
++++ b/src/libretro/input.h
+@@ -11,11 +11,24 @@ enum TouchMode
+    Joystick,
+ };
+ 
++// nuubOS stylus mode (melonds_nuubos_stylus): a cursor moved with one
++// control of the pad, L2 touches; overrides the touch mode while on
++enum class Stylus
++{
++   Off,
++   RightStick,
++   LeftStick,
++   Dpad,
++};
++
+ struct InputState
+ {
+    bool touching;
+    int touch_x, touch_y;
+    TouchMode current_touch_mode;
++   Stylus stylus = Stylus::Off;
++   int cursor_fx = 128 << 8, cursor_fy = 96 << 8;   // stylus cursor, 1/256 px
++   int dpad_frames = 0;                             // D-pad held (acceleration)
+ 
+    bool holding_noise_btn = false;
+    bool swap_screens_btn = false;
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index b887ffc..04c0f37 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -1,3 +1,4 @@
++#include <algorithm>
+ #include <ctime>
+ #include <string>
+ #include <vector>
+@@ -165,8 +166,10 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
+    info->timing.sample_rate    = 32.0f * 1024.0f;
+    info->geometry.base_width   = screen_layout_data.buffer_width;
+    info->geometry.base_height  = screen_layout_data.buffer_height;
+-   info->geometry.max_width    = screen_layout_data.buffer_width;
+-   info->geometry.max_height   = screen_layout_data.buffer_height;
++   // nuubOS: the largest buffer of any layout (hybrid 772 wide, the gap,
++   // nuubOS layouts 768x576), so changing layouts never reinits the video
++   info->geometry.max_width    = std::max(screen_layout_data.buffer_width, 772u);
++   info->geometry.max_height   = std::max(screen_layout_data.buffer_height, 640u);
+    info->geometry.aspect_ratio = (float)screen_layout_data.buffer_width / (float)screen_layout_data.buffer_height;
+ }
+ 
+@@ -407,6 +410,14 @@ static void check_variables(bool init)
+          layout = ScreenLayout::HybridTop;
+       else if (!strcmp(var.value, "Hybrid Bottom"))
+          layout = ScreenLayout::HybridBottom;
++      else if (!strcmp(var.value, "Large Top"))
++         layout = ScreenLayout::LargeTop;
++      else if (!strcmp(var.value, "Large Bottom"))
++         layout = ScreenLayout::LargeBottom;
++      else if (!strcmp(var.value, "Picture in Picture Top"))
++         layout = ScreenLayout::PipTop;
++      else if (!strcmp(var.value, "Picture in Picture Bottom"))
++         layout = ScreenLayout::PipBottom;
+    }
+ 
+    var.key = "melonds_screen_gap";
+@@ -671,7 +682,21 @@ static void check_variables(bool init)
+ 
+    input_state.current_touch_mode = new_touch_mode;
+ 
+-   update_screenlayout(layout, &screen_layout_data, enable_opengl, swapped_screens);
++   var.key = "melonds_nuubos_stylus";
++   input_state.stylus = Stylus::Off;
++   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
++   {
++      if (!strcmp(var.value, "right"))
++         input_state.stylus = Stylus::RightStick;
++      else if (!strcmp(var.value, "left"))
++         input_state.stylus = Stylus::LeftStick;
++      else if (!strcmp(var.value, "dpad"))
++         input_state.stylus = Stylus::Dpad;
++   }
++
++   // a toggled swap stays across option changes (nuubOS)
++   update_screenlayout(layout, &screen_layout_data, enable_opengl,
++                       toggle_swap_screen ? swap_screen_toggled : swapped_screens);
+ 
+    update_option_visibility();
+ }
+@@ -722,7 +747,19 @@ static void render_frame(void)
+    #endif
+       int frontbuf = GPU::FrontBuffer;
+ 
+-      if(screen_layout_data.hybrid)
++      if(screen_layout_data.composed)
++      {
++         bool top = screen_layout_data.displayed_layout == ScreenLayout::LargeTop ||
++                    screen_layout_data.displayed_layout == ScreenLayout::PipTop;
++
++         compose_screens(&screen_layout_data, GPU::Framebuffer[frontbuf][top ? 0 : 1],
++                         GPU::Framebuffer[frontbuf][top ? 1 : 0]);
++         if(cursor_enabled(&input_state))
++            draw_cursor(&screen_layout_data, input_state.touch_x, input_state.touch_y);
++
++         video_cb((uint8_t*)screen_layout_data.buffer_ptr, screen_layout_data.buffer_width, screen_layout_data.buffer_height, screen_layout_data.buffer_width * sizeof(uint32_t));
++      }
++      else if(screen_layout_data.hybrid)
+       {
+          unsigned primary = screen_layout_data.displayed_layout == ScreenLayout::HybridTop ? 0 : 1;
+ 
+diff --git a/src/libretro/libretro_core_options.h b/src/libretro/libretro_core_options.h
+index c77c319..6d8a057 100644
+--- a/src/libretro/libretro_core_options.h
++++ b/src/libretro/libretro_core_options.h
+@@ -368,10 +368,30 @@ struct retro_core_option_v2_definition option_defs_us[] = {
+          { "Bottom Only",   NULL },
+          { "Hybrid Top",    NULL },
+          { "Hybrid Bottom", NULL },
++         { "Large Top",     NULL },
++         { "Large Bottom",  NULL },
++         { "Picture in Picture Top",    NULL },
++         { "Picture in Picture Bottom", NULL },
+          { NULL, NULL },
+       },
+       "Top/Bottom"
+    },
++   {
++      "melonds_nuubos_stylus",
++      "Stylus",
++      NULL,
++      "A cursor on the touch screen moved with the chosen control; L2 touches. Overrides the touch mode while on (nuubOS switches it with a hotkey).",
++      NULL,
++      "screen",
++      {
++         { "off",   "disabled" },
++         { "right", "Right Stick" },
++         { "left",  "Left Stick" },
++         { "dpad",  "D-Pad" },
++         { NULL, NULL },
++      },
++      "off"
++   },
+    {
+       "melonds_screen_gap",
+       "Screen Gap",
+diff --git a/src/libretro/screenlayout.cpp b/src/libretro/screenlayout.cpp
+index faf9d1f..2a16dec 100644
+--- a/src/libretro/screenlayout.cpp
++++ b/src/libretro/screenlayout.cpp
+@@ -34,6 +34,13 @@ void update_screenlayout(ScreenLayout layout, ScreenLayoutData *data, bool openg
+ 
+     data->direct_copy = false;
+     data->hybrid = false;
++    data->composed = false;
++    data->composed_blend = false;
++    data->touch_scale = 1;
++
++    // the OpenGL renderer draws only the upstream layouts
++    if (opengl && layout >= ScreenLayout::LargeTop)
++        layout = ScreenLayout::TopBottom;
+ 
+     data->screen_width = VIDEO_WIDTH * scale;
+     data->screen_height = VIDEO_HEIGHT * scale;
+@@ -69,6 +76,18 @@ void update_screenlayout(ScreenLayout layout, ScreenLayoutData *data, bool openg
+             case ScreenLayout::HybridBottom:
+                 layout = ScreenLayout::HybridTop;
+                 break;
++            case ScreenLayout::LargeTop:
++                layout = ScreenLayout::LargeBottom;
++                break;
++            case ScreenLayout::LargeBottom:
++                layout = ScreenLayout::LargeTop;
++                break;
++            case ScreenLayout::PipTop:
++                layout = ScreenLayout::PipBottom;
++                break;
++            case ScreenLayout::PipBottom:
++                layout = ScreenLayout::PipTop;
++                break;
+         }
+     }
+ 
+@@ -187,9 +206,42 @@ void update_screenlayout(ScreenLayout layout, ScreenLayoutData *data, bool openg
+             {
+                 data->touch_offset_x = 0;
+                 data->touch_offset_y = 0;
++                data->touch_scale = data->hybrid_ratio;
+             }
+ 
+             break;
++        case ScreenLayout::LargeTop:
++        case ScreenLayout::LargeBottom:
++        case ScreenLayout::PipTop:
++        case ScreenLayout::PipBottom:
++        {
++            bool pip = layout == ScreenLayout::PipTop || layout == ScreenLayout::PipBottom;
++            bool top = layout == ScreenLayout::LargeTop || layout == ScreenLayout::PipTop;
++            // a margin of 1/64 of the picture height around the corner screen
++            unsigned margin = pip ? data->screen_height * 3 / 64 : 0;
++
++            data->enable_top_screen = true;
++            data->enable_bottom_screen = true;
++            data->composed = true;
++            data->composed_blend = pip;
++            data->big_scale = pip ? 3 : 2;
++
++            data->buffer_width = data->screen_width * data->big_scale;
++            data->buffer_height = data->screen_height * 3;
++            data->buffer_stride = data->buffer_width * pixel_size;
++
++            data->small_x = pip ? data->buffer_width - data->screen_width - margin
++                                : (data->buffer_width - data->screen_width) / 2;
++            data->small_y = pip ? data->buffer_height - data->screen_height - margin
++                                : data->screen_height * 2;
++
++            // the touch screen is the small one when the top screen is big
++            data->touch_offset_x = top ? data->small_x : 0;
++            data->touch_offset_y = top ? data->small_y : 0;
++            data->touch_scale = top ? 1 : data->big_scale;
++
++            break;
++        }
+     }
+ 
+     data->displayed_layout = layout;
+diff --git a/src/libretro/screenlayout.h b/src/libretro/screenlayout.h
+index c378821..b477d3d 100644
+--- a/src/libretro/screenlayout.h
++++ b/src/libretro/screenlayout.h
+@@ -21,6 +21,14 @@ enum ScreenLayout
+    BottomOnly = 5,
+    HybridTop = 6,
+    HybridBottom = 7,
++   // nuubOS: one screen at twice the size across the width, the other one
++   // below it at its own size
++   LargeTop = 8,
++   LargeBottom = 9,
++   // nuubOS: one screen filling the picture (three times the size), the
++   // other one at its own size over its bottom right corner, see-through
++   PipTop = 10,
++   PipBottom = 11,
+ };
+ 
+ enum SmallScreenLayout
+@@ -53,6 +61,15 @@ struct ScreenLayoutData
+ 
+     unsigned touch_offset_x;
+     unsigned touch_offset_y;
++    unsigned touch_scale;   // size of a touch screen pixel in the buffer
++
++    // nuubOS layouts (Large*, Pip*): the main screen at big_scale, the
++    // other one at (small_x, small_y), blended in Pip*
++    bool composed;
++    bool composed_blend;
++    unsigned big_scale;
++    unsigned small_x;
++    unsigned small_y;
+ 
+     unsigned screen_gap_unscaled;
+     unsigned screen_gap;
+diff --git a/src/libretro/utils.cpp b/src/libretro/utils.cpp
+index 61c5583..f2af916 100644
+--- a/src/libretro/utils.cpp
++++ b/src/libretro/utils.cpp
+@@ -76,25 +76,84 @@ void copy_hybrid_screen(ScreenLayoutData *data, uint32_t* src, ScreenId screen_i
+    }
+ }
+ 
+-void draw_cursor(ScreenLayoutData *data, int32_t x, int32_t y)
++// nuubOS: a white cross-hair 11 touch screen pixels wide with a black
++// border, visible on any picture (the upstream 4x4 inverted square
++// disappeared on mid greys).
++static void fill_block(ScreenLayoutData *data, int32_t x, int32_t y, uint32_t color)
+ {
+-   uint32_t* base_offset = (uint32_t*)data->buffer_ptr;
++   uint32_t scale = data->touch_scale;
++
++   if (x < 0 || y < 0 || x >= (int32_t)data->screen_width || y >= (int32_t)data->screen_height)
++      return;
++   for (uint32_t dy = 0; dy < scale; dy++)
++   {
++      uint32_t* row = (uint32_t*)data->buffer_ptr
++         + (y * scale + dy + data->touch_offset_y) * data->buffer_width
++         + x * scale + data->touch_offset_x;
++      for (uint32_t dx = 0; dx < scale; dx++)
++         row[dx] = color;
++   }
++}
+ 
+-   uint32_t scale = data->displayed_layout == ScreenLayout::HybridBottom ? data->hybrid_ratio : 1;
++void draw_cursor(ScreenLayoutData *data, int32_t x, int32_t y)
++{
++   for (int32_t i = -CURSOR_SIZE - 1; i <= CURSOR_SIZE + 1; i++)
++      for (int32_t w = -1; w <= 1; w++)
++      {
++         fill_block(data, x + i, y + w, 0xFF000000);
++         fill_block(data, x + w, y + i, 0xFF000000);
++      }
++   for (int32_t i = -CURSOR_SIZE; i <= CURSOR_SIZE; i++)
++   {
++      fill_block(data, x + i, y, 0xFFFFFFFF);
++      fill_block(data, x, y + i, 0xFFFFFFFF);
++   }
++}
+ 
+-   uint32_t start_y = Clamp(y - CURSOR_SIZE, 0, data->screen_height) * scale;
+-   uint32_t end_y = Clamp(y + CURSOR_SIZE, 0, data->screen_height) * scale;
++// nuubOS layouts: the main screen scaled up by an integer factor, the other
++// one at its own size at (small_x, small_y), three parts opaque to one
++// part of the picture below it in the picture-in-picture layouts.
++void compose_screens(ScreenLayoutData *data, const uint32_t* big, const uint32_t* small)
++{
++   uint32_t* out = (uint32_t*)data->buffer_ptr;
++   unsigned w = data->buffer_width;
++   unsigned s = data->big_scale;
+ 
+-   for (uint32_t y = start_y; y < end_y; y++)
++   for (unsigned y = 0; y < data->screen_height; y++)
+    {
+-      uint32_t start_x = Clamp(x - CURSOR_SIZE, 0, data->screen_width) * scale;
+-      uint32_t end_x = Clamp(x + CURSOR_SIZE, 0, data->screen_width) * scale;
++      uint32_t* row = out + y * s * w;
++      const uint32_t* src = big + y * data->screen_width;
+ 
+-      for (uint32_t x = start_x; x < end_x; x++)
++      if (s == 2)
++         for (unsigned x = 0; x < data->screen_width; x++)
++         {
++            uint32_t p = src[x];
++            *(uint64_t*)&row[x * 2] = ((uint64_t)p << 32) | p;
++         }
++      else
++         for (unsigned x = 0; x < data->screen_width; x++)
++         {
++            uint32_t p = src[x];
++            row[x * 3] = p;
++            row[x * 3 + 1] = p;
++            row[x * 3 + 2] = p;
++         }
++      for (unsigned r = 1; r < s; r++)
++         memcpy(row + r * w, row, w * sizeof(uint32_t));
++   }
++
++   uint32_t* dst = out + data->small_y * w + data->small_x;
++   for (unsigned y = 0; y < data->screen_height; y++, dst += w, small += data->screen_width)
++   {
++      if (!data->composed_blend)
++      {
++         memcpy(dst, small, data->screen_width * sizeof(uint32_t));
++         continue;
++      }
++      for (unsigned x = 0; x < data->screen_width; x++)
+       {
+-         uint32_t* offset = base_offset + ((y + data->touch_offset_y) * data->buffer_width) + ((x + data->touch_offset_x));
+-         uint32_t pixel = *offset;
+-         *(uint32_t*)offset = (0xFFFFFF - pixel) | 0xFF000000;
++         uint32_t a = small[x], b = dst[x];
++         dst[x] = ((a >> 1) & 0x7F7F7F7F) + ((a >> 2) & 0x3F3F3F3F) + ((b >> 2) & 0x3F3F3F3F);
+       }
+    }
+ }
+diff --git a/src/libretro/utils.h b/src/libretro/utils.h
+index 0d5f972..5b92204 100644
+--- a/src/libretro/utils.h
++++ b/src/libretro/utils.h
+@@ -4,7 +4,7 @@
+ #include "screenlayout.h"
+ #include "ARCodeFile.h"
+ 
+-#define CURSOR_SIZE 2 // TODO: Maybe make this adjustable
++#define CURSOR_SIZE 5 // arm of the cross-hair (nuubOS)
+ 
+ #if defined(_WIN32)
+ #define PLATFORM_DIR_SEPERATOR '\\'
+@@ -16,6 +16,7 @@ int32_t Clamp(int32_t value, int32_t min, int32_t max);
+ void copy_screen(ScreenLayoutData *data, uint32_t* src, unsigned offset);
+ void copy_hybrid_screen(ScreenLayoutData *data, uint32_t* src, ScreenId screen_id);
+ void draw_cursor(ScreenLayoutData *data, int32_t x, int32_t y);
++void compose_screens(ScreenLayoutData *data, const uint32_t* big, const uint32_t* small);
+ namespace AREngine
+ {
+     extern void RunCheat(ARCode& arcode);

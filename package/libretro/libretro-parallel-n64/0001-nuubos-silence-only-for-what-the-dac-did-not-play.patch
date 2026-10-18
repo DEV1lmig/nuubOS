@@ -1,0 +1,81 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] AI: silence only for the part of a field the DAC did not play
+
+ai_deliver_frame pushed a whole field of silence whenever nothing new
+had played since the last look at the play position. Samples handed over
+earlier in the same field (AI_LEN reads, end of a DMA) did not count, so
+a game polling AI_LEN got its audio plus a field of silence: Mischief
+Makers (PAL) produced up to 595 frames for a 441-frame field and a
+frontend pacing on audio ran it at about 44 of its 50 fps (130+ fps in
+fast-forward, so not a speed problem).
+
+Count what any path handed over during the field; while a transfer is
+playing nothing is padded, and a DAC that ran dry gets silence only for
+the rest of the field.
+
+Upstream-Status: Pending
+---
+--- a/mupen64plus-core/src/device/rcp/ai/ai_controller.h
++++ b/mupen64plus-core/src/device/rcp/ai/ai_controller.h
+@@ -59,6 +59,9 @@
+     uint32_t last_read;
+     uint32_t delayed_carry;
+     unsigned int dma_modifier;
++    /* stereo frames handed to the frontend since the last frame end
++     * (nuubOS: whichever path handed them over) */
++    unsigned int frame_frames;
+ 
+     struct mi_controller* mi;
+     struct ri_controller* ri;
+--- a/mupen64plus-core/src/device/rcp/ai/ai_controller.c
++++ b/mupen64plus-core/src/device/rcp/ai/ai_controller.c
+@@ -208,6 +208,7 @@
+     ai->samples_format_changed = 0;
+     ai->last_read = 0;
+     ai->delayed_carry = 0;
++    ai->frame_frames = 0;
+ }
+ 
+ /* Hand the backend everything the DAC has clocked out of the current
+@@ -241,6 +242,7 @@
+     if (length < 4)
+         return;
+ 
++    ai->frame_frames += length / 4;
+     push_audio_samples_via_libretro(
+         (unsigned char*)ai->ri->rdram->dram + start + diff, length);
+ }
+@@ -332,9 +334,22 @@
+ {
+     unsigned int divider = 1 + ai->regs[AI_DACRATE_REG];
+     unsigned int want;
++    unsigned int handed;
+ 
+-    if (ai->fifo[0].duration != 0
+-            && ai_hand_over_played(ai, get_remaining_dma_length(ai)) != 0)
++    if (ai->fifo[0].duration != 0)
++        ai_hand_over_played(ai, get_remaining_dma_length(ai));
++    handed = ai->frame_frames;
++    ai->frame_frames = 0;
++
++    /* nuubOS: a transfer still playing hands its samples over as the DAC
++     * clocks them; silence stands only for a DAC that ran dry, and only
++     * for the part of the field nothing was handed over for.  This used to
++     * add a whole field of silence whenever nothing new had played since
++     * the last AI_LEN read, so a game polling AI_LEN (Mischief Makers)
++     * got its samples and a field of silence on top: up to 595 frames a
++     * 441-frame field, and the frontend, pacing on audio, ran it at 44 of
++     * its 50 fps. */
++    if (ai->regs[AI_STATUS_REG] & AI_STATUS_BUSY)
+         return;
+ 
+     /* Nothing was clocked out this frame: either the game has queued no
+@@ -352,6 +367,6 @@
+         return;
+ 
+     want = ai->vi->delay / divider;
+-    if (want != 0)
+-        push_audio_silence_via_libretro(want);
++    if (want > handed)
++        push_audio_silence_via_libretro(want - handed);
+ }

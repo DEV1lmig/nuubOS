@@ -1,0 +1,43 @@
+From 11c421068076eb30059d1091e9312cceae4c1d88 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 10:07:53 +0200
+Subject: [PATCH] Restore the DMA burst table with a savestate (nuubOS)
+
+DMA::DoSavestate keeps MRAMBurstCount but not MRAMBurstTable, a pointer
+set only when a DMA starts: a state saved while a DMA ran (New Super
+Mario Bros. menus always have the geometry FIFO DMA running) crashed
+RetroArch a few seconds after loading it, in DMA::Run reading a null
+table. Loading now points the table at the dummy one so that the next
+unit starts a new burst; Reset sets it too.
+---
+ src/DMA.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/DMA.cpp b/src/DMA.cpp
+index e94d871..c7e28ac 100644
+--- a/src/DMA.cpp
++++ b/src/DMA.cpp
+@@ -79,6 +79,7 @@ void DMA::Reset()
+     Running = false;
+     InProgress = false;
+     MRAMBurstCount = 0;
++    MRAMBurstTable = DMATiming::MRAMDummy;
+ }
+ 
+ void DMA::DoSavestate(Savestate* file)
+@@ -103,6 +104,15 @@ void DMA::DoSavestate(Savestate* file)
+     file->Bool32(&InProgress);
+     file->Bool32(&IsGXFIFODMA);
+     file->Var32(&MRAMBurstCount);
++
++    // nuubOS: the burst table is a pointer and is not saved; a state saved
++    // in the middle of a DMA ran on with a null table after loading
++    // (SIGSEGV in DMA::Run). The next unit starts a new burst.
++    if (!file->Saving)
++    {
++        MRAMBurstTable = DMATiming::MRAMDummy;
++        MRAMBurstCount = 0;
++    }
+ }
+ 
+ void DMA::WriteCnt(u32 val)

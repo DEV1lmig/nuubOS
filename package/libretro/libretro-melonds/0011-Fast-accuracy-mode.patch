@@ -1,0 +1,167 @@
+From a790f5eb42d6f32957056f5f35eef2b1f781206a Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 08:50:24 +0200
+Subject: [PATCH] Fast accuracy mode (nuubOS)
+
+Core option melonds_accuracy (accurate, fast) replaces
+melonds_sync_cycles (patch 0006). Fast:
+- a geometry command reaching an idle geometry engine runs at once in
+  CmdFIFOWrite instead of going through the FIFO, the pipe and the cycle
+  timing (stall queue refills use the queueing path);
+- the ARM9 and ARM7 synchronise every 512 cycles instead of 64.
+Mario Kart DS (CubeXX, fast-forward bench): 19.8 -> 18.4 ms a frame with
+three 3D lanes. A game relying on that timing can be set to Accurate.
+---
+ src/GPU3D.cpp                        | 47 ++++++++++++++++++++++++++--
+ src/GPU3D.h                          |  2 ++
+ src/libretro/libretro.cpp            | 10 +++---
+ src/libretro/libretro_core_options.h | 14 ++++-----
+ 4 files changed, 59 insertions(+), 14 deletions(-)
+
+diff --git a/src/GPU3D.cpp b/src/GPU3D.cpp
+index f18a434..531b339 100644
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -275,6 +275,10 @@ u32 RenderNumPolygons;
+ u32 FlushRequest;
+ u32 FlushAttributes;
+ 
++// nuubOS "fast" accuracy: a command reaching an idle geometry engine runs
++// at once instead of going through the FIFOs and the cycle timing
++bool ImmediateGeometry = false;
++
+ std::unique_ptr<GPU3D::Renderer3D> CurrentRenderer = {};
+ 
+ bool AbortFrame;
+@@ -1784,7 +1788,43 @@ __attribute__((noinline)) static void CmdFIFOCountSpecial(u8 cmd)
+     }
+ }
+ 
++static void CmdFIFOQueue(CmdFIFOEntry& entry);
++static void ExecuteEntry(CmdFIFOEntry entry);
++
++__attribute__((noinline)) static void ExecuteImmediate(CmdFIFOEntry& entry)
++{
++    u8 cmd = entry.Command;
++    if (cmd == 0x11 || cmd == 0x12) NumPushPopCommands++;
++    else if (cmd >= 0x70 && cmd <= 0x72) NumTestCommands++;
++
++    ExecuteEntry(entry);
++
++    // the engine is idle again right away: no busy time, no pipeline stalls
++    // left for the next command (a SWAP_BUFFERS keeps its FlushRequest)
++    CycleCount = 0;
++    VertexPipeline = 0;
++    NormalPipeline = 0;
++    PolygonPipeline = 0;
++    VertexSlotCounter = 0;
++    VertexSlotsFree = 1;
++    GXStat &= ~(1<<27);
++    if (NumPushPopCommands == 0) GXStat &= ~(1<<14);
++    if (NumTestCommands == 0)    GXStat &= ~(1<<0);
++}
++
+ void CmdFIFOWrite(CmdFIFOEntry& entry)
++{
++    if (ImmediateGeometry && GeometryEnabled && !FlushRequest &&
++        CmdPIPE.IsEmpty() && CmdFIFO.IsEmpty() && CmdStallQueue.IsEmpty())
++    {
++        ExecuteImmediate(entry);
++        return;
++    }
++
++    CmdFIFOQueue(entry);
++}
++
++static void CmdFIFOQueue(CmdFIFOEntry& entry)
+ {
+     if (CmdFIFO.IsEmpty() && !CmdPIPE.IsFull())
+     {
+@@ -1828,7 +1868,7 @@ CmdFIFOEntry CmdFIFORead()
+             {
+                 if (CmdFIFO.IsFull()) break;
+                 CmdFIFOEntry entry = CmdStallQueue.Read();
+-                CmdFIFOWrite(entry);
++                CmdFIFOQueue(entry);
+             }
+ 
+             if (CmdStallQueue.IsEmpty())
+@@ -1881,8 +1921,11 @@ inline void VertexPipelineCmdDelayed4()
+ 
+ void ExecuteCommand()
+ {
+-    CmdFIFOEntry entry = CmdFIFORead();
++    ExecuteEntry(CmdFIFORead());
++}
+ 
++static void ExecuteEntry(CmdFIFOEntry entry)
++{
+     //printf("FIFO: processing %02X %08X. Levels: FIFO=%d, PIPE=%d\n", entry.Command, entry.Param, CmdFIFO->Level(), CmdPIPE->Level());
+ 
+     // each FIFO entry takes 1 cycle to be processed
+diff --git a/src/GPU3D.h b/src/GPU3D.h
+index 635603d..cbf4940 100644
+--- a/src/GPU3D.h
++++ b/src/GPU3D.h
+@@ -111,6 +111,8 @@ void SetEnabled(bool geometry, bool rendering);
+ 
+ void ExecuteCommand();
+ 
++extern bool ImmediateGeometry;
++
+ s32 CyclesToRunFor();
+ void Run();
+ void CheckFIFOIRQ();
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index 25d337c..b887ffc 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -458,11 +458,13 @@ static void check_variables(bool init)
+          Config::RandomizeMAC = 0;
+    }
+ 
+-   var.key = "melonds_sync_cycles";
+-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
++   var.key = "melonds_accuracy";
+    {
+-      int cycles = atoi(var.value);
+-      NDS::kMaxIterationCycles = (cycles >= 16 && cycles <= 4096) ? cycles : 64;
++      bool fast = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
++                  !strcmp(var.value, "fast");
++      // fast: the CPUs synchronise every 512 cycles (upstream 64)
++      NDS::kMaxIterationCycles = fast ? 512 : 64;
++      GPU3D::ImmediateGeometry = fast;
+    }
+ 
+    var.key = "melonds_frameskip";
+diff --git a/src/libretro/libretro_core_options.h b/src/libretro/libretro_core_options.h
+index 45a6757..c77c319 100644
+--- a/src/libretro/libretro_core_options.h
++++ b/src/libretro/libretro_core_options.h
+@@ -186,20 +186,18 @@ struct retro_core_option_v2_definition option_defs_us[] = {
+    },
+ #endif
+    {
+-      "melonds_sync_cycles",
+-      "CPU Sync Interval",
++      "melonds_accuracy",
++      "Accuracy",
+       NULL,
+-      "Longest stretch (in cycles) the ARM9 and ARM7 run apart before they are synchronised. Larger is much faster; a game relying on tight timing between the two CPUs may misbehave (go back to 64).",
++      "Fast: the 3D geometry engine runs each command at once instead of timing it cycle by cycle, and the ARM9 and ARM7 are synchronised less often. Much faster; a game relying on that timing may misbehave (use Accurate for it).",
+       NULL,
+       "system",
+       {
+-         { "64",  "64 (accurate)" },
+-         { "128", NULL },
+-         { "256", NULL },
+-         { "512", NULL },
++         { "accurate", "Accurate" },
++         { "fast",     "Fast" },
+          { NULL, NULL },
+       },
+-      "64"
++      "accurate"
+    },
+    {
+       "melonds_frameskip",

@@ -1,0 +1,111 @@
+From f1f4dc4eb8e9f3fd74e43a9f71af057844b03bbe Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 10:15:21 +0200
+Subject: [PATCH] Draw capture frames on the 2D workers in fast mode
+ (nuubOS)
+
+Frames with a display capture were drawn on the emulation thread (the
+capture writes VRAM the game may read back): games that capture every
+frame, such as The Legend of Zelda: Phantom Hourglass, spent about a
+third of the emulation thread in the 2D renderer while the workers idled.
+In fast mode (GPU::AsyncCapture) the workers draw and capture those
+frames too; the emulation side latches the capture itself so DISPCAPCNT
+bit 31 still clears at VBlank, and the display FIFO line buffer goes
+with the job when it is the capture's source B. The capture lands a few
+lines after the CPU reaches them; jobs are drained at VCount 192.
+---
+ src/GPU.cpp               | 25 +++++++++++++++++++------
+ src/GPU.h                 |  3 +++
+ src/libretro/libretro.cpp |  1 +
+ 3 files changed, 23 insertions(+), 6 deletions(-)
+
+diff --git a/src/GPU.cpp b/src/GPU.cpp
+index e76e6a3..47a496a 100644
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -84,6 +84,7 @@ u8* VRAMPtr_BOBJ[0x8];
+ int FrontBuffer;
+ bool FrameSkip = false;
+ bool FrameSkipNext = false;
++bool AsyncCapture = false;
+ u32* Framebuffer[2][2];
+ int Renderer = 0;
+ 
+@@ -156,7 +157,9 @@ u32 PalOAMGen = 0;
+  * (affine reference points, mosaic counters) live in the worker's units and
+  * are taken from the emulation side only when that side changed them
+  * (register write, VBlank reload). Frames with a display capture are drawn on
+- * the emulation thread as before (the capture writes VRAM the game reads).
++ * the emulation thread as before (the capture writes VRAM the game reads),
++ * except with AsyncCapture (fast mode): Zelda Phantom Hourglass captures
++ * every frame and drew it all on the emulation thread.
+  * Drained at VCount 192 (the 3D renderer starts overwriting the lines the 2D
+  * engines read at 215) and before the framebuffers flip.
+  */
+@@ -320,7 +323,10 @@ void Worker2D(int w)
+ 
+ bool FIFOMode(const GPU2D::Unit* u)
+ {
+-    return ((u->DispCnt >> 16) & (u->Num ? 0x1 : 0x3)) == 3;
++    if (((u->DispCnt >> 16) & (u->Num ? 0x1 : 0x3)) == 3)
++        return true;
++    // a capture on the worker reading the display FIFO (source B)
++    return AsyncCapture && u->Num == 0 && (u->CaptureCnt & (1u << 31)) && (u->CaptureCnt & (1u << 25));
+ }
+ 
+ // A unit's registers; the 512-byte display FIFO line buffer only when the
+@@ -377,8 +383,9 @@ void Begin2D(u32 kind, u32 line, bool drawline, bool drawsprites)
+             SentRegGen[n] = units[n]->RegGen;
+             j.UnitChanged[n] = 1;
+         }
+-        // the worker never captures (capture frames are drawn synchronously)
+-        if (j.UnitChanged[0])
++        // the worker captures only with AsyncCapture (otherwise capture
++        // frames are drawn synchronously)
++        if (j.UnitChanged[0] && !AsyncCapture)
+         {
+             ((GPU2D::Unit*)j.Units[0])->CaptureCnt &= ~(1u << 31);
+             ((GPU2D::Unit*)j.Units[0])->CaptureLatch = false;
+@@ -1541,8 +1548,14 @@ void StartScanline(u32 line)
+             GPU3D::DisplayBuf3D = GPU3D::PendingBuf3D;
+             GPU3D::DisplayWait3D = GPU3D::PendingWait3D;
+ 
+-            // this frame on the worker unless it captures the display
+-            bool worker = Thread2DRunning.load() && !(GPU2D_A.CaptureCnt & (1u << 31));
++            // this frame on the worker unless it captures the display; with
++            // AsyncCapture the worker captures too and the emulation side
++            // only latches the capture, as DrawScanline would (its end
++            // clears DISPCAPCNT bit 31 at VBlank)
++            bool capture = GPU2D_A.CaptureCnt & (1u << 31);
++            bool worker = Thread2DRunning.load() && (!capture || AsyncCapture);
++            if (worker && capture && VCount <= 192)
++                GPU2D_A.CaptureLatch = true;
+             if (worker == Sync2D)
+             {
+                 Drain2D();
+diff --git a/src/GPU.h b/src/GPU.h
+index 786f2c1..af8429f 100644
+--- a/src/GPU.h
++++ b/src/GPU.h
+@@ -86,6 +86,9 @@ extern int FrontBuffer;
+ // Set by the frontend before NDS::RunFrame(); emulation is unchanged.
+ extern bool FrameSkip;
+ extern bool FrameSkipNext;
++// nuubOS fast mode: frames with a display capture are drawn on the 2D
++// workers too (the capture lands a few lines later than the CPU sees it)
++extern bool AsyncCapture;
+ extern u32* Framebuffer[2][2];
+ 
+ extern GPU2D::Unit GPU2D_A;
+diff --git a/src/libretro/libretro.cpp b/src/libretro/libretro.cpp
+index fa43fca..00f563a 100644
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -472,6 +472,7 @@ static void check_variables(bool init)
+       // fast: the CPUs synchronise every 512 cycles (upstream 64)
+       NDS::kMaxIterationCycles = fast ? 512 : 64;
+       GPU3D::ImmediateGeometry = fast;
++      GPU::AsyncCapture = fast;
+    }
+ 
+    var.key = "melonds_frameskip";
