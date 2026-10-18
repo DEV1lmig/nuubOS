@@ -7,6 +7,10 @@
 # advertised as joysticks (RetroArch/SDL would otherwise take them as extra
 # players) and stay away from libinput. nuubos-inputd and
 # nuubos-controllersd read them directly through evdev.
+# ID_CLASS: SDL, finding no ID_INPUT_* class, falls back to the legacy
+# ID_CLASS and without it guesses from the capabilities, so Steam Link's SDL
+# still opened them as joysticks and announced them to the PC (2026-10-18).
+# A class SDL does not know keeps them out.
 SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", DEVPATH!="/devices/virtual/input/*", \
     ENV{ID_INPUT_JOYSTICK}="", ENV{NUUBOS_PHYSICAL_CONTROLLER}="1", \
-    ENV{LIBINPUT_IGNORE_DEVICE}="1"
+    ENV{LIBINPUT_IGNORE_DEVICE}="1", ENV{ID_CLASS}="nuubos-physical-controller"

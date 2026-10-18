@@ -2451,6 +2451,92 @@ static void apply_power_save(void)
     applied = on;
 }
 
+/* 5 GHz over 2.4 GHz for the same network (2026-10-18): after a reconnect
+ * wpa_supplicant joined a dual-band AP's 2.4 GHz BSS (signal -54 against
+ * -53 on 5 GHz) and stayed there (no bgscan). On 2.4 GHz the RTL8821CS
+ * shares the band and its one antenna with Bluetooth controllers, and game
+ * streaming needs the bandwidth. Runs with the power save policy (after a
+ * (re)connection, when a low-latency session starts or ends) on the cached
+ * scan results only: a scan would take the radio off-channel. */
+#define PREFER_5GHZ_MIN_DBM (-70)
+#define PREFER_5GHZ_RETRY_MS (10ULL * 60ULL * 1000ULL)
+
+static void prefer_5ghz(const struct wifi_state *state)
+{
+    static char tried_bssid[18];
+    static uint64_t tried_ms;
+    char output[MAX_CAPTURE];
+    char current_bssid[18] = "";
+    char best_bssid[18] = "";
+    char *saveptr = NULL;
+    char *line;
+    long freq = 0;
+    long best_freq = 0;
+    int32_t best_signal = PREFER_5GHZ_MIN_DBM - 1;
+    char *const status_argv[] = {"wpa_cli", "-i", WIFI_IFACE, "status", NULL};
+    char *const scan_argv[] = {"wpa_cli", "-i", WIFI_IFACE, "scan_results", NULL};
+
+    if (strcmp(state->state, "connected") != 0 || state->ssid[0] == '\0')
+        return;
+    if (run_capture(status_argv, output, sizeof(output)) != 0)
+        return;
+    for (line = strtok_r(output, "\n", &saveptr); line != NULL;
+         line = strtok_r(NULL, "\n", &saveptr)) {
+        if (strncmp(line, "freq=", 5) == 0)
+            freq = strtol(line + 5, NULL, 10);
+        else if (strncmp(line, "bssid=", 6) == 0)
+            copy_string(current_bssid, sizeof(current_bssid), line + 6);
+    }
+    if (freq == 0 || freq >= 5000)
+        return;
+
+    if (run_capture(scan_argv, output, sizeof(output)) != 0)
+        return;
+    saveptr = NULL;
+    for (line = strtok_r(output, "\n", &saveptr); line != NULL;
+         line = strtok_r(NULL, "\n", &saveptr)) {
+        /* bssid \t frequency \t signal level \t flags \t ssid */
+        char *fields[5] = {0};
+        char *cursor = line;
+        char *tab;
+        int field = 0;
+        long bss_freq;
+        int32_t signal;
+
+        while (field < 4 && (tab = strchr(cursor, '\t')) != NULL) {
+            *tab = '\0';
+            fields[field++] = cursor;
+            cursor = tab + 1;
+        }
+        fields[field++] = cursor;
+        if (field < 5 || strcmp(fields[4], state->ssid) != 0)
+            continue;
+        bss_freq = strtol(fields[1], NULL, 10);
+        signal = (int32_t)strtol(fields[2], NULL, 10);
+        if (bss_freq >= 5000 && signal > best_signal) {
+            copy_string(best_bssid, sizeof(best_bssid), fields[0]);
+            best_freq = bss_freq;
+            best_signal = signal;
+        }
+    }
+    if (best_bssid[0] == '\0')
+        return;
+    if (strcmp(best_bssid, tried_bssid) == 0 &&
+        monotonic_ms() < tried_ms + PREFER_5GHZ_RETRY_MS)
+        return;
+
+    copy_string(tried_bssid, sizeof(tried_bssid), best_bssid);
+    tried_ms = monotonic_ms();
+    {
+        char *const roam_argv[] = {"wpa_cli", "-i", WIFI_IFACE, "roam", best_bssid, NULL};
+
+        fprintf(stderr, "nuubos-wifid: %s on %ld MHz (%s): roaming to %s (%ld MHz, %d dBm)\n",
+                state->ssid, freq, current_bssid, best_bssid, best_freq, (int)best_signal);
+        if (run_quiet(roam_argv) != 0)
+            fprintf(stderr, "nuubos-wifid: roam to %s failed\n", best_bssid);
+    }
+}
+
 int main(void)
 {
     DBusConnection *conn;
@@ -2626,8 +2712,10 @@ int main(void)
 
         if (power_save_dirty) {
             power_save_dirty = 0;
-            if (current.enabled)
+            if (current.enabled) {
                 apply_power_save();
+                prefer_5ghz(&current);
+            }
         }
 
         ensure_ip_profile(&current);

@@ -43,6 +43,12 @@
 #define VPAD_NAME "nuubOS Gamepad"
 #define MAX_PADMAPS 16
 #define MAX_VPADS 8
+/* Rumble effects a game gamepad holds (SDL and RetroArch use one or two). */
+#define VPAD_FF_EFFECTS 16
+/* The built-in motor: its own input device, rumble of the "builtin"
+ * controller (rumbled owns its user switch). */
+#define RUMBLE_MOTOR_NAME "pwm-vibrator"
+#define INPUT_FEEDBACK_CONF "input-feedback.conf"
 #define NAV_REPEAT_INTERVAL_MS 90
 #define WEB_DEV_NAME "nuubOS Web Input"
 /* Steam Link: keys for Valve's app (F6 = its statistics). */
@@ -139,6 +145,12 @@ struct input_dev {
 	 * to an axis on this controller. */
 	int mapped_codes[sizeof(bindings) / sizeof(bindings[0])];
 	struct abs_binding abs_bindings[sizeof(bindings) / sizeof(bindings[0])];
+	/* Rumble target (FF_RUMBLE): the effects of its player's game gamepad,
+	 * uploaded on the first play (-1 = not yet); every reopen resets them. */
+	bool ff_rumble;
+	int ff_player;
+	int ff_ids[VPAD_FF_EFFECTS];
+	unsigned int ff_gen[VPAD_FF_EFFECTS];
 	int left_deadzone_percent;
 	int right_deadzone_percent;
 	unsigned long abs_bits[NBITS(ABS_MAX + 1)];
@@ -873,6 +885,20 @@ static void load_absinfo(struct input_dev *input)
 	}
 }
 
+static void probe_rumble(struct input_dev *input)
+{
+	unsigned long ff_bits[NBITS(FF_MAX + 1)];
+	size_t e;
+
+	memset(ff_bits, 0, sizeof(ff_bits));
+	input->ff_rumble = !input->accelerometer &&
+			   ioctl(input->fd, EVIOCGBIT(EV_FF, sizeof(ff_bits)), ff_bits) >= 0 &&
+			   bit_is_set(ff_bits, FF_RUMBLE);
+	input->ff_player = 0;
+	for (e = 0; e < VPAD_FF_EFFECTS; e++)
+		input->ff_ids[e] = -1;
+}
+
 static void configure_input_mapping(struct input_dev *input)
 {
 	int stick_code[2];
@@ -1057,7 +1083,10 @@ static void rescan_inputs(void)
 		snprintf(path, sizeof(path), "%s/%s",
 			 INPUT_DIR, entry->d_name);
 
-		fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		/* Write access plays rumble effects (EV_FF). */
+		fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0)
+			fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 		if (fd < 0) {
 			log_message("open failed path=%s errno=%d",
 				    path, errno);
@@ -1091,6 +1120,7 @@ static void rescan_inputs(void)
 				      sizeof(inputs[input_count].controller_id));
 		load_absinfo(&inputs[input_count]);
 		configure_input_mapping(&inputs[input_count]);
+		probe_rumble(&inputs[input_count]);
 
 		log_message(
 			 "input-open index=%zu path=%s name=%s id=%s key-capability=%d stick-x=%d stick-y=%d abs-bindings=%d accelerometer=%d",
@@ -1413,6 +1443,12 @@ struct vpad {
 	int hat_x;
 	int hat_y;
 	bool dirty;
+	/* Rumble effects the game uploaded (uinput FF), forwarded to the
+	 * player's physical controllers; gen counts updates. */
+	struct ff_effect ff[VPAD_FF_EFFECTS];
+	bool ff_used[VPAD_FF_EFFECTS];
+	bool ff_playing[VPAD_FF_EFFECTS];
+	unsigned int ff_gen[VPAD_FF_EFFECTS];
 };
 
 static struct padmap padmaps[MAX_PADMAPS];
@@ -1531,6 +1567,213 @@ static void vpad_sync(struct vpad *pad)
 	pad->dirty = false;
 }
 
+/*
+ * Rumble: games, Moonlight and Steam Link drive the game gamepad's FF_RUMBLE
+ * effects; inputd plays them on the physical controllers of that player
+ * that have FF_RUMBLE (the kernel driver's force feedback, the built-in
+ * motor for "builtin"). Controllers without kernel force feedback get none.
+ */
+static bool internal_rumble_on = true;
+static char internal_rumble_user[128];
+static struct timespec internal_rumble_mtime;
+
+/* rumbled's per-user switch for the built-in motor, re-read when the file
+ * or the active user changes. */
+static bool internal_rumble_enabled(void)
+{
+	char user[128];
+	char path[384];
+	char line[128];
+	struct stat st;
+	FILE *fp;
+
+	read_active_user(user, sizeof(user));
+	snprintf(path, sizeof(path), "/state/users/%s/" INPUT_FEEDBACK_CONF, user);
+	if (stat(path, &st) != 0) {
+		internal_rumble_user[0] = '\0';
+		return true;
+	}
+	if (strcmp(user, internal_rumble_user) == 0 &&
+	    st.st_mtim.tv_sec == internal_rumble_mtime.tv_sec &&
+	    st.st_mtim.tv_nsec == internal_rumble_mtime.tv_nsec)
+		return internal_rumble_on;
+
+	snprintf(internal_rumble_user, sizeof(internal_rumble_user), "%s", user);
+	internal_rumble_mtime = st.st_mtim;
+	internal_rumble_on = true;
+	fp = fopen(path, "r");
+	if (fp) {
+		while (fgets(line, sizeof(line), fp)) {
+			int value;
+
+			if (sscanf(line, "INTERNAL_RUMBLE=%d", &value) == 1)
+				internal_rumble_on = value != 0;
+		}
+		fclose(fp);
+	}
+	return internal_rumble_on;
+}
+
+static bool input_is_motor(const struct input_dev *input)
+{
+	return strcmp(input->name, RUMBLE_MOTOR_NAME) == 0;
+}
+
+static bool rumble_target(const struct input_dev *input, int player)
+{
+	const struct padmap *map;
+
+	if (!input->ff_rumble)
+		return false;
+	map = padmap_for(input_is_motor(input) ? "builtin" : input->controller_id);
+	if (!map || map->player != player)
+		return false;
+	return !input_is_motor(input) || internal_rumble_enabled();
+}
+
+static void input_ff_write(struct input_dev *input, int id, int value)
+{
+	struct input_event ev;
+
+	memset(&ev, 0, sizeof(ev));
+	ev.type = EV_FF;
+	ev.code = (unsigned short)id;
+	ev.value = value;
+	if (write(input->fd, &ev, sizeof(ev)) != (ssize_t)sizeof(ev))
+		log_message("rumble write failed path=%s errno=%d", input->path, errno);
+}
+
+/* Drops the effects of the player the controller rumbled for before. */
+static void input_ff_reset(struct input_dev *input)
+{
+	size_t e;
+
+	for (e = 0; e < VPAD_FF_EFFECTS; e++) {
+		if (input->ff_ids[e] >= 0)
+			(void)ioctl(input->fd, EVIOCRMFF, input->ff_ids[e]);
+		input->ff_ids[e] = -1;
+	}
+	input->ff_player = 0;
+}
+
+static void vpad_ff_play(struct vpad *pad, int e, int value)
+{
+	size_t i;
+
+	for (i = 0; i < input_count; i++) {
+		struct input_dev *input = &inputs[i];
+		struct ff_effect effect;
+
+		if (value == 0 || !rumble_target(input, pad->player)) {
+			if (input->ff_player == pad->player && input->ff_ids[e] >= 0)
+				input_ff_write(input, input->ff_ids[e], 0);
+			continue;
+		}
+		if (input->ff_player != pad->player) {
+			input_ff_reset(input);
+			input->ff_player = pad->player;
+			log_message("rumble target player=%d path=%s name=%s",
+				    pad->player, input->path, input->name);
+		}
+		if (input->ff_ids[e] < 0 || input->ff_gen[e] != pad->ff_gen[e]) {
+			effect = pad->ff[e];
+			effect.id = (short)input->ff_ids[e];
+			if (ioctl(input->fd, EVIOCSFF, &effect) < 0) {
+				log_message("rumble upload failed path=%s errno=%d",
+					    input->path, errno);
+				continue;
+			}
+			input->ff_ids[e] = effect.id;
+			input->ff_gen[e] = pad->ff_gen[e];
+		}
+		input_ff_write(input, input->ff_ids[e], value);
+	}
+	pad->ff_playing[e] = value != 0;
+}
+
+static void vpad_ff_erase(struct vpad *pad, int e)
+{
+	size_t i;
+
+	if (e < 0 || e >= VPAD_FF_EFFECTS || !pad->ff_used[e])
+		return;
+	vpad_ff_play(pad, e, 0);
+	for (i = 0; i < input_count; i++) {
+		struct input_dev *input = &inputs[i];
+
+		if (input->ff_player != pad->player || input->ff_ids[e] < 0)
+			continue;
+		(void)ioctl(input->fd, EVIOCRMFF, input->ff_ids[e]);
+		input->ff_ids[e] = -1;
+	}
+	pad->ff_used[e] = false;
+}
+
+/* Quick Menu opened, controller lost or session end: nothing keeps rumbling. */
+static void vpad_ff_stop(struct vpad *pad)
+{
+	int e;
+
+	for (e = 0; e < VPAD_FF_EFFECTS; e++)
+		if (pad->ff_playing[e])
+			vpad_ff_play(pad, e, 0);
+}
+
+/* The game's requests on its gamepad: effect uploads/erases (the kernel
+ * waits for the END ioctl) and plays. */
+static void vpad_process(struct vpad *pad)
+{
+	struct input_event events[16];
+	ssize_t n;
+	size_t count;
+	size_t i;
+
+	n = read(pad->fd, events, sizeof(events));
+	if (n <= 0)
+		return;
+	count = (size_t)n / sizeof(events[0]);
+
+	for (i = 0; i < count; i++) {
+		const struct input_event *ev = &events[i];
+
+		if (ev->type == EV_UINPUT && ev->code == UI_FF_UPLOAD) {
+			struct uinput_ff_upload up;
+			int e;
+
+			memset(&up, 0, sizeof(up));
+			up.request_id = (unsigned int)ev->value;
+			if (ioctl(pad->fd, UI_BEGIN_FF_UPLOAD, &up) < 0)
+				continue;
+			e = up.effect.id;
+			if (up.effect.type == FF_RUMBLE && e >= 0 && e < VPAD_FF_EFFECTS) {
+				pad->ff[e] = up.effect;
+				pad->ff_used[e] = true;
+				pad->ff_gen[e]++;
+				up.retval = 0;
+				if (pad->ff_playing[e] && !menu_open)
+					vpad_ff_play(pad, e, 1);
+			} else {
+				up.retval = -EINVAL;
+			}
+			(void)ioctl(pad->fd, UI_END_FF_UPLOAD, &up);
+		} else if (ev->type == EV_UINPUT && ev->code == UI_FF_ERASE) {
+			struct uinput_ff_erase erase;
+
+			memset(&erase, 0, sizeof(erase));
+			erase.request_id = (unsigned int)ev->value;
+			if (ioctl(pad->fd, UI_BEGIN_FF_ERASE, &erase) < 0)
+				continue;
+			vpad_ff_erase(pad, (int)erase.effect_id);
+			erase.retval = 0;
+			(void)ioctl(pad->fd, UI_END_FF_ERASE, &erase);
+		} else if (ev->type == EV_FF && ev->code < VPAD_FF_EFFECTS &&
+			   pad->ff_used[ev->code]) {
+			/* Nothing rumbles under the Quick Menu. */
+			vpad_ff_play(pad, ev->code, menu_open ? 0 : ev->value);
+		}
+	}
+}
+
 static int vpad_create(int player)
 {
 	static const int keys[] = {
@@ -1543,12 +1786,15 @@ static int vpad_create(int player)
 	size_t i;
 	int fd;
 
-	fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	/* Read access: the game's rumble requests (UI_FF_UPLOAD/ERASE, EV_FF). */
+	fd = open("/dev/uinput", O_RDWR | O_NONBLOCK | O_CLOEXEC);
 	if (fd < 0)
 		return -1;
 
 	(void)ioctl(fd, UI_SET_EVBIT, EV_KEY);
 	(void)ioctl(fd, UI_SET_EVBIT, EV_ABS);
+	(void)ioctl(fd, UI_SET_EVBIT, EV_FF);
+	(void)ioctl(fd, UI_SET_FFBIT, FF_RUMBLE);
 	for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
 		(void)ioctl(fd, UI_SET_KEYBIT, keys[i]);
 	if (vpad_guide)
@@ -1578,6 +1824,7 @@ static int vpad_create(int player)
 	setup.id.vendor = 0;
 	setup.id.product = (unsigned short)player;
 	setup.id.version = 1;
+	setup.ff_effects_max = VPAD_FF_EFFECTS;
 	snprintf(setup.name, sizeof(setup.name), "%s", VPAD_NAME);
 
 	if (ioctl(fd, UI_DEV_SETUP, &setup) < 0 ||
@@ -1594,6 +1841,7 @@ static void vpad_release(struct vpad *pad)
 	size_t c;
 	int a;
 
+	vpad_ff_stop(pad);
 	for (c = 0; c < PAD_CONTROL_COUNT; c++) {
 		if (!pad->pressed[c])
 			continue;
@@ -1646,8 +1894,12 @@ static void destroy_vpads(void)
 	size_t i;
 
 	for (i = 0; i < MAX_VPADS; i++) {
+		int e;
+
 		if (vpads[i].fd < 0)
 			continue;
+		for (e = 0; e < VPAD_FF_EFFECTS; e++)
+			vpad_ff_erase(&vpads[i], e);
 		(void)ioctl(vpads[i].fd, UI_DEV_DESTROY);
 		close(vpads[i].fd);
 		vpads[i].fd = -1;
@@ -3353,9 +3605,9 @@ int main(int argc, char **argv)
 	refresh_screen_off();
 
 	while (!stop_requested) {
-		struct pollfd pfds[2 + MAX_INPUTS + MAX_CLIENTS];
-		size_t kinds[2 + MAX_INPUTS + MAX_CLIENTS];
-		size_t indexes[2 + MAX_INPUTS + MAX_CLIENTS];
+		struct pollfd pfds[2 + MAX_INPUTS + MAX_CLIENTS + MAX_VPADS];
+		size_t kinds[2 + MAX_INPUTS + MAX_CLIENTS + MAX_VPADS];
+		size_t indexes[2 + MAX_INPUTS + MAX_CLIENTS + MAX_VPADS];
 		nfds_t count = 0;
 		int timeout;
 		int rc;
@@ -3398,6 +3650,17 @@ int main(int argc, char **argv)
 			pfds[count].fd = clients[i].fd;
 			pfds[count].events = POLLIN | POLLHUP | POLLERR;
 			kinds[count] = 3;
+			indexes[count] = i;
+			count++;
+		}
+
+		for (i = 0; i < MAX_VPADS; i++) {
+			if (vpads[i].fd < 0)
+				continue;
+
+			pfds[count].fd = vpads[i].fd;
+			pfds[count].events = POLLIN;
+			kinds[count] = 4;
 			indexes[count] = i;
 			count++;
 		}
@@ -3461,6 +3724,10 @@ int main(int argc, char **argv)
 			case 3:
 				if (indexes[i] < MAX_CLIENTS)
 					process_client(&clients[indexes[i]]);
+				break;
+			case 4:
+				if (indexes[i] < MAX_VPADS && vpads[indexes[i]].fd >= 0)
+					vpad_process(&vpads[indexes[i]]);
 				break;
 			default:
 				break;

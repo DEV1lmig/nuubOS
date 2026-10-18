@@ -2361,6 +2361,11 @@ int main(void)
 
 	signal(SIGTERM, signal_handler);
 	signal(SIGINT, signal_handler);
+	/* An inputd restart closes its socket while the controllers it drops
+	 * make us push the pad maps: the write fails (EPIPE) and the inotify
+	 * reconnect below picks the new inputd up; SIGPIPE used to kill us
+	 * instead (2026-10-18: no game gamepads until a reboot). */
+	signal(SIGPIPE, SIG_IGN);
 
 	refresh_active_user();
 	load_preferences();

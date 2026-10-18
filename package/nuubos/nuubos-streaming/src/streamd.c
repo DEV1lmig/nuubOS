@@ -1552,6 +1552,12 @@ static void steamlink_session_env(void)
 	setenv("QT_PLUGIN_PATH", STEAMLINK_QT "/plugins:" STEAMLINK_QT_VALVE "/plugins", 1);
 	setenv("LD_LIBRARY_PATH", STEAMLINK_APP "/lib:" STEAMLINK_QT_VALVE "/lib:" STEAMLINK_QT "/lib", 1);
 	setenv("SDL_GAMECONTROLLERCONFIG", STEAMLINK_GAMEPAD_MAPPING, 1);
+	/* Only inputd's game gamepads: SDL's HIDAPI drivers open the real
+	 * controller's /dev/hidraw past inputd's evdev grab (2026-10-18, an
+	 * 8BitDo over Bluetooth): the PC saw it next to its nuubOS Gamepad,
+	 * Start came twice (the game menu opened and closed) and the Quick
+	 * Menu button reached Steam as its Steam button. */
+	setenv("SDL_JOYSTICK_HIDAPI", "0", 1);
 	/* The Steam button sequences (PADPRESS) arrive while the Quick Menu
 	 * has the focus; inputd forwards nothing else meanwhile. */
 	setenv("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1", 1);

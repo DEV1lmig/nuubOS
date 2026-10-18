@@ -52,6 +52,19 @@ stop_service()
 	fi
 
 	kill -TERM "$PID" 2>/dev/null || true
+
+	# A start right after (stop + start, tools/deploy-target.sh) found the
+	# exiting daemon still in the pidfile and started nothing (2026-10-18):
+	# wait for it to go (SIGKILL after 2 s).
+	TRIES=0
+	while pid_is_inputd "$PID"; do
+		TRIES=$((TRIES + 1))
+		if [ "$TRIES" -gt 20 ]; then
+			kill -KILL "$PID" 2>/dev/null || true
+			break
+		fi
+		sleep 0.1
+	done
 }
 
 restart_service()

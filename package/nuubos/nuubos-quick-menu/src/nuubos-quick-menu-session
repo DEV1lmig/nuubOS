@@ -22,14 +22,34 @@ is_quick_menu_pid()
     [ "$CMD" = "$DAEMON" ]
 }
 
+# Every running instance, not only the pidfile one: the daemon writes the
+# pidfile after its startup, so a restart right after the labwc autostart
+# (first nuubos-wl-output-apply) used to leave the first instance running
+# next to the new one (two resident menus, ~85 MB each).
+running_pids()
+{
+    for DIR in /proc/[0-9]*; do
+        PID="${DIR#/proc/}"
+        is_quick_menu_pid "$PID" && echo "$PID"
+    done
+}
+
 stop_current()
 {
-    if [ -r "$PIDFILE" ]; then
-        PID="$(cat "$PIDFILE" 2>/dev/null)"
-        if is_quick_menu_pid "$PID"; then
-            kill "$PID" 2>/dev/null || true
+    PIDS="$(running_pids)"
+    [ -n "$PIDS" ] && kill $PIDS 2>/dev/null
+
+    # The old instance removes the pidfile and state files on exit: let it
+    # finish before the new one writes them (SIGKILL after 2 s).
+    TRIES=0
+    while [ -n "$(running_pids)" ]; do
+        TRIES=$((TRIES + 1))
+        if [ "$TRIES" -gt 20 ]; then
+            kill -9 $(running_pids) 2>/dev/null
+            break
         fi
-    fi
+        sleep 0.1
+    done
 
     rm -f \
         /run/nuubos/quick-menu.pid \
@@ -43,13 +63,8 @@ case "${1:-start}" in
         stop_current
         ;;
     start)
-        if [ -r "$PIDFILE" ]; then
-            PID="$(cat "$PIDFILE" 2>/dev/null)"
-            if is_quick_menu_pid "$PID"; then
-                exit 0
-            fi
-            rm -f "$PIDFILE"
-        fi
+        [ -n "$(running_pids)" ] && exit 0
+        rm -f "$PIDFILE"
         ;;
     *)
         echo "Usage: $0 {start|restart}" >&2
