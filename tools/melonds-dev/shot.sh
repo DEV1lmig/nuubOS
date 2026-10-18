@@ -4,9 +4,9 @@ V=$1; G=$2; SL=$3; T=${4:-15}
 for w in 1 2 3 4 5; do nuubos-emuctl status | grep -q "^state=idle" && break; sleep 2; done
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
 U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
-rm -rf /tmp/sh-states; cp -a $U/states/nds /tmp/sh-states; cp $C /tmp/sh-opts.cfg
-sed -i '/^melonds_accuracy = /d' $C; echo 'melonds_accuracy = "fast"' >> $C
-for kv in $OPTS; do k=${kv%%=*}; v=$(echo "${kv#*=}" | tr _ ' '); sed -i "/^$k = /d" $C; echo "$k = \"$v\"" >> $C; done
+. /tmp/opts.sh
+opt_set $C melonds_accuracy fast
+for kv in $OPTS; do opt_set $C ${kv%%=*} "$(echo "${kv#*=}" | tr _ ' ')"; done
 [ "$V" != stock ] && mount --bind /tmp/melonds-$V.so /usr/lib/libretro/melonds_nuubos_libretro.so
 case $SL in new|resume) LM=$SL;; *) LM=slot:$SL;; esac
 nuubos-emuctl launch $G $LM >/dev/null; sleep $T
@@ -16,5 +16,5 @@ touch /tmp/shot-ready; i=0; while [ -e /tmp/shot-ready ] && [ $i -lt 60 ]; do sl
 [ "$(pidof retroarch)" = "$P" ] && nuubos-emuctl quit >/dev/null
 for k in $(seq 1 30); do nuubos-emuctl status | grep -q "^state=idle" && break; sleep 1; done; sleep 2
 [ "$V" != stock ] && umount /usr/lib/libretro/melonds_nuubos_libretro.so
-rm -rf $U/states/nds; cp -a /tmp/sh-states $U/states/nds; cp /tmp/sh-opts.cfg $C
+opt_restore $C
 tail -3 /run/nuubos/emud.log

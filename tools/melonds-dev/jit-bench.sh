@@ -3,10 +3,10 @@
 G=$1; SL=$2; N=$3; shift 3
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
 U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
-rm -rf /tmp/jb-states; cp -a $U/states/nds /tmp/jb-states; cp $C /tmp/jb-opts.cfg
-sed -i 's/^melonds_frameskip = .*/melonds_frameskip = "disabled"/' $C
-sed -i '/^melonds_accuracy = /d' $C; echo 'melonds_accuracy = "fast"' >> $C
-for kv in $OPTS; do k=${kv%%=*}; v=$(echo "${kv#*=}" | tr _ ' '); sed -i "/^$k = /d" $C; echo "$k = \"$v\"" >> $C; done
+. /tmp/opts.sh
+opt_set $C melonds_frameskip disabled
+opt_set $C melonds_accuracy fast
+for kv in $OPTS; do opt_set $C ${kv%%=*} "$(echo "${kv#*=}" | tr _ ' ')"; done
 LIB=/usr/lib/libretro/melonds_nuubos_libretro.so
 r=1; while [ $r -le $N ]; do
   for x in "$@"; do
@@ -33,8 +33,7 @@ r=1; while [ $r -le $N ]; do
     sleep 2; umount $LIB
     echo "$r $x mhz $((fq/(nf+1))) $(awk '{w+=$2; c+=$3} END {printf "wall %.3f cpu %.3f n %d", w/NR, c/NR, NR}' /tmp/melon-bench.txt) | $(awk '{printf "%s ", $2}' /tmp/melon-bench.txt)"
     cp /tmp/melon-bench.txt /tmp/raw-$r-$x.txt
-    rm -rf $U/states/nds; cp -a /tmp/jb-states $U/states/nds
   done
   r=$((r+1))
 done
-cp /tmp/jb-opts.cfg $C
+opt_restore $C

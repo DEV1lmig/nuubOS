@@ -1,0 +1,20 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: report the core as PPSSPP-nuubOS
+
+The nuubOS build carries H700 patches and is bundled next to the
+upstream core users can download: RetroArch (netplay, per-core
+settings) tells them apart by library_name.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/libretro/libretro.cpp
++++ b/libretro/libretro.cpp
+@@ -1329,7 +1329,7 @@
+ void retro_get_system_info(struct retro_system_info *info)
+ {
+    *info = {};
+-   info->library_name     = "PPSSPP";
++   info->library_name     = "PPSSPP-nuubOS";
+    info->library_version  = PPSSPP_GIT_VERSION;
+    info->need_fullpath    = true;
+    info->valid_extensions = "elf|iso|cso|prx|pbp|chd";

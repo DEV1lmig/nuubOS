@@ -1,0 +1,67 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] GL: map push buffers unsynchronized on Mesa Panfrost
+
+Patch 0001 mapped the push buffers with GL_MAP_INVALIDATE_BUFFER_BIT on
+Panfrost so that a write never waited for the GPU; Panfrost then gives
+the buffer a new BO at every map, and the emulation thread page-faulted
+into fresh pages every frame (13.8 % of it in the kernel: handle_mm_fault,
+zeroing) while the GL thread allocated and mapped them. The push buffers
+already belong to one frame in flight each, so map them without
+invalidating and without synchronizing (new FRAME_UNMAP_UNSYNCHRONIZED).
+God of War: Chains of Olympus fight on the RG CubeXX: 28.6 -> 32
+emulated vblanks a second, emulation thread kernel time 1.4 %.
+
+Upstream-Status: Pending
+---
+--- a/Common/GPU/OpenGL/GLMemory.h
++++ b/Common/GPU/OpenGL/GLMemory.h
+@@ -13,6 +13,7 @@
+ 
+ 	MASK_FLUSH = 0x10,
+ 	MASK_INVALIDATE = 0x20,
++	MASK_UNSYNCHRONIZED = 0x40,
+ 
+ 	// Map/unmap the buffer each frame.
+ 	FRAME_UNMAP = 1,
+@@ -22,6 +23,9 @@
+ 	FLUSH_UNMAP = MASK_FLUSH,
+ 	// Map/unmap, invalidate on map, and explicit flush.
+ 	FLUSH_INVALIDATE_UNMAP = MASK_FLUSH | MASK_INVALIDATE,
++	// Map/unmap each frame without waiting for the GPU: the frame's buffers
++	// are its own (nuubOS, Mesa Panfrost).
++	FRAME_UNMAP_UNSYNCHRONIZED = FRAME_UNMAP | MASK_UNSYNCHRONIZED,
+ };
+ 
+ static inline int operator &(const GLBufferStrategy &lhs, const GLBufferStrategy &rhs) {
+--- a/Common/GPU/OpenGL/GLMemory.cpp
++++ b/Common/GPU/OpenGL/GLMemory.cpp
+@@ -21,6 +21,9 @@
+ 	if ((strategy & GLBufferStrategy::MASK_INVALIDATE) != 0) {
+ 		access |= GL_MAP_INVALIDATE_BUFFER_BIT;
+ 	}
++	if ((strategy & GLBufferStrategy::MASK_UNSYNCHRONIZED) != 0) {
++		access |= GL_MAP_UNSYNCHRONIZED_BIT;
++	}
+ 
+ 	void *p = nullptr;
+ 	bool allowNativeBuffer = strategy != GLBufferStrategy::SUBDATA;
+@@ -30,7 +33,7 @@
+ 		if (gl_extensions.ARB_buffer_storage || gl_extensions.EXT_buffer_storage) {
+ #if !PPSSPP_PLATFORM(IOS)
+ 			if (!hasStorage_) {
+-				GLbitfield storageFlags = access & ~(GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_FLUSH_EXPLICIT_BIT);
++				GLbitfield storageFlags = access & ~(GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_FLUSH_EXPLICIT_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+ #ifdef USING_GLES2
+ #ifdef GL_EXT_buffer_storage
+ 				glBufferStorageEXT(target_, size_, nullptr, storageFlags);
+--- a/Common/GPU/OpenGL/GLRenderManager.cpp
++++ b/Common/GPU/OpenGL/GLRenderManager.cpp
+@@ -97,7 +97,7 @@
+ 			// buffer that the previous frame still reads; an invalidating map
+ 			// gets a fresh buffer object instead and never waits.
+ 			if (gl_extensions.gpuVendor == GPU_VENDOR_MESA && strstr(gl_extensions.model, "Mali") != nullptr)
+-				bufferStrategy_ = GLBufferStrategy::INVALIDATE_UNMAP;
++				bufferStrategy_ = GLBufferStrategy::FRAME_UNMAP_UNSYNCHRONIZED;
+ 			else
+ 				bufferStrategy_ = GLBufferStrategy::SUBDATA;
+ 		}

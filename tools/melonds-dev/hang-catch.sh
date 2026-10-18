@@ -3,8 +3,8 @@
 V=$1; N=$2
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
 U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
-rm -rf /tmp/jb-states /tmp/hs; mkdir /tmp/hs; cp -a $U/states/nds /tmp/jb-states; cp $C /tmp/jb-opts.cfg
-echo 'melonds_accuracy = "fast"' >> $C
+rm -rf /tmp/hs; mkdir /tmp/hs; . /tmp/opts.sh
+opt_set $C melonds_accuracy fast
 mount --bind /tmp/melonds-$V.so /usr/lib/libretro/melonds_nuubos_libretro.so
 i=1; while [ $i -le $N ]; do
   nuubos-emuctl launch f0e8c9e2dd6510f0 slot:1 >/dev/null; sleep 12
@@ -21,5 +21,5 @@ i=1; while [ $i -le $N ]; do
 done
 for k in $(seq 1 30); do nuubos-emuctl status | grep -q "^state=idle" && break; sleep 1; done; sleep 2
 umount /usr/lib/libretro/melonds_nuubos_libretro.so
-rm -rf $U/states/nds; cp -a /tmp/jb-states $U/states/nds; cp /tmp/jb-opts.cfg $C
+opt_restore $C
 cd /tmp/hs && tar cf /tmp/hs.tar .

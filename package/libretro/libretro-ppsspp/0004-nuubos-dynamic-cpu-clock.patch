@@ -1,0 +1,268 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS dynamic CPU clock
+
+When the H700 cannot emulate a game at 60 vblanks a second, PPSSPP ran
+the whole game in slow motion (God of War: Chains of Olympus fights at
+28.6 of 60). New core option ppsspp_nuubos_dynamic_clock (enabled): once
+a second the libretro frontend lowers a cap on the emulated CPU clock
+(game clock -> 266 -> 222 -> 166 -> 111 MHz) below 57 vblanks, and
+raises it when the emulation thread's CPU time scaled by the next step
+still fits (busy x ratio < 88 %). scePower runs the CPU at min(game
+clock, cap) while the game keeps seeing its own clock; a game short of
+cycles then needs two vblanks a frame and draws 30 fps at its own
+speed. God of War with auto frameskip 1: 60 vblanks, 30 fps drawn,
+settling at 166/111 MHz. A clock the user locked wins; the lock option
+gains 111 and 166 MHz. Cap changes are logged on stderr, a per-second
+trace with NUUBOS_PPSSPP_TRACE or /run/nuubos/ppsspp-trace.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/Core/HLE/scePower.cpp
++++ b/Core/HLE/scePower.cpp
+@@ -68,6 +68,19 @@
+ static int pllFreq = 222000000;
+ static int busFreq = 111000000;
+ 
++// nuubOS: a cap (MHz, 0 = none) on the emulated CPU clock, set by the
++// libretro frontend when the host cannot keep up (dynamic clock): the CPU
++// runs at min(the game's clock, cap) while the game keeps seeing its own.
++static int nuubCapMhz = 0;
++static int nuubGameCpuMhz = 222;
++int PowerCpuMhzToHz(int desired, int pllHz);
++
++static void ApplyCpuClock(int cpufreq) {
++	nuubGameCpuMhz = cpufreq;
++	int mhz = (nuubCapMhz > 0 && nuubCapMhz < cpufreq) ? nuubCapMhz : cpufreq;
++	CoreTiming::SetClockFrequencyHz(PowerCpuMhzToHz(mhz, pllFreq));
++}
++
+ int GetLockedCPUSpeedMhz() {
+ 	return PSP_CoreParameter().compat.flags().RequireDefaultCPUClock ? 0 : g_Config.iLockedCPUSpeed;
+ }
+@@ -164,6 +177,11 @@
+ 	} else {
+ 		pllFreq = RealpllFreq;
+ 		busFreq = RealbusFreq;
++		// the game's clock is its PLL's (a state saved under a cap keeps
++		// the capped CoreTiming frequency)
++		nuubGameCpuMhz = RealpllFreq / 1000000;
++		if (nuubCapMhz > 0)
++			ApplyCpuClock(nuubGameCpuMhz);
+ 	}
+ 	DoArray(p, powerCbSlots, ARRAY_SIZE(powerCbSlots));
+ 	Do(p, volatileMemLocked);
+@@ -458,7 +476,7 @@
+ 		if (GetLockedCPUSpeedMhz() <= 0) {
+ 			pllFreq = RealpllFreq;
+ 			busFreq = RealbusFreq;
+-			CoreTiming::SetClockFrequencyHz(PowerCpuMhzToHz(cpufreq, pllFreq));
++			ApplyCpuClock(cpufreq);
+ 		}
+ 
+ 		// The delay depends on the source and destination frequency, most are 150ms.
+@@ -472,7 +490,7 @@
+ 		return hleDelayResult(hleNoLog(0), "scepower set clockFrequency", usec);
+ 	}
+ 	if (GetLockedCPUSpeedMhz() <= 0)
+-		CoreTiming::SetClockFrequencyHz(PowerCpuMhzToHz(cpufreq, pllFreq));
++		ApplyCpuClock(cpufreq);
+ 	return hleNoLog(0);
+ }
+ 
+@@ -483,7 +501,7 @@
+ 	if (GetLockedCPUSpeedMhz() > 0) {
+ 		return hleLogDebug(Log::sceMisc, 0, "locked by user config at %i", GetLockedCPUSpeedMhz());
+ 	}
+-	CoreTiming::SetClockFrequencyHz(PowerCpuMhzToHz(cpufreq, pllFreq));
++	ApplyCpuClock(cpufreq);
+ 	return hleLogDebug(Log::sceMisc, 0);
+ }
+ 
+@@ -637,3 +655,15 @@
+ void Register_sceSuspendForUser() {
+ 	RegisterHLEModule("sceSuspendForUser", ARRAY_SIZE(sceSuspendForUser), sceSuspendForUser);
+ }
++
++// nuubOS dynamic clock (see nuubCapMhz).
++void __PowerSetCpuClockCap(int mhz) {
++	if (GetLockedCPUSpeedMhz() > 0 || mhz == nuubCapMhz)
++		return;
++	nuubCapMhz = mhz;
++	ApplyCpuClock(nuubGameCpuMhz);
++}
++
++int __PowerGetGameCpuMhz() {
++	return nuubGameCpuMhz;
++}
+--- a/Core/HLE/scePower.h
++++ b/Core/HLE/scePower.h
+@@ -30,3 +30,7 @@
+ 
+ // Returns 0 for default.
+ int GetLockedCPUSpeedMhz();
++
++// nuubOS dynamic clock: a cap on the emulated CPU clock (0 = none).
++void __PowerSetCpuClockCap(int mhz);
++int __PowerGetGameCpuMhz();
+--- a/libretro/libretro.cpp
++++ b/libretro/libretro.cpp
+@@ -485,6 +485,9 @@
+    }
+ }
+ 
++// nuubOS dynamic clock (nuubos_clock_governor)
++static bool nuubos_dynamic_clock = true;
++
+ static void check_variables(CoreParameter &coreParam)
+ {
+    check_dynamic_variables(coreParam);
+@@ -590,6 +593,10 @@
+          g_Config.bForceLagSync = true;
+    }
+ 
++   var.key = "ppsspp_nuubos_dynamic_clock";
++   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
++      nuubos_dynamic_clock = strcmp(var.value, "disabled") != 0;
++
+    var.key = "ppsspp_locked_cpu_speed";
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+       g_Config.iLockedCPUSpeed = atoi(var.value);
+@@ -1358,6 +1365,7 @@
+    std::atomic<EmuThreadState> emuThreadState(EmuThreadState::DISABLED);
+ 
+    static std::thread emuThread;
++   pthread_t EmuThreadHandle() { return emuThread.native_handle(); }
+    static void EmuFrame()
+    {
+       ctx->SetRenderTarget();
+@@ -1702,8 +1710,98 @@
+    __CtrlSetAnalogXY(CTRL_STICK_RIGHT, x_right, y_right);
+ }
+ 
++#include "Core/HW/Display.h"
++#include "Core/HLE/scePower.h"
++#include <pthread.h>
++#include <time.h>
++#include <unistd.h>
++
++/*
++ * nuubOS dynamic clock (ppsspp_nuubos_dynamic_clock, H700): when the host
++ * cannot emulate 60 vblanks a second, the emulated CPU clock is capped a
++ * step lower (game clock -> 266 -> 222 -> 166 -> 111 MHz): a game that
++ * then needs two vblanks a frame draws 30 fps at full game speed instead
++ * of running in slow motion. Once a second: below 57 vblanks the cap goes
++ * down a step; at full speed it goes up when the emulation thread's CPU
++ * time, scaled by the next step, still fits (busy x ratio < 88 %). God of
++ * War: Chains of Olympus fights: 28.6 vblanks a second at 333 MHz, 60 at
++ * 111 MHz (with frameskip). A clock the user locked wins.
++ */
++namespace Libretro { extern bool useEmuThread; pthread_t EmuThreadHandle(); }
++
++static void nuubos_clock_governor(void)
++{
++   static const int caps[] = { 0, 266, 222, 166, 111 };
++   static int frames, level, hold;
++   static double last_wall, last_cpu;
++   float vps, fps, actual;
++   double wall, cpu = 0.0, busy = 0.0;
++   struct timespec t;
++
++   if (++frames < 60)
++      return;
++   frames = 0;
++   if (!nuubos_dynamic_clock || g_Config.iLockedCPUSpeed > 0)
++   {
++      if (level)
++         __PowerSetCpuClockCap(level = 0);
++      return;
++   }
++   __DisplayGetFPS(&vps, &fps, &actual);
++   clock_gettime(CLOCK_MONOTONIC, &t);
++   wall = t.tv_sec + t.tv_nsec / 1e9;
++   if (Libretro::useEmuThread)
++   {
++      clockid_t id;
++      if (pthread_getcpuclockid(Libretro::EmuThreadHandle(), &id) == 0 && clock_gettime(id, &t) == 0)
++         cpu = t.tv_sec + t.tv_nsec / 1e9;
++   }
++   if (last_wall > 0.0 && wall > last_wall)
++      busy = (cpu - last_cpu) / (wall - last_wall);
++   last_wall = wall;
++   last_cpu = cpu;
++
++   {
++      static int trace = -1;
++      if (trace < 0)
++         trace = getenv("NUUBOS_PPSSPP_TRACE") != nullptr || access("/run/nuubos/ppsspp-trace", F_OK) == 0;
++      if (trace)
++      {
++         char b[128];
++         int n = snprintf(b, sizeof(b), "ppsspp-nuubos: vps %.1f fps %.1f busy %.2f cap %d\n", vps, actual, busy, caps[level]);
++         (void)!write(2, b, n);
++      }
++   }
++   int was = level;
++   if (hold > 0)
++      hold--;
++   else if (vps < 57.0f && level < 4)
++   {
++      __PowerSetCpuClockCap(caps[++level]);
++      hold = 2;
++   }
++   else if (level > 0 && vps >= 59.0f && busy > 0.0)
++   {
++      int game = __PowerGetGameCpuMhz();
++      int now  = caps[level] < game ? caps[level] : game;
++      int next = (level == 1 || caps[level - 1] > game) ? game : caps[level - 1];
++      if (busy * next / now < 0.88)
++      {
++         __PowerSetCpuClockCap(caps[--level]);
++         hold = 3;
++      }
++   }
++   if (level != was)
++   {
++      char b[96];
++      int n = snprintf(b, sizeof(b), "ppsspp-nuubos: CPU clock cap %d MHz (%.1f vblanks/s)\n", caps[level], vps);
++      (void)!write(2, b, n);
++   }
++}
++
+ void retro_run(void)
+ {
++   nuubos_clock_governor();
+    if (g_pendingBoot) {
+       BootState state = PSP_InitUpdate(&g_bootErrorString);
+       switch (state) {
+--- a/libretro/libretro_core_options.h
++++ b/libretro/libretro_core_options.h
+@@ -183,6 +183,20 @@
+       "disabled"
+    },
+    {
++      "ppsspp_nuubos_dynamic_clock",
++      "Dynamic CPU Clock (nuubOS)",
++      NULL,
++      "When the device cannot emulate the game at full speed, the emulated CPU clock goes down step by step: the game then draws fewer frames at its own speed instead of running in slow motion. Ignored when the CPU clock is locked.",
++      NULL,
++      "system",
++      {
++         { "enabled",  NULL },
++         { "disabled", NULL },
++         { NULL, NULL },
++      },
++      "enabled"
++   },
++   {
+       "ppsspp_locked_cpu_speed",
+       "Locked CPU Speed",
+       NULL,
+@@ -191,6 +205,8 @@
+       "system",
+       {
+          { "disabled", NULL },
++         { "111MHz",   NULL },
++         { "166MHz",   NULL },
+          { "222MHz",   NULL },
+          { "266MHz",   NULL },
+          { "333MHz",   NULL },
