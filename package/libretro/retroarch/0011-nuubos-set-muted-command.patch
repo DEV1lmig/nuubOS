@@ -1,0 +1,80 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] command: nuubOS SET_MUTED
+
+stdin SET_MUTED <0|1> silences the audio output at runtime: nuubos-emud
+sends it when a game is closed, so the quit save state (the game runs
+unpaused while it is written) and the content close no longer play
+stuttering audio. audio_mute_enable would be saved in retroarch.cfg and
+AUDIO_FLAG_MUTED is cleared by fast-forward and rewind, so the flag is
+separate.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/audio/audio_driver.c
++++ b/audio/audio_driver.c
+@@ -445,6 +445,11 @@
+  * @param is_slowmotion True if the core is currently running in slow motion.
+  * @param is_fastmotion True if the core is currently running in fast-forward.
+  **/
++/* nuubOS SET_MUTED: silence for a session manager, never saved in the
++ * config (audio_mute_enable is) and not cleared by fast-forward/rewind
++ * like AUDIO_FLAG_MUTED. */
++bool audio_driver_nuubos_muted = false;
++
+ static void audio_driver_flush(audio_driver_state_t *audio_st,
+       float slowmotion_ratio,
+       const int16_t *data, size_t samples,
+@@ -452,7 +457,8 @@
+ {
+    struct resampler_data src_data;
+    float audio_volume_gain           =
+-         (audio_st->mute_enable || audio_st->flags & AUDIO_FLAG_MUTED)
++         (audio_st->mute_enable || audio_st->flags & AUDIO_FLAG_MUTED
++               || audio_driver_nuubos_muted)
+                ? 0.0f
+                : audio_st->volume_gain;
+ 
+--- a/command.c
++++ b/command.c
+@@ -809,6 +809,23 @@
+    return true;
+ }
+ 
++/* Explicit silence for an external session manager (nuubOS: from the
++ * quit request on, so the quit save and the content close do not play
++ * stuttering audio). Runtime only, never written to the config. */
++extern bool audio_driver_nuubos_muted;
++
++bool command_set_muted(command_t *cmd, const char *arg)
++{
++   char reply[64];
++   size_t _len;
++
++   audio_driver_nuubos_muted = (strtol(arg, NULL, 10) != 0);
++   _len = snprintf(reply, sizeof(reply), "SET_MUTED %d\n",
++         audio_driver_nuubos_muted ? 1 : 0);
++   cmd->replier(cmd, reply, _len);
++   return true;
++}
++
+ /* Frames presented per second since the previous GET_FPS (nuubOS
+  * performance overlay, asked about once a second). */
+ bool command_get_fps(command_t *cmd, const char *arg)
+--- a/command.h
++++ b/command.h
+@@ -432,6 +432,7 @@
+ bool command_load_state_slot(command_t *cmd, const char* arg);
+ bool command_save_state_slot(command_t *cmd, const char* arg);
+ bool command_set_paused(command_t *cmd, const char* arg);
++bool command_set_muted(command_t *cmd, const char* arg);
+ bool command_get_fps(command_t *cmd, const char* arg);
+ bool command_osd_text(command_t *cmd, const char* arg);
+ bool command_cheats_load(command_t *cmd, const char* arg);
+@@ -469,6 +470,7 @@
+    { "LOAD_STATE_SLOT",command_load_state_slot, "<slot number>"},
+    { "SAVE_STATE_SLOT",command_save_state_slot, "<slot number>"},
+    { "SET_PAUSED",     command_set_paused,      "<0|1>"},
++   { "SET_MUTED",      command_set_muted,       "<0|1>"},
+    { "GET_FPS",        command_get_fps,         "No argument"},
+    { "OSD_TEXT",       command_osd_text,        "<text>"},
+    { "CHEATS_LOAD",    command_cheats_load,     "<cheat file>"},

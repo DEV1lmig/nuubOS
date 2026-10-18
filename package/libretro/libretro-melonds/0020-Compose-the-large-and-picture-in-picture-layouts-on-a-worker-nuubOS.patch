@@ -1,0 +1,197 @@
+From: nuubOS <nuubos@localhost>
+Date: Sun, 18 Oct 2026 19:00:00 +0200
+Subject: [PATCH] Compose the large and picture-in-picture layouts on a worker
+ (nuubOS)
+
+The Large and Picture in Picture layouts scale the main screen 2-3x and
+blend the other one on the CPU, on the emulation thread: Mario Kart DS
+spent ~3 ms more a frame there than in Top/Bottom (main thread 76 % ->
+96 % busy, 57-59 fps in Picture in Picture). A worker thread now composes
+frame N into one of two buffers while frame N+1 is emulated (the front
+framebuffer stays untouched until the frame after) and frame N goes to
+RetroArch one frame later; the first composed frame is waited for, a
+layout change never shows a stale frame. The worker drops the emulation
+thread's real-time priority and stops when the game unloads.
+---
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -1,8 +1,12 @@
+ #include <algorithm>
++#include <condition_variable>
+ #include <ctime>
++#include <mutex>
+ #include <pthread.h>
+ #include <sched.h>
++#include <stdlib.h>
+ #include <string>
++#include <thread>
+ #include <vector>
+ 
+ #include <libretro.h>
+@@ -711,6 +715,134 @@
+    audio_cb(buffer, size);
+ }
+ 
++/* nuubOS: the composed layouts (Large, Picture in Picture) scale the main
++ * screen 2-3x and blend the other one on the CPU; on the emulation thread
++ * that cost Mario Kart DS ~3 ms a frame (main thread 76 % -> 96 %, 57-59
++ * fps in PiP). A worker composes frame N into one of two buffers while
++ * frame N+1 is emulated (melonDS leaves the front framebuffer alone until
++ * the frame after), and frame N is handed to RetroArch one frame later. */
++struct ComposeJob
++{
++   ScreenLayoutData data;
++   const uint32_t* big;
++   const uint32_t* small;
++   bool cursor;
++   int32_t cursor_x;
++   int32_t cursor_y;
++};
++
++static std::thread compose_thread;
++static std::mutex compose_mutex;
++static std::condition_variable compose_cv;
++static ComposeJob compose_job;
++static bool compose_pending = false;
++static bool compose_busy = false;
++static bool compose_quit = false;
++static uint32_t* compose_out[2] = { nullptr, nullptr };
++static size_t compose_size = 0;
++/* The buffer holding the last composed frame, -1 = none yet. */
++static int compose_ready = -1;
++
++static void compose_worker(void)
++{
++#if defined(__linux__)
++   /* Created by the real-time emulation thread: do not inherit it. */
++   struct sched_param sp = {};
++   pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
++#endif
++   for (;;)
++   {
++      ComposeJob job;
++      {
++         std::unique_lock<std::mutex> lock(compose_mutex);
++         compose_cv.wait(lock, [] { return compose_pending || compose_quit; });
++         if (compose_quit)
++            return;
++         job = compose_job;
++         compose_pending = false;
++         compose_busy = true;
++      }
++      compose_screens(&job.data, job.big, job.small);
++      if (job.cursor)
++         draw_cursor(&job.data, job.cursor_x, job.cursor_y);
++      {
++         std::lock_guard<std::mutex> lock(compose_mutex);
++         compose_busy = false;
++      }
++      compose_cv.notify_all();
++   }
++}
++
++static void compose_wait(void)
++{
++   std::unique_lock<std::mutex> lock(compose_mutex);
++   compose_cv.wait(lock, [] { return !compose_pending && !compose_busy; });
++}
++
++static void compose_stop(void)
++{
++   if (compose_thread.joinable())
++   {
++      {
++         std::lock_guard<std::mutex> lock(compose_mutex);
++         compose_quit = true;
++      }
++      compose_cv.notify_all();
++      compose_thread.join();
++      compose_quit = false;
++      compose_pending = false;
++      compose_busy = false;
++   }
++   free(compose_out[0]);
++   free(compose_out[1]);
++   compose_out[0] = compose_out[1] = nullptr;
++   compose_size = 0;
++   compose_ready = -1;
++}
++
++static void present_composed(const uint32_t* big, const uint32_t* small)
++{
++   ScreenLayoutData *d = &screen_layout_data;
++   size_t size = (size_t)d->buffer_width * d->buffer_height * sizeof(uint32_t);
++   int out;
++
++   if (!compose_thread.joinable())
++      compose_thread = std::thread(compose_worker);
++   compose_wait();
++   if (size != compose_size)
++   {
++      free(compose_out[0]);
++      free(compose_out[1]);
++      compose_out[0] = (uint32_t*)malloc(size);
++      compose_out[1] = (uint32_t*)malloc(size);
++      compose_size = (compose_out[0] && compose_out[1]) ? size : 0;
++      compose_ready = -1;
++      if (!compose_size)
++         return;
++   }
++   out = compose_ready == 0 ? 1 : 0;
++   {
++      std::lock_guard<std::mutex> lock(compose_mutex);
++      compose_job.data = *d;
++      compose_job.data.buffer_ptr = (uint16_t*)compose_out[out];
++      compose_job.big = big;
++      compose_job.small = small;
++      compose_job.cursor = cursor_enabled(&input_state);
++      compose_job.cursor_x = input_state.touch_x;
++      compose_job.cursor_y = input_state.touch_y;
++      compose_pending = true;
++   }
++   compose_cv.notify_all();
++   if (compose_ready < 0)
++   {
++      /* First composed frame: wait for it instead of showing nothing. */
++      compose_wait();
++      compose_ready = out;
++   }
++   video_cb((uint8_t*)compose_out[compose_ready], d->buffer_width, d->buffer_height, d->buffer_width * sizeof(uint32_t));
++   compose_ready = out;
++}
++
+ static void render_frame(void)
+ {
+    if (current_renderer == CurrentRenderer::None)
+@@ -746,17 +878,17 @@
+    #endif
+       int frontbuf = GPU::FrontBuffer;
+ 
++      /* Back to a composed layout later: never show its stale frame. */
++      if(!screen_layout_data.composed)
++         compose_ready = -1;
++
+       if(screen_layout_data.composed)
+       {
+          bool top = screen_layout_data.displayed_layout == ScreenLayout::LargeTop ||
+                     screen_layout_data.displayed_layout == ScreenLayout::PipTop;
+ 
+-         compose_screens(&screen_layout_data, GPU::Framebuffer[frontbuf][top ? 0 : 1],
+-                         GPU::Framebuffer[frontbuf][top ? 1 : 0]);
+-         if(cursor_enabled(&input_state))
+-            draw_cursor(&screen_layout_data, input_state.touch_x, input_state.touch_y);
+-
+-         video_cb((uint8_t*)screen_layout_data.buffer_ptr, screen_layout_data.buffer_width, screen_layout_data.buffer_height, screen_layout_data.buffer_width * sizeof(uint32_t));
++         present_composed(GPU::Framebuffer[frontbuf][top ? 0 : 1],
++                          GPU::Framebuffer[frontbuf][top ? 1 : 0]);
+       }
+       else if(screen_layout_data.hybrid)
+       {
+@@ -1073,6 +1205,7 @@
+ 
+ void retro_unload_game(void)
+ {
++   compose_stop();
+    if (emu_thread_rt)
+       set_emu_thread_rt(false);
+    NDS::DeInit();

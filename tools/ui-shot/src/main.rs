@@ -190,6 +190,27 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
         shot(win, w, h, "qm_game_slot_dropdown");
     }
     qm.set_game_slot_dropdown_open(false);
+    /* NDS game: Stylus (42, on) and Screen Layout (43) before Restart Game,
+     * then the layout dropdown. */
+    qm.set_game_nds(true);
+    qm.set_game_confirm_index(-1);
+    qm.set_game_stylus_on(true);
+    qm.set_game_nds_layout(1);
+    for (name, sel) in [("qm_game_nds_stylus", 42), ("qm_game_nds_layout", 43), ("qm_game_nds_restart", 12)] {
+        qm.set_selected_index(sel);
+        for (w, h) in sizes {
+            shot(win, w, h, name);
+        }
+    }
+    qm.set_selected_index(43);
+    qm.set_game_layout_dropdown_index(2);
+    qm.set_game_layout_dropdown_open(true);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_nds_layout_dropdown");
+    }
+    qm.set_game_layout_dropdown_open(false);
+    qm.set_game_nds(false);
+    qm.set_game_stylus_on(false);
     /* Cheats (40) and Netplay (41) with their sheets. */
     let model = |v: Vec<&str>| ModelRc::from(Rc::new(VecModel::from(v.into_iter().map(SharedString::from).collect::<Vec<_>>())));
     let kinds = |v: Vec<i32>| ModelRc::from(Rc::new(VecModel::from(v)));

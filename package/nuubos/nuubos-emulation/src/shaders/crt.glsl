@@ -5,9 +5,13 @@
  * pixel perfect (integer scaled) picture: neighbouring pixels melt into
  * each other horizontally the way a composite/RF signal blurred them, and
  * every source line becomes a beam whose height grows with its brightness
- * (dark gaps between dark lines, bright lines blooming). Below 2x vertical
- * scale there is no room for scanlines and only the horizontal blend is
- * applied. Single pass, two texture fetches: negligible on Mali-G31.
+ * (dark gaps between dark lines, bright lines blooming). A TV traced at
+ * most ~288 lines a field, so taller sources (a core's 2x internal
+ * resolution such as PS1 enhancement, 480i/576i) get one beam per 2 rows
+ * (3 above 576) while the colour keeps every row. Below 2x vertical scale
+ * of those beam lines there is no room for scanlines and only the
+ * horizontal blend is applied. Single pass, two texture fetches:
+ * negligible on Mali-G31.
  */
 
 #pragma parameter CRT_SCANLINES "Scanline strength" 0.25 0.0 1.0 0.05
@@ -72,12 +76,17 @@ uniform float CRT_BLEND;
 void main()
 {
     vec2 texel = vTexCoord * TextureSize;
-    float s = OutputSize.y / InputSize.y;
+    /* Source rows per beam line: 1 up to 288 lines, 2 up to 576, ... (PS1
+     * at 2x internal resolution lost its scanlines, user report
+     * 2026-10-18). */
+    float k = floor((InputSize.y - 1.0) / 288.0) + 1.0;
+    float s = OutputSize.y * k / InputSize.y;
     /* A fractional vertical scale (4:3 on a square screen) gives lines 2
      * or 3 rows: sample the pixel's own position. */
     bool whole = abs(s - floor(s + 0.5)) < 0.01;
     vec2 base = floor(texel);
     vec2 f = texel - base;
+    float fl = fract(texel.y / k);
 
     /* Horizontal melt: towards the neighbour on the near side, only in the
      * outer CRT_BLEND of the pixel, at most half way. */
@@ -91,7 +100,7 @@ void main()
     /* Beam: centred half an output row above the pixel centre, so at 2x
      * the first row is the beam and the second the gap. */
     float centre = whole ? 0.5 - 0.5 / s : 0.5;
-    float row = whole ? (floor(f.y * s) + 0.5) / s : f.y;
+    float row = whole ? (floor(fl * s) + 0.5) / s : fl;
     float dy = row - centre;
     float lum = dot(col, vec3(0.299, 0.587, 0.114));
     float width = mix(0.20, 0.34, lum);

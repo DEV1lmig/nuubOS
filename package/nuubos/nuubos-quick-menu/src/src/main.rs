@@ -2712,6 +2712,10 @@ struct GameSnapshot {
     netplay: String,
     net_peers: i32,
     net_peer: String,
+    /* melonDS-nuubOS: screen layout index (None for other cores) and
+     * whether the stylus mode is on (Stylus / Screen Layout rows). */
+    nds_layout: Option<i32>,
+    stylus: bool,
 }
 
 fn parse_game_snapshot(reply: &str) -> GameSnapshot {
@@ -2732,10 +2736,51 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
             Some(("netplay", value)) => snapshot.netplay = value.to_owned(),
             Some(("netplay_peers", value)) => snapshot.net_peers = value.parse().unwrap_or(0),
             Some(("netplay_peer", value)) => snapshot.net_peer = value.to_owned(),
+            Some(("nds_layout", value)) => {
+                snapshot.nds_layout = value.parse::<i32>().ok().filter(|v| (0..4).contains(v))
+            }
+            Some(("stylus", value)) => snapshot.stylus = value != "off",
             _ => {}
         }
     }
     snapshot
+}
+
+/* GAME → Stylus (42) and Screen Layout (43), melonDS-nuubOS only: the
+ * same actions as the Stylus and Screen Layout hotkeys. The stylus moves
+ * with the control inputd picks for the controller that opened the menu
+ * (right stick, else left stick, else D-pad). */
+const STYLUS_ROW: i32 = 42;
+const LAYOUT_ROW: i32 = 43;
+
+fn toggle_stylus(ui: &QuickMenuWindow) {
+    let control = input_command("STATUS")
+        .ok()
+        .and_then(|reply| {
+            reply
+                .lines()
+                .find_map(|line| line.strip_prefix("stylus_control=").map(str::to_owned))
+        })
+        .filter(|c| matches!(c.as_str(), "right" | "left" | "dpad"))
+        .unwrap_or_else(|| "right".to_owned());
+    if let Err(error) = emulation_command(&format!("HOTKEY\tstylus {control}")) {
+        eprintln!("quick-menu: game stylus failed={error}");
+    }
+    apply_game_snapshot(ui, &read_game_snapshot());
+}
+
+fn open_layout_dropdown(ui: &QuickMenuWindow) {
+    ui.set_game_layout_dropdown_index(ui.get_game_nds_layout());
+    ui.set_game_layout_dropdown_open(true);
+}
+
+fn apply_layout_dropdown(ui: &QuickMenuWindow) {
+    let layout = ui.get_game_layout_dropdown_index();
+    if let Err(error) = emulation_command(&format!("NDS_LAYOUT\t{layout}")) {
+        eprintln!("quick-menu: game NDS_LAYOUT failed={error}");
+    }
+    ui.set_game_layout_dropdown_open(false);
+    apply_game_snapshot(ui, &read_game_snapshot());
 }
 
 /* State Slot dropdown: every slot with when it was saved, or Empty. */
@@ -2924,9 +2969,20 @@ fn read_game_snapshot() -> GameSnapshot {
 }
 
 fn apply_game_snapshot(ui: &QuickMenuWindow, snapshot: &GameSnapshot) {
-    if !snapshot.running && (8..TASK_ROW).contains(&ui.get_selected_index()) {
+    let selected = ui.get_selected_index();
+    if !snapshot.running && ((8..TASK_ROW).contains(&selected) || matches!(selected, STYLUS_ROW | LAYOUT_ROW)) {
         ui.set_selected_index(3);
     }
+    let nds = snapshot.running && snapshot.nds_layout.is_some();
+    if !nds && matches!(ui.get_selected_index(), STYLUS_ROW | LAYOUT_ROW) {
+        ui.set_selected_index(8);
+    }
+    if !nds {
+        ui.set_game_layout_dropdown_open(false);
+    }
+    ui.set_game_nds(nds);
+    ui.set_game_nds_layout(snapshot.nds_layout.unwrap_or(0));
+    ui.set_game_stylus_on(nds && snapshot.stylus);
     if !snapshot.running {
         ui.set_game_confirm_index(-1);
     }
@@ -4382,6 +4438,9 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
         if ui.get_players_visible() {
             indices.push(PLAYERS_ROW);
         }
+        if ui.get_game_nds() {
+            indices.extend_from_slice(&[STYLUS_ROW, LAYOUT_ROW]);
+        }
         indices.extend_from_slice(&[12, CHEATS_ROW, NET_ROW, 13, 18, 28, 14]);
     }
     if ui.get_stream_section_visible() {
@@ -5131,6 +5190,7 @@ fn unmap_overlay(
     state.destroy_overlay();
     let _ = ui.hide();
     ui.set_game_slot_dropdown_open(false);
+    ui.set_game_layout_dropdown_open(false);
     ui.set_players_dropdown_open(false);
     ui.set_cast_dropdown_open(false);
     ui.set_game_sheet_open(false);
@@ -5239,6 +5299,7 @@ fn open_power_osd(
     ui.set_power_osd_confirm(false);
     ui.set_power_osd_open(true);
     ui.set_game_slot_dropdown_open(false);
+    ui.set_game_layout_dropdown_open(false);
     ui.set_audio_output_dropdown_open(false);
     ui.set_cast_dropdown_open(false);
     ui.set_game_sheet_open(false);
@@ -5345,8 +5406,9 @@ fn activate_stream_row(
     Ok(())
 }
 
-/* GAME rows (8 Resume .. 12 Restart, 40 Cheats, 41 Netplay, 13 RetroArch
- * Advanced, 18 Screenshot, 28 Performance Overlay, 14 Quit).
+/* GAME rows (8 Resume .. 11 State Slot, NDS 42 Stylus and 43 Screen
+ * Layout, 12 Restart, 40 Cheats, 41 Netplay, 13 RetroArch Advanced, 18
+ * Screenshot, 28 Performance Overlay, 14 Quit).
  * The screenshot is RetroArch's own rendering, so the menu is not in it.
  * Load State, Restart Game and Quit Game
  * lose unsaved progress and take a second press (EPIC-005 safety rules). */
@@ -5392,6 +5454,15 @@ fn activate_game_row(
             resume = false;
         }
         18 => game_action("SCREENSHOT"),
+        STYLUS_ROW if ui.get_game_nds() => {
+            /* Switch, applied live; the menu stays open like row 28. */
+            toggle_stylus(ui);
+            return redraw_overlay(ui, queue, state, qh, conn);
+        }
+        LAYOUT_ROW if ui.get_game_nds() => {
+            open_layout_dropdown(ui);
+            return redraw_overlay(ui, queue, state, qh, conn);
+        }
         28 => {
             /* The user's Settings -> Gaming switch; emud applies it live.
              * The menu stays open (the overlay shows once it closes). */
@@ -5528,6 +5599,18 @@ fn handle_event(
         return handle_power_osd(
             event, ui, notifier, mapped, pending_sleep, brightness_dirty, queue, state, qh, conn,
         );
+    }
+
+    if *mapped && ui.get_game_layout_dropdown_open() {
+        match event.action.as_str() {
+            "menu_up" => ui.set_game_layout_dropdown_index((ui.get_game_layout_dropdown_index() + 3) % 4),
+            "menu_down" => ui.set_game_layout_dropdown_index((ui.get_game_layout_dropdown_index() + 1) % 4),
+            "menu_confirm" => apply_layout_dropdown(ui),
+            "menu_back" => ui.set_game_layout_dropdown_open(false),
+            _ => {}
+        }
+        redraw_overlay(ui, queue, state, qh, conn)?;
+        return Ok(());
     }
 
     if *mapped && ui.get_game_slot_dropdown_open() {

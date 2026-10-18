@@ -130,18 +130,22 @@
 #define OSD_FONT "/usr/share/fonts/cantarell/Cantarell-Bold.otf"
 #define DISPLAY_CONF SHARE_DIR "/display.conf"
 /* Game render height on HDMI: RetroArch (patch 0005) draws a buffer of
- * this many lines and the display engine scales it to the 1080p mode on
- * its plane (kernel patch 0031), so the frontend's per-pixel cost stays
- * near the handheld panel's (N64 at a 1080p buffer: ~1/3 of full speed).
- * 360 keeps Majora's Mask PAL at full speed; 240p content then fits at
- * 1.5x, below the CRT look's 2x scanlines. display.conf field 3 overrides
- * it per system (0 = native resolution). The panel never uses it. */
-#define GAME_HDMI_LINES 360
-/* CRT look scanline strength on HDMI (crt.glsl
- * CRT_SCANLINES; the panel keeps the shaders' 0.25, user request
- * 2026-10-11). The display engine scales the 480-line buffer 2.25x to
- * 1080p with a filtering scaler, which smooths the 2-row beam/gap pattern
- * away at 0.25 (user report 2026-10-17: "almost no CRT effect on HDMI"). */
+ * this many lines, never more than its logical window (1280x720 on a
+ * 1080p TV at the HDMI output scale 1.5), and the display engine scales it
+ * to the mode on its plane (kernel patch 0031). 720: 240p content at an
+ * integer 3x (GBA 4x) inside the buffer, full speed measured 2026-10-18 on
+ * nes snes megadrive pcengine psx gba gbc n64 psp nds (GPU fragment
+ * 36-60 %); a true 1920x1080 buffer saturates the GPU (CRT systems 38-42
+ * fps). display.conf field 3 overrides it per system (0 = native
+ * resolution, lower = cheaper for 3D-heavy systems). The panel never
+ * uses it. */
+#define GAME_HDMI_LINES 720
+/* CRT look scanline strength on HDMI when the game renders fewer than 720
+ * lines (crt.glsl CRT_SCANLINES; the panel and 720 lines keep the
+ * shaders' 0.25, user request 2026-10-11, 720p upscaled to 1080p approved
+ * 2026-10-18). The display engine scales a 480-line buffer 2.25x to 1080p
+ * with a filtering scaler, which smooths the 2-row beam/gap pattern away
+ * at 0.25 (user report 2026-10-17: "almost no CRT effect on HDMI"). */
 #define CRT_SCANLINES_HDMI 0.55
 #ifndef HDMI_ENABLED
 #define HDMI_ENABLED "/sys/class/drm/card0-HDMI-A-1/enabled"
@@ -393,6 +397,7 @@ struct session {
 	char bezel_env[1024];
 	int nds_layout;
 	bool stylus;
+	char stylus_control[8];
 	/* Core options this session set in the user's file (per-game
 	 * accuracy) and their values to put back at exit. */
 	int opt_restore_count;
@@ -427,6 +432,11 @@ struct game_overrides {
 	char accuracy[16];
 	char cheat_file[PATH_MAX];
 	char cheats[512];
+	/* melonDS-nuubOS: the screen layout (nds_layouts name) and stylus
+	 * (off|right|left|dpad) the user last chose in this game, restored at
+	 * its next launch (user request 2026-10-18). */
+	char nds_layout[16];
+	char stylus[8];
 };
 
 
@@ -964,6 +974,8 @@ static size_t build_status(char *out, size_t size)
 			 "netplay=%s\n"
 			 "netplay_peers=%d\n"
 			 "netplay_peer=%s\n"
+			 "nds_layout=%d\n"
+			 "stylus=%s\n"
 			 "quitting=%d\n"
 			 "end=1\n",
 			 state_name(),
@@ -985,6 +997,10 @@ static size_t build_status(char *out, size_t size)
 			 : session.netplay == NET_CLIENT ? "client"
 			 : session.net_launch[0] ? "starting" : "off",
 			 session.net_peers, session.net_peer,
+			 /* melonDS-nuubOS only (Quick Menu rows), else -1/off. */
+			 session.state != SESSION_IDLE && !strcmp(session.core, MELONDS_NUUBOS)
+			 ? session.nds_layout : -1,
+			 session.state != SESSION_IDLE && session.stylus ? session.stylus_control : "off",
 			 /* The game is closing: quit asked (its automatic save may
 			 * still run) or RetroArch exiting. The Quick Menu covers it
 			 * with the closing screen; not when it restarts as netplay
@@ -1471,6 +1487,10 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 			copy_text(o->cheat_file, sizeof(o->cheat_file), eq);
 		else if (!strcmp(line, "cheats"))
 			copy_text(o->cheats, sizeof(o->cheats), eq);
+		else if (!strcmp(line, "nds_layout"))
+			copy_text(o->nds_layout, sizeof(o->nds_layout), eq);
+		else if (!strcmp(line, "stylus"))
+			copy_text(o->stylus, sizeof(o->stylus), eq);
 	}
 	fclose(fp);
 }
@@ -1486,7 +1506,7 @@ static int save_overrides(const char *user, const char *game, const struct game_
 	overrides_path(user, game, path, sizeof(path));
 	/* Nothing overridden: no file, the game inherits everything. */
 	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
-	    !o->cheat_file[0] && !o->cheats[0])
+	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0])
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
 	if (mkdir_p(dir) != 0)
@@ -1507,6 +1527,10 @@ static int save_overrides(const char *user, const char *game, const struct game_
 		fprintf(fp, "cheat_file=%s\n", o->cheat_file);
 	if (o->cheats[0])
 		fprintf(fp, "cheats=%s\n", o->cheats);
+	if (o->nds_layout[0])
+		fprintf(fp, "nds_layout=%s\n", o->nds_layout);
+	if (o->stylus[0])
+		fprintf(fp, "stylus=%s\n", o->stylus);
 	if (ferror(fp))
 		rc = -1;
 	if (fclose(fp) != 0)
@@ -2244,6 +2268,7 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 	};
 	char screen[16];
 	char scan[64] = "";
+	int render;
 	bool crt;
 	bool bezel = false;
 	bool integer = true;
@@ -2278,7 +2303,8 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 		!strcmp(o->filter, "smooth") ? "true" : "false");
 
 	shader[0] = '\0';
-	if (crt && hdmi_active())
+	render = game_render_height(session.system);
+	if (crt && render > 0 && render < 720)
 		snprintf(scan, sizeof(scan), "CRT_SCANLINES = \"%.2f\"\n", CRT_SCANLINES_HDMI);
 	session.bezel_env[0] = '\0';
 	if (bezel) {
@@ -3378,8 +3404,18 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	if (!strcmp(session.core, MELONDS_NUUBOS)) {
 		char value[64];
 
-		/* The stylus starts off; the layout is the user's last one. */
-		write_core_option(path, "melonds_nuubos_stylus", "off");
+		/* Layout and stylus as last chosen in this game; else the
+		 * user's last layout and the stylus off. */
+		for (int i = 0; i < NDS_LAYOUTS; i++)
+			if (!strcmp(overrides.nds_layout, nds_layouts[i].name))
+				write_core_option(path, "melonds_screen_layout", nds_layouts[i].value);
+		if (!strcmp(overrides.stylus, "right") || !strcmp(overrides.stylus, "left") ||
+		    !strcmp(overrides.stylus, "dpad")) {
+			session.stylus = true;
+			copy_text(session.stylus_control, sizeof(session.stylus_control), overrides.stylus);
+		}
+		write_core_option(path, "melonds_nuubos_stylus",
+				  session.stylus ? session.stylus_control : "off");
 		if (read_core_option(path, "melonds_screen_layout", value, sizeof(value)))
 			for (int i = 0; i < NDS_LAYOUTS; i++)
 				if (!strcmp(value, nds_layouts[i].value))
@@ -3547,6 +3583,10 @@ static void request_quit(void)
 {
 	if (session.state != SESSION_RUNNING)
 		return;
+	/* Silent from here on (RetroArch patch 0011): the game runs unpaused
+	 * while the quit state is written and the content closes, and its
+	 * audio stuttered meanwhile (user report 2026-10-18). */
+	ra_command("SET_MUTED 1");
 	/* With slot rotation RetroArch's automatic slot is off: the progress
 	 * goes into the next slot first (once; a failed save still quits). */
 	if (session.settings.slot_rotation && !session.hardcore && !session.quit_saved) {
@@ -3803,6 +3843,32 @@ static int step_slot(int slot, int delta)
 /* Controller hotkeys from nuubos-inputd (Quick Menu button + chord): the
  * same session actions as the Quick Menu, with the outcome as an OSD
  * notification. */
+/* melonDS-nuubOS screen layout, live (RetroArch 0009): the hotkey's next
+ * one or the Quick Menu's Screen Layout choice. */
+/* The game's layout and stylus as the user left them, for its next launch. */
+static void save_nds_choice(void)
+{
+	struct game_overrides o;
+
+	load_overrides(session.user, session.game, &o);
+	copy_text(o.nds_layout, sizeof(o.nds_layout), nds_layouts[session.nds_layout].name);
+	copy_text(o.stylus, sizeof(o.stylus), session.stylus ? session.stylus_control : "off");
+	if (save_overrides(session.user, session.game, &o) != 0)
+		log_msg("emud: saving the NDS layout of %s failed", session.game);
+}
+
+static void set_nds_layout(int layout)
+{
+	if (layout < 0 || layout >= NDS_LAYOUTS)
+		return;
+	session.nds_layout = layout;
+	save_nds_choice();
+	ra_command("SET_CORE_OPTION melonds_screen_layout %s",
+		   nds_layouts[layout].value);
+	notify_screens(layout);
+	notify_subscribers();
+}
+
 static void handle_hotkey(const char *action)
 {
 	if (session.state != SESSION_RUNNING)
@@ -3834,10 +3900,7 @@ static void handle_hotkey(const char *action)
 		/* melonDS-nuubOS only: the next layout, live (RetroArch 0009). */
 		if (strcmp(session.core, MELONDS_NUUBOS) != 0)
 			return;
-		session.nds_layout = (session.nds_layout + 1) % NDS_LAYOUTS;
-		ra_command("SET_CORE_OPTION melonds_screen_layout %s",
-			   nds_layouts[session.nds_layout].value);
-		notify_screens(session.nds_layout);
+		set_nds_layout((session.nds_layout + 1) % NDS_LAYOUTS);
 	} else if (!strncmp(action, "stylus", 6)) {
 		/* "stylus <right|left|dpad>": inputd names the control of the
 		 * controller used; the hotkey turns the stylus on and off. */
@@ -3848,9 +3911,12 @@ static void handle_hotkey(const char *action)
 		if (strcmp(control, "right") && strcmp(control, "left") && strcmp(control, "dpad"))
 			control = "right";
 		session.stylus = !session.stylus;
+		copy_text(session.stylus_control, sizeof(session.stylus_control), control);
 		ra_command("SET_CORE_OPTION melonds_nuubos_stylus %s",
 			   session.stylus ? control : "off");
 		notify_stylus(session.stylus ? control : "off");
+		save_nds_choice();
+		notify_subscribers();
 	} else if (!strcmp(action, "fast_forward")) {
 		session.fast_forward = !session.fast_forward;
 		ra_command("FAST_FORWARD");
@@ -4599,6 +4665,16 @@ static void handle_command(struct client *c, char *line)
 		if (!running(c))
 			return;
 		reply(c, begin_screenshot() ? "OK\n" : "ERR busy\n");
+	} else if (!strcmp(line, "NDS_LAYOUT") && arg) {
+		/* NDS_LAYOUT <index of nds_layouts> (Quick Menu Screen Layout). */
+		if (!running(c))
+			return;
+		if (strcmp(session.core, MELONDS_NUUBOS) != 0) {
+			reply(c, "ERR core\n");
+			return;
+		}
+		set_nds_layout(atoi(arg));
+		reply(c, "OK\n");
 	} else if (!strcmp(line, "HOTKEY") && arg) {
 		/* A game hotkey by name, as inputd sends it (tests, remote). */
 		if (!running(c))
@@ -4863,6 +4939,7 @@ int main(void)
 		long long deadline = monotonic_ms() + QUIT_TIMEOUT_MS;
 		bool exited = false;
 
+		ra_command("SET_MUTED 1");
 		ra_command("SET_PAUSED 0");
 		ra_command("QUIT");
 		while (!exited && monotonic_ms() < deadline) {

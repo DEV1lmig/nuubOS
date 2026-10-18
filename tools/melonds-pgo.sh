@@ -9,14 +9,19 @@
 #            libretro-melonds-dirclean libretro-melonds
 #      (docker run ... -e NUUBOS_MELONDS_PGO=generate ...)
 #   2. tools/melonds-pgo.sh [-H root@host] [-t seconds] GAME_ID:MODE ...
-#        MODE = resume | new | slot:N (nuubos-emuctl launch)
+#        MODE = resume | new | slot:N (nuubos-emuctl launch), optionally
+#        :LAYOUT (melonds_screen_layout, _ for spaces) after it
 #   3. rebuild the normal core with the new profile:
 #        ./scripts/compile.sh libretro-melonds-dirclean libretro-melonds
 #      and deploy it (tools/deploy-target.sh /usr/lib/libretro/melonds_nuubos_libretro.so).
 #
 # The instrumented core is bind-mounted over the installed one only while
-# the games run (nothing is installed). Every quit writes a save state like a
-# normal quit: the script backs up the user's NDS states and restores them.
+# the games run (nothing is installed), by tools/melonds-dev/pgo-train.sh on
+# the device: Syncthing is stopped meanwhile, RetroArch ends with SIGTERM
+# (a normal exit writes the counters but no quit state) and the user's NDS
+# saves/states are put back byte- and mtime-identical before Syncthing
+# restarts (a quit save plus an rm -rf/cp restore made Syncthing keep the
+# test files and rename the user's originals to sync-conflicts).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE="$ROOT/output/h700/target/usr/lib/libretro/melonds_nuubos_libretro.so"
@@ -43,22 +48,14 @@ if ! grep -qa '__gcov' "$CORE"; then
 fi
 
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 "$HOST")
-LIB=/usr/lib/libretro/melonds_nuubos_libretro.so
 
 "${SSH[@]}" 'nuubos-emuctl status | grep -q "^state=idle"' || { echo "[FAIL] target unreachable or a game is running"; exit 1; }
 scp -q "$CORE" "$HOST:/tmp/melonds-pgo-gen.so" || { echo "[FAIL] copy core"; exit 1; }
-"${SSH[@]}" "U=\$(ls -d /userdata/users/*/ | head -1); rm -rf /tmp/nuubos-pgo /tmp/nuubos-pgo-states; cp -a \"\$U/states/nds\" /tmp/nuubos-pgo-states 2>/dev/null; mount --bind /tmp/melonds-pgo-gen.so $LIB" || { echo "[FAIL] mount"; exit 1; }
-
-for G in "${GAMES[@]}"; do
-    ID="${G%%:*}"
-    MODE="${G#*:}"
-    echo "training $ID $MODE (${SECONDS_PER_GAME} s)"
-    "${SSH[@]}" "nuubos-emuctl launch $ID $MODE >/dev/null && sleep $SECONDS_PER_GAME; nuubos-emuctl quit >/dev/null; sleep 10; tail -2 /run/nuubos/emud.log | head -1"
-done
-
-"${SSH[@]}" "umount $LIB; U=\$(ls -d /userdata/users/*/ | head -1); [ -d /tmp/nuubos-pgo-states ] && rm -rf \"\$U/states/nds\" && cp -a /tmp/nuubos-pgo-states \"\$U/states/nds\"; rm -f /tmp/melonds-pgo-gen.so; ls /tmp/nuubos-pgo/*.gcda >/dev/null" || { echo "[FAIL] no profile written"; exit 1; }
+scp -q "$ROOT/tools/melonds-dev/pgo-train.sh" "$ROOT/tools/melonds-dev/opts.sh" "$HOST:/tmp/" || { echo "[FAIL] copy scripts"; exit 1; }
+COUNT=$("${SSH[@]}" "sh /tmp/pgo-train.sh $SECONDS_PER_GAME ${GAMES[*]}" | tee /dev/stderr | tail -1)
+[ "${COUNT:-0}" -gt 0 ] 2>/dev/null || { echo "[FAIL] no profile written"; exit 1; }
 rm -f "$PGO_DIR"/*.gcda
 mkdir -p "$PGO_DIR"
 "${SSH[@]}" 'cd /tmp/nuubos-pgo && tar -cf - *.gcda' | tar -xf - -C "$PGO_DIR" || { echo "[FAIL] fetch profile"; exit 1; }
-"${SSH[@]}" 'rm -rf /tmp/nuubos-pgo /tmp/nuubos-pgo-states'
+"${SSH[@]}" 'rm -rf /tmp/nuubos-pgo /tmp/pgo-snap /tmp/melonds-pgo-gen.so'
 echo "[PASS] $(ls "$PGO_DIR"/*.gcda | wc -l) profile files in $PGO_DIR (step 3 next)"

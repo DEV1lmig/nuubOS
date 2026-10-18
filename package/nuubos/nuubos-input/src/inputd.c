@@ -188,6 +188,9 @@ static int last_code = -1;
 static int last_value = -1;
 static char last_action[64] = "none";
 static char last_device[128] = "none";
+/* Controller of the last key event (the one that opened the Quick Menu):
+ * its NDS stylus control is in STATUS for the Quick Menu's Stylus row. */
+static char last_controller[160] = "";
 static FILE *log_file;
 static char repeat_action[32];
 static long long repeat_next_ms;
@@ -2471,7 +2474,8 @@ static void status_reply(int fd)
 		 "power=%d\n"
 		 "gamepads=%d\n"
 		 "web=%d\n"
-		 "padmaps=%zu\n",
+		 "padmaps=%zu\n"
+		 "stylus_control=%s\n",
 		 menu_open ? 1 : 0,
 		 settings_open ? 1 : 0,
 		 input_count,
@@ -2494,7 +2498,9 @@ static void status_reply(int fd)
 		 binding_by_name("power")->code,
 		 gamepads_on ? 1 : 0,
 		 web_on ? 1 : 0,
-		 padmap_count);
+		 padmap_count,
+		 last_controller[0] && padmap_for(last_controller)
+			 ? stylus_hotkey(padmap_for(last_controller)) + 7 : "right");
 
 	(void)write_all(fd, reply);
 }
@@ -3109,6 +3115,8 @@ static void process_input(struct input_dev *input)
 
 		snprintf(last_device, sizeof(last_device),
 			 "%s", input->name);
+		snprintf(last_controller, sizeof(last_controller),
+			 "%s", input->controller_id);
 
 		/*
 		 * Qualified M2.5.3.7/v0.4 wake-key suppression:

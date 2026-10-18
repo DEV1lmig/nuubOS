@@ -3,11 +3,11 @@ Subject: [PATCH] nuubOS dynamic CPU clock
 
 When the H700 cannot emulate a game at 60 vblanks a second, PPSSPP ran
 the whole game in slow motion (God of War: Chains of Olympus fights at
-28.6 of 60). New core option ppsspp_nuubos_dynamic_clock (enabled): once
-a second the libretro frontend lowers a cap on the emulated CPU clock
-(game clock -> 266 -> 222 -> 166 -> 111 MHz) below 57 vblanks, and
-raises it when the emulation thread's CPU time scaled by the next step
-still fits (busy x ratio < 88 %). scePower runs the CPU at min(game
+28.6 of 60). New core option ppsspp_nuubos_dynamic_clock (enabled):
+every 2 s the libretro frontend lowers a cap on the emulated CPU clock
+(game clock -> 266 -> 222 -> 166 -> 111 MHz) below 57 vblanks (two
+steps below 50), and raises it when the emulation thread's CPU time
+scaled by the next step still fits (busy x ratio < 88 %). scePower runs the CPU at min(game
 clock, cap) while the game keeps seeing its own clock; a game short of
 cycles then needs two vblanks a frame and draws 30 fps at its own
 speed. God of War with auto frameskip 1: 60 vblanks, 30 fps drawn,
@@ -131,11 +131,11 @@ Upstream-Status: Inappropriate [nuubOS specific]
     std::atomic<EmuThreadState> emuThreadState(EmuThreadState::DISABLED);
  
     static std::thread emuThread;
-+   pthread_t EmuThreadHandle() { return emuThread.native_handle(); }
++   pthread_t EmuThreadHandle() { return emuThread.joinable() ? emuThread.native_handle() : 0; }
     static void EmuFrame()
     {
        ctx->SetRenderTarget();
-@@ -1702,8 +1710,98 @@
+@@ -1702,8 +1710,101 @@
     __CtrlSetAnalogXY(CTRL_STICK_RIGHT, x_right, y_right);
  }
  
@@ -150,8 +150,8 @@ Upstream-Status: Inappropriate [nuubOS specific]
 + * cannot emulate 60 vblanks a second, the emulated CPU clock is capped a
 + * step lower (game clock -> 266 -> 222 -> 166 -> 111 MHz): a game that
 + * then needs two vblanks a frame draws 30 fps at full game speed instead
-+ * of running in slow motion. Once a second: below 57 vblanks the cap goes
-+ * down a step; at full speed it goes up when the emulation thread's CPU
++ * of running in slow motion. Below 57 vblanks the cap goes down a step
++ * (two below 50) every 2 s; at full speed it goes up when the emulation thread's CPU
 + * time, scaled by the next step, still fits (busy x ratio < 88 %). God of
 + * War: Chains of Olympus fights: 28.6 vblanks a second at 333 MHz, 60 at
 + * 111 MHz (with frameskip). A clock the user locked wins.
@@ -161,28 +161,31 @@ Upstream-Status: Inappropriate [nuubOS specific]
 +static void nuubos_clock_governor(void)
 +{
 +   static const int caps[] = { 0, 266, 222, 166, 111 };
-+   static int frames, level, hold;
++   static int level, hold;
 +   static double last_wall, last_cpu;
 +   float vps, fps, actual;
 +   double wall, cpu = 0.0, busy = 0.0;
 +   struct timespec t;
 +
-+   if (++frames < 60)
++   /* Once a second of wall time: retro_run follows the frames the game
++      draws, 30 a second in a game that draws every second vblank. */
++   clock_gettime(CLOCK_MONOTONIC, &t);
++   wall = t.tv_sec + t.tv_nsec / 1e9;
++   if (wall - last_wall < 1.0)
 +      return;
-+   frames = 0;
 +   if (!nuubos_dynamic_clock || g_Config.iLockedCPUSpeed > 0)
 +   {
 +      if (level)
 +         __PowerSetCpuClockCap(level = 0);
++      last_wall = 0.0;
 +      return;
 +   }
 +   __DisplayGetFPS(&vps, &fps, &actual);
-+   clock_gettime(CLOCK_MONOTONIC, &t);
-+   wall = t.tv_sec + t.tv_nsec / 1e9;
 +   if (Libretro::useEmuThread)
 +   {
++      pthread_t emu = Libretro::EmuThreadHandle();
 +      clockid_t id;
-+      if (pthread_getcpuclockid(Libretro::EmuThreadHandle(), &id) == 0 && clock_gettime(id, &t) == 0)
++      if (emu && pthread_getcpuclockid(emu, &id) == 0 && clock_gettime(id, &t) == 0)
 +         cpu = t.tv_sec + t.tv_nsec / 1e9;
 +   }
 +   if (last_wall > 0.0 && wall > last_wall)
@@ -206,8 +209,8 @@ Upstream-Status: Inappropriate [nuubOS specific]
 +      hold--;
 +   else if (vps < 57.0f && level < 4)
 +   {
-+      __PowerSetCpuClockCap(caps[++level]);
-+      hold = 2;
++      __PowerSetCpuClockCap(caps[level += (vps < 50.0f && level < 3) ? 2 : 1]);
++      hold = 1;
 +   }
 +   else if (level > 0 && vps >= 59.0f && busy > 0.0)
 +   {

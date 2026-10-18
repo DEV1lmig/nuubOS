@@ -201,7 +201,7 @@ try:
     check('hardcore notified', wait(lambda: sum('game.hardcore' in n for n in notes[seen:]) == 4))
     check('hardcore STATES', 'hardcore=1\n' in cmd('emud.sock', 'STATES') and 'state=' not in cmd('emud.sock', 'STATES'))
 
-    check('HDMI render height', open(t + '/render-height').read() == '360\n')
+    check('HDMI render height', open(t + '/render-height').read() == '720\n')
     check('screenshot accepted', cmd('emud.sock', 'SCREENSHOT').startswith('OK'))
     check('screenshot confirmed', wait(lambda: any('game.screenshot.saved' in n for n in notes)))
     check('quit', cmd('emud.sock', 'QUIT').startswith('OK'))
