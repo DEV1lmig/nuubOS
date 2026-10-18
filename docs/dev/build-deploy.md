@@ -47,3 +47,4 @@ Every published image must ship with the matching `legal-info`: after the image 
 
 ## SSH / SFTP (§29)
 Slow SSH on Linux 7.2.8 was reverse DNS, not a kernel regression: the development host mapping on the target fixed it. Don't reopen as a kernel bug without new evidence. The target ships an SFTP server so scp/SFTP work natively (no stdin-over-SSH workarounds); check repo state before reimplementing.
+- `legal-info` copies every patch named in each package's `.applied_patches_list`: a patch removed from the repo but still listed (rtw88 `0012`, dropped 2026-10-15 and reverted by hand in `linux-7.3-rc7` and `linux-headers-7.2.8`) fails it with `cannot stat`. Fixed 2026-10-18 by deleting that line from both lists; when a patch is dropped, rebuild the package from a fresh extract or remove its line too.
