@@ -5338,22 +5338,25 @@ export component HomeWindow inherits Window {
                 }
                 for row[k] in [
                     {
-                        title: root.i18n-strings[50],
-                        value: root.system-profile == "battery-saver" ? root.i18n-strings[51] : root.i18n-strings[52],
+                        /* Battery Saver on/off, as in the Quick Menu (user
+                         * request 2026-10-20; was Performance Profile with an
+                         * Auto / Battery Saver value). */
+                        title: root.i18n-strings[51],
+                        value: "",
                         detail: root.system-effective-profile != root.system-profile
                             ? root.i18n-strings[214] + (root.system-effective-profile == "battery-saver" ? root.i18n-strings[51] : root.i18n-strings[52])
                             : "",
-                        nav: false, slider: false, fraction: 0,
+                        nav: false, slider: false, fraction: 0, tog: true, on: root.system-profile == "battery-saver",
                     },
                     {
                         title: root.i18n-strings[53],
                         value: root.system-auto-battery-threshold <= 0 ? root.i18n-strings[54] : "≤ " + root.system-auto-battery-threshold + "%",
-                        detail: "", nav: false, slider: false, fraction: 0,
+                        detail: "", nav: false, slider: false, fraction: 0, tog: false, on: false,
                     },
                     {
                         title: root.i18n-strings[56],
                         value: root.system-sleep-after-min <= 0 ? root.i18n-strings[54] : root.system-sleep-after-min + root.i18n-strings[215],
-                        detail: "", nav: false, slider: false, fraction: 0,
+                        detail: "", nav: false, slider: false, fraction: 0, tog: false, on: false,
                     },
                     {
                         title: root.i18n-strings[816],
@@ -5363,7 +5366,7 @@ export component HomeWindow inherits Window {
                             : root.battery-state == "full" ? root.i18n-strings[383]
                             : root.battery-state == "discharging" ? root.i18n-strings[818]
                             : root.battery-state == "not-charging" ? root.i18n-strings[819] : "",
-                        nav: false, slider: false, fraction: 0,
+                        nav: false, slider: false, fraction: 0, tog: false, on: false,
                     },
                     {
                         title: root.i18n-strings[817],
@@ -5374,7 +5377,7 @@ export component HomeWindow inherits Window {
                             : root.battery-health == "dead" ? root.i18n-strings[823]
                             : root.battery-health == "unknown" || root.battery-health == "" ? root.i18n-strings[205]
                             : root.i18n-strings[824],
-                        detail: "", nav: false, slider: false, fraction: 0,
+                        detail: "", nav: false, slider: false, fraction: 0, tog: false, on: false,
                     },
                 ]: SettingsSelectableRow {
                     x: root.settings-content-x;
@@ -5387,6 +5390,8 @@ export component HomeWindow inherits Window {
                     navigates: row.nav;
                     show-slider: row.slider;
                     slider-fraction: row.fraction;
+                    toggle: row.tog;
+                    toggle-on: row.on;
                     selected: root.settings-view == 69 && root.power-index == k;
                     visible: root.page-power
                         && root.sec-row-visible(k, root.power-scroll-offset, root.power-battery-start, root.power-devices-start, 0);

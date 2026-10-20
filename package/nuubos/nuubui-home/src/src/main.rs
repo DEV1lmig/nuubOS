@@ -2380,19 +2380,6 @@ fn open_audio_output_dropdown(ui: &HomeWindow) {
 }
 
 
-fn open_system_profile_dropdown(ui: &HomeWindow) {
-    open_settings_choice(
-        ui,
-        "system-profile",
-        &tr(ui, 50, "Performance Profile"),
-        vec![
-            ("auto".to_owned(), tr(ui, 52, "Auto")),
-            ("battery-saver".to_owned(), tr(ui, 51, "Battery Saver")),
-        ],
-        ui.get_system_profile().as_str(),
-    );
-}
-
 fn open_auto_battery_dropdown(ui: &HomeWindow) {
     let values = [0, 10, 15, 20, 25, 30, 40, 50];
     let options = values
@@ -2623,9 +2610,6 @@ fn apply_settings_choice(ui: &HomeWindow) {
         c if c.starts_with("lighting-") => lighting::apply_choice(c, value),
         "audio-output" => {
             audio_set_output(ui, value);
-        }
-        "system-profile" => {
-            system_set(ui, format!("SET PROFILE {}", value));
         }
         "system-auto-battery" => {
             system_set(ui, format!("SET AUTO_BATTERY {}", value));
@@ -5220,7 +5204,11 @@ fn handle_settings_action(
                 update_power_scroll(ui);
             }
             "menu_confirm" => match ui.get_power_index() {
-                0 => open_system_profile_dropdown(ui),
+                /* Battery Saver on/off (the Quick Menu's switch). */
+                0 => {
+                    let next = if ui.get_system_profile() == "battery-saver" { "auto" } else { "battery-saver" };
+                    system_set(ui, format!("SET PROFILE {next}"));
+                }
                 1 => open_auto_battery_dropdown(ui),
                 2 => open_sleep_timeout_dropdown(ui),
                 POWER_CHARGE_LIMIT_ROW if ui.get_system_charge_limit_supported() => open_charge_limit_dropdown(ui),

@@ -1367,9 +1367,9 @@ page('power', 'settings', () => C(813, 'Power'), async () => {
     ...c.devices.filter((d) => d.connected && !d.builtin && d.battery >= 0).map((d) => ({ name: d.name, battery: d.battery })),
     ...(b.devices || []).filter((d) => d.connected && d.battery >= 0 && !/input|gamepad/i.test(d.kind)).map((d) => ({ name: d.name, battery: d.battery }))];
   const nodes = [section(C(826, 'ENERGY SAVING'), 'device'), group(
-    row({ key: 'prof', title: C(50, 'Performance Profile'), value: s['profile.requested'] === 'battery-saver' ? C(51, 'Battery Saver') : C(52, 'Auto'),
+    row({ key: 'prof', title: C(51, 'Battery Saver'), toggle: s['profile.requested'] === 'battery-saver',
       detail: s['profile.effective'] && s['profile.effective'] !== s['profile.requested'] ? C(214, 'Effective: ') + (s['profile.effective'] === 'battery-saver' ? C(51, 'Battery Saver') : C(52, 'Auto')) : '',
-      chevron: true, on: () => pickAndAct(C(50, 'Performance Profile'), [{ value: 'auto', label: C(52, 'Auto') }, { value: 'battery-saver', label: C(51, 'Battery Saver') }], s['profile.requested'], 'system.profile') }),
+      set: (v) => act('system.profile', { v: v ? 'battery-saver' : 'auto' }, { topics: ['system'] }) }),
     row({ key: 'auto', title: C(53, 'Automatic Battery Saver'), value: Number(s['auto_battery.threshold']) ? '≤ ' + s['auto_battery.threshold'] + '%' : C(54, 'Off'), chevron: true,
       on: () => pickAndAct(C(53, 'Automatic Battery Saver'), [0, 10, 15, 20, 25, 30, 40, 50].map((v) => ({ value: String(v), label: v ? '≤ ' + v + '%' : C(54, 'Off') })), s['auto_battery.threshold'], 'system.autobattery') }),
     row({ key: 'sleep', title: C(56, 'Sleep After'), value: Number(s.sleep_after_min) ? s.sleep_after_min + C(215, ' min') : C(54, 'Off'), chevron: true,
