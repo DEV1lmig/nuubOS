@@ -1,5 +1,7 @@
 # nuubOS
 
+<p align="center"><b>Small System. Big Adventures.</b></p>
+
 <p align="center"><img src="https://raw.githubusercontent.com/wiki/baf93/nuubOS/images/tv_home_recent.png" alt="nuubOS Home" width="820"></p>
 
 A console-style operating system for Anbernic handhelds built on the Allwinner H700.
