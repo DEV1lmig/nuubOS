@@ -33,6 +33,9 @@ endef
 
 define NUUBOS_UPDATE_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-updatectl $(TARGET_DIR)/usr/bin/nuubos-updatectl
+	# The image's channel: post-build.sh derives the version from it.
+	mkdir -p $(TARGET_DIR)/usr/share/nuubos
+	echo $(NUUBOS_UPDATE_DEFAULT_CHANNEL) > $(TARGET_DIR)/usr/share/nuubos/release-channel
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-update-apply $(TARGET_DIR)/usr/sbin/nuubos-update-apply
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-update-auto $(TARGET_DIR)/usr/libexec/nuubos-update-auto
 	$(INSTALL) -D -m 0755 $(@D)/90-update \

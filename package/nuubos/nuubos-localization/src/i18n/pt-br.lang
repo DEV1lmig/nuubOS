@@ -1316,3 +1316,6 @@
 1315=Rápida
 1316=Precisa
 1317=Escolha Precisa se o jogo apresentar falhas
+1318=Remove o jogo, a capa e os detalhes da biblioteca para todos os usuários. Os saves são mantidos.
+1319=Mostrar jogos indisponíveis
+1320=Jogos cujo arquivo está faltando ou em um cartão SD2 que não está inserido

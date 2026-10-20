@@ -31,6 +31,8 @@ const EMULATION_SOCKET: &str = "/run/nuubos/emud.sock";
 /* A game session runs (nuubos-emud): RetroArch is fullscreen above Home and
  * owns the controllers through the nuubOS game gamepads. */
 pub static GAME_RUNNING: AtomicBool = AtomicBool::new(false);
+/* libraryd lists unavailable games (Settings → Gaming → LIBRARY). */
+pub static SHOW_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 /* Decoded covers kept in memory (LRU). */
 const COVER_CACHE_LIMIT: usize = 64;
 /* Grid rows above/below the visible ones whose covers are loaded. */
@@ -231,6 +233,7 @@ fn parse_snapshot(reply: &str) -> LibSnapshot {
             "user" => s.user = value.into(),
             "scanning" => s.scanning = value == "1",
             "scan_new" => s.scan_new = value.parse().unwrap_or(0),
+            "show_unavailable" => SHOW_UNAVAILABLE.store(value == "1", Ordering::Relaxed),
             "recent" => s.recent.extend(parse_game(value)),
             "favorites_pending" => s.favorites_pending = value != "0",
             "collection" => {
@@ -415,17 +418,167 @@ pub(crate) fn shape_cover(src: &Image, target: u32, radius_px: f32) -> Option<(S
     Some((out, aspect))
 }
 
+/* Covers scaled to a card height, made once: scraped covers are full size
+ * (often 0.5-1 MB PNGs, 720 rows) and decoding one took most of a card's
+ * load time. Kept in one pack file (USERDATA is exFAT with 128 KB
+ * clusters: a file per cover would take 128 KB each); records are
+ * appended as `key u64 | length u32 | JPEG or PNG`, the key hashing the
+ * cover's path, size, mtime and the height, so a new cover gets a new
+ * record. Never backed up; started over past COVER_PACK_MAX. */
+const COVER_PACK: &str = "/userdata/library/cache/home-covers.pack";
+const COVER_PACK_MAX: u64 = 192 << 20;
+/* Covers decoded at once: the H700 has four cores, one stays for the UI. */
+const COVER_DECODERS: usize = 3;
+
+struct CoverPack {
+    file: std::fs::File,
+    index: HashMap<u64, (u64, u32)>,
+    len: u64,
+}
+
+static COVER_PACK_STATE: Mutex<Option<CoverPack>> = Mutex::new(None);
+
+/* Opens the pack and reads its index once; a torn last record (power cut
+ * while writing) is cut off. */
+fn with_pack<T>(f: impl FnOnce(&mut CoverPack) -> Option<T>) -> Option<T> {
+    use std::os::unix::fs::FileExt;
+    let mut guard = COVER_PACK_STATE.lock().unwrap();
+    if guard.is_none() {
+        let _ = std::fs::create_dir_all(Path::new(COVER_PACK).parent()?);
+        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(COVER_PACK).ok()?;
+        let size = file.metadata().ok()?.len();
+        let mut index = HashMap::new();
+        let mut pos = 0u64;
+        let mut head = [0u8; 12];
+        while pos + 12 <= size && file.read_exact_at(&mut head, pos).is_ok() {
+            let key = u64::from_le_bytes(head[..8].try_into().ok()?);
+            let n = u32::from_le_bytes(head[8..].try_into().ok()?);
+            if n == 0 || pos + 12 + n as u64 > size {
+                break;
+            }
+            index.insert(key, (pos + 12, n));
+            pos += 12 + n as u64;
+        }
+        if pos < size {
+            let _ = file.set_len(pos);
+        }
+        *guard = Some(CoverPack { file, index, len: pos });
+    }
+    f(guard.as_mut()?)
+}
+
+fn cover_pack_key(path: &str, target: u32) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (path, meta.len(), meta.mtime(), meta.mtime_nsec(), target).hash(&mut h);
+    Some(h.finish())
+}
+
+fn pack_get(key: u64) -> Option<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let (file, off, n) = with_pack(|p| {
+        let (off, n) = *p.index.get(&key)?;
+        Some((p.file.try_clone().ok()?, off, n))
+    })?;
+    let mut data = vec![0u8; n as usize];
+    file.read_exact_at(&mut data, off).ok()?;
+    Some(data)
+}
+
+fn pack_put(key: u64, data: &[u8]) {
+    use std::os::unix::fs::FileExt;
+    let _ = with_pack(|p| {
+        if p.len + 12 + data.len() as u64 > COVER_PACK_MAX {
+            p.file.set_len(0).ok()?;
+            p.index.clear();
+            p.len = 0;
+        }
+        let mut rec = Vec::with_capacity(12 + data.len());
+        rec.extend_from_slice(&key.to_le_bytes());
+        rec.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        rec.extend_from_slice(data);
+        p.file.write_all_at(&rec, p.len).ok()?;
+        p.index.insert(key, (p.len + 12, data.len() as u32));
+        p.len += rec.len() as u64;
+        Some(())
+    });
+}
+
+/* JPEG when the scaled cover is opaque (~25 KB for 300 rows, decodes
+ * faster), PNG otherwise. */
+fn encode_cover(small: &image::RgbaImage) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    if small.pixels().all(|p| p.0[3] == 255) {
+        let rgb = image::DynamicImage::ImageRgba8(small.clone()).into_rgb8();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90)
+            .write_image(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+            .ok()?;
+    } else {
+        image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(small.as_raw(), small.width(), small.height(), image::ExtendedColorType::Rgba8)
+            .ok()?;
+    }
+    Some(out)
+}
+
+fn rgba_image(img: image::RgbaImage) -> Image {
+    let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(img.as_raw(), img.width(), img.height());
+    Image::from_rgba8(buf)
+}
+
+/* The cover at most `target` rows high: the packed copy, else the original
+ * decoded, scaled (area average) and packed for the next time. */
+fn load_cover_scaled(path: &str, target: u32) -> Option<Image> {
+    let key = cover_pack_key(path, target);
+    if let Some(data) = key.and_then(pack_get) {
+        if let Ok(img) = image::load_from_memory(&data) {
+            return Some(rgba_image(img.into_rgba8()));
+        }
+    }
+    let mut reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(96 << 20);
+    reader.limits(limits);
+    let src = reader.decode().ok()?;
+    let (w, h) = (src.width(), src.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let small = if h > target {
+        let ow = ((w as f32 * target as f32 / h as f32).round() as u32).max(1);
+        src.thumbnail_exact(ow, target)
+    } else {
+        src
+    }
+    .into_rgba8();
+    if let (Some(k), Some(data)) = (key, encode_cover(&small)) {
+        pack_put(k, &data);
+    }
+    Some(rgba_image(small))
+}
+
 pub fn start_cover_loader(ui: &HomeWindow) {
     let (tx, rx) = mpsc::channel::<(String, u32, f32)>();
     let _ = COVER_QUEUE.set(Mutex::new(tx));
+    let rx = std::sync::Arc::new(Mutex::new(rx));
+    for _ in 0..COVER_DECODERS {
+        spawn_cover_decoder(ui, rx.clone());
+    }
+}
+
+fn spawn_cover_decoder(ui: &HomeWindow, rx: std::sync::Arc<Mutex<mpsc::Receiver<(String, u32, f32)>>>) {
     let weak = ui.as_weak();
     thread::spawn(move || {
-        for (path, target, radius) in rx {
+        loop {
+            let Ok((path, target, radius)) = rx.lock().unwrap().recv() else { break };
             let key = cover_key(&path, target);
             if !cover_still_wanted(&key) {
                 continue;
             }
-            let img = Image::load_from_path(Path::new(&path)).ok();
+            let img = load_cover_scaled(&path, target);
             let shaped = img.as_ref().and_then(|i| shape_cover(i, target, radius));
             let weak = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -1141,11 +1294,31 @@ pub fn start_game_listener(ui: &HomeWindow) {
         if let Ok(mut stream) = UnixStream::connect(EMULATION_SOCKET) {
             if stream.write_all(b"SUBSCRIBE\n").is_ok() {
                 let mut running = false;
+                let mut quitting = false;
                 for line in BufReader::new(stream).lines() {
                     let Ok(line) = line else { break };
                     if let Some(state) = line.strip_prefix("state=") {
                         /* "exiting" still covers Home until RetroArch is gone. */
                         running = state != "idle";
+                        continue;
+                    }
+                    /* A quit was asked: the Quick Menu's closing screen now
+                     * covers the game, so the launch screen under it goes
+                     * (it flashed between RetroArch's exit and the session
+                     * end, user report 2026-10-20). */
+                    if let Some(q) = line.strip_prefix("quitting=") {
+                        let now = q == "1";
+                        if now && !quitting {
+                            let weak = weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    if ui.get_launch_open() {
+                                        hide_launch_screen(&ui);
+                                    }
+                                }
+                            });
+                        }
+                        quitting = now;
                         continue;
                     }
                     if line != "end=1" || GAME_RUNNING.swap(running, Ordering::SeqCst) == running {

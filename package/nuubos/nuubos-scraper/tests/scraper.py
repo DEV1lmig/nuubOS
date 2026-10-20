@@ -24,7 +24,7 @@ open(share + '/systems.conf', 'w').write(open(lib + '/systems.conf').read())
 open(run + '/user/active', 'w').write(user + '\n')
 open(state + '/users/%s/localization.conf' % user, 'w').write('LANGUAGE=it\n')
 roms = ['Mario.sfc', 'Zelda.sfc', 'Unknown.sfc', 'Quota.sfc', 'Super Metroid (Europe).sfc', 'Metroid.sfc',
-        'Kirby (USA) [!] v1.1.sfc']
+        'Kirby (USA) [!] v1.1.sfc', 'Disney G-Force - 2009.sfc', 'Pups.sfc', 'Mario Paint (Japan).sfc']
 for i, n in enumerate(roms):
     open(ud + '/roms/snes/' + n, 'wb').write(bytes([65 + i]) * (1000 + i))
 PNG = b'\x89PNG\r\n\x1a\n' + b'x' * 200
@@ -42,7 +42,7 @@ def opt(k):
 files = [x for x in a if x.startswith('/') and x.endswith('.sfc')]
 if opt('--includefrom'):
     files = [l.strip() for l in open(opt('--includefrom')) if l.strip()]
-known = {'Mario.sfc': 'Super Mario World', 'Zelda.sfc': 'Zelda', 'Quota.sfc': None}
+known = {'Mario.sfc': 'Super Mario World', 'Zelda.sfc': 'Zelda', 'Quota.sfc': None, 'Mario Paint (Japan).sfc': 'Mario Paint'}
 if opt('-s'):
     for i, f in enumerate(files):
         print('#%d/%d ---- Game found ----' % (i + 1, len(files)), flush=True)
@@ -63,10 +63,18 @@ if opt('-f') == 'pegasus':
             title = 'Super Mario Land'
         if b == 'Kirby (USA) [!] v1.1.sfc' and "'--query', 'Kirby'" in q:
             title = 'Kirby Super Star'
+        if b == 'Disney G-Force - 2009.sfc' and "'--query', 'G-Force'" in q:
+            title = 'G-Force'
+        if b == 'Pups.sfc' and "'--query', '102+dalmatian'" in q:
+            title = '102 Dalmatians'
         if not title:
             continue
         stem = b[:-4]
         open(o + '/covers/' + stem + '.png', 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n' + b'c' * 300)
+        if b == 'Mario Paint (Japan).sfc':
+            # A box spine (124x720), as ScreenScraper gave for Madagascar 2 DS.
+            open(o + '/covers/' + stem + '.png', 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n\\x00\\x00\\x00\\x0dIHDR'
+                + (124).to_bytes(4, 'big') + (720).to_bytes(4, 'big') + b'c' * 300)
         open(o + '/screenshots/' + stem + '.png', 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n' + b's' * 300)
         out += ['', 'game: ' + title, 'file: ' + f, 'rating: 90%',
                 'description: First line', '  .', '  Second\uA789 paragraph',
@@ -173,6 +181,20 @@ try:
     check('missed file name retried by a cleaned name', "'--query', 'Kirby'" in calls()
           and '@result scraped' in out and 'title=Kirby Super Star' in meta('Kirby (USA) [!] v1.1')
           and 'search=' not in meta('Kirby (USA) [!] v1.1').replace('search=\n', ''))
+    gforce = next(v for k, v in ids.items() if k.startswith('Disney G-Force'))
+    out = job('game', gforce)
+    check('retried without the year and the brand word', "'--query', 'Disney+G-Force'" in calls()
+          and "'--query', 'G-Force'" in calls() and 'title=G-Force' in meta('Disney G-Force - 2009'))
+    pups = next(v for k, v in ids.items() if k.startswith('Pups'))
+    sc('search', pups, stdin="Disney's 102 dalmatian\n")
+    out = job('game', pups)
+    check('a failed search name is retried without the brand word', "'--query', \"Disney's+102+dalmatian\"" in calls()
+          and "'--query', '102+dalmatian'" in calls() and 'title=102 Dalmatians' in meta('Pups'))
+    paint = next(v for k, v in ids.items() if k.startswith('Mario Paint'))
+    out = job('game', paint)
+    cov = ud + '/library/covers/snes/Mario Paint (Japan).png'
+    check('a box spine is not a cover: libretro cover instead', '@result scraped' in out and os.path.exists(cov)
+          and open(cov, 'rb').read() == PNG and 'title=Mario Paint' in meta('Mario Paint (Japan)'))
     check('search name stored', sc('search', ids['Unknown'], stdin='Super Mario Land\n').startswith('OK'))
     check('libraryd passes the search name', 'meta_search=Super Mario Land' in libcmd('DETAILS\t' + ids['Unknown']))
     out = job('game', ids['Unknown'])

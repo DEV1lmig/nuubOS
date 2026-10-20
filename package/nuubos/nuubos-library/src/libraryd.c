@@ -73,6 +73,9 @@
 #define USERDATA_USERS USERDATA_ROOT "/users"
 /* This console's identity among the user's consoles (created once). */
 #define CONSOLE_ID_FILE STATE_ROOT "/config/console-id"
+/* Library view of the console (device setting): SHOW_UNAVAILABLE=1 lists
+ * games whose file is gone or on a games card that is not inserted. */
+#define LIBRARY_CONFIG STATE_ROOT "/config/nuubos-library.conf"
 #define ACTIVE_DIR RUN_ROOT "/user"
 #define ACTIVE_FILE ACTIVE_DIR "/active"
 #define SYSTEM_ICONS_DIR SHARE_ROOT "/systems"
@@ -252,6 +255,10 @@ static int scan_pipe[2] = { -1, -1 };
 static pthread_t scan_thread;
 static bool scanning;
 static bool rescan_pending;
+/* Unavailable games in the lists (off by default, user request 2026-10-20:
+ * they cluttered the library). Search, counts and previews never had them. */
+static bool show_unavailable;
+
 /* Games added or available again since the last SCAN request found idle. */
 static size_t scan_new;
 static struct scan_result *scan_output;
@@ -1705,6 +1712,35 @@ static void load_console_id(void)
 	copy_text(console_id, sizeof(console_id), text);
 }
 
+static void load_library_config(void)
+{
+	char line[128];
+	FILE *fp = fopen(LIBRARY_CONFIG, "r");
+
+	show_unavailable = false;
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp))
+		if (!strncmp(line, "SHOW_UNAVAILABLE=", 17))
+			show_unavailable = atoi(line + 17) != 0;
+	fclose(fp);
+}
+
+static int save_library_config(void)
+{
+	char text[64];
+
+	mkdir_p(STATE_ROOT "/config");
+	snprintf(text, sizeof(text), "SHOW_UNAVAILABLE=%d\n", show_unavailable ? 1 : 0);
+	return write_atomic(LIBRARY_CONFIG, text, strlen(text));
+}
+
+/* A game the lists show: available, or any while unavailable ones are on. */
+static bool listed(const struct game *g)
+{
+	return g->available || show_unavailable;
+}
+
 /* The other consoles' files: r_* of every game, from scratch. */
 static void load_remote_history(void)
 {
@@ -2025,7 +2061,7 @@ static void append_recent(struct strbuf *b, const char *key, size_t limit)
 	for (size_t i = 0; i < n && (!limit || shown < limit); i++) {
 		long idx = find_game(order[i]->id);
 
-		if (idx < 0)
+		if (idx < 0 || !listed(&games[idx]))
 			continue;
 		append_game(b, key, &games[idx]);
 		shown++;
@@ -2088,8 +2124,8 @@ static void build_status(struct strbuf *b)
 		available++;
 		per_system[games[i].sys]++;
 	}
-	sb_append(b, "user=%s\nscanning=%d\ngames=%zu\nscan_new=%zu\n", active_user,
-		  scanning ? 1 : 0, available, scan_new);
+	sb_append(b, "user=%s\nscanning=%d\ngames=%zu\nscan_new=%zu\nshow_unavailable=%d\n", active_user,
+		  scanning ? 1 : 0, available, scan_new, show_unavailable ? 1 : 0);
 	/* Where new games go (Web administration uploads): the games card
 	 * while it can be written, else USERDATA. */
 	sb_append(b, "games_root=%s\n", sd2_writable ? sd2_roms : ROMS_ROOT);
@@ -2100,8 +2136,17 @@ static void build_status(struct strbuf *b)
 		if (favorite_count)
 			sb_append(b, "favorites_pending=%zu\n", favorite_count);
 		for (size_t i = 0; i < collection_count; i++) {
+			size_t shown = 0;
+
+			/* Members the collection's page lists. */
+			for (size_t k = 0; k < collections[i].count; k++) {
+				long idx = find_game(collections[i].games[k]);
+
+				if (idx >= 0 && listed(&games[idx]))
+					shown++;
+			}
 			sb_append(b, "collection=%s\t%s\t%zu", collections[i].id,
-				  collections[i].name, collections[i].count);
+				  collections[i].name, shown);
 			append_previews(b, -1, &collections[i]);
 		}
 	}
@@ -2144,7 +2189,7 @@ static const struct game **sorted_games(bool (*keep)(const struct game *, const 
 
 static bool keep_system(const struct game *g, const void *arg)
 {
-	return g->sys == *(const int *)arg;
+	return g->sys == *(const int *)arg && listed(g);
 }
 
 
@@ -2152,7 +2197,7 @@ static bool keep_collection(const struct game *g, const void *arg)
 {
 	const struct collection *c = arg;
 
-	return id_list_has(c->games, c->count, g->id);
+	return listed(g) && id_list_has(c->games, c->count, g->id);
 }
 
 /* GAMES <scope>: system:<id> | collection:<id> | recent */
@@ -2552,7 +2597,9 @@ static bool referenced_elsewhere(const char *rel, const struct game *self)
  * cover and metadata derived from it. Saves, states and the users' history
  * are kept (explicit cleanup only). Returns NULL on success, else the
  * error; the main file is removed last so a failure leaves a launchable
- * game rather than a dangling entry.
+ * game rather than a dangling entry. An unavailable game (its file gone,
+ * or on a games card that is not inserted) loses only its library entry,
+ * cover and metadata: no file is touched (user request 2026-10-20).
  */
 static const char *delete_game(long idx)
 {
@@ -2565,7 +2612,7 @@ static const char *delete_game(long idx)
 	bool failed = false;
 
 	if (!g->available)
-		return "unavailable";
+		goto entry;
 	/* .m3u -> discs (.cue) -> tracks (.bin): two descriptor levels. */
 	n = top = descriptor_entries(g->rel, owned, 64);
 	for (size_t i = 0; i < top; i++) {
@@ -2593,10 +2640,14 @@ static const char *delete_game(long idx)
 		return "io";
 	}
 	sync();
+entry:
 	rom_stem(g->rel, stem, sizeof(stem));
 	if (g->cover && !strncmp(g->cover, COVERS_ROOT "/", strlen(COVERS_ROOT) + 1))
 		unlink(g->cover);
 	if (pathf(path, sizeof(path), METADATA_ROOT "/%s/%s.txt", systems[g->sys].id, stem))
+		unlink(path);
+	/* The scraper's "tried" mark (Fill Missing Data). */
+	if (pathf(path, sizeof(path), METADATA_ROOT "/%s/%s.tried", systems[g->sys].id, stem))
 		unlink(path);
 	log_msg("deleted game %s (%s)", g->id, g->rel);
 	free(g->rel);
@@ -2687,6 +2738,10 @@ static void handle_command(struct client *c, char *line)
 	} else if (!strcmp(line, "SUBSCRIBE")) {
 		c->subscribed = true;
 		send_status(c);
+	} else if (!strcmp(line, "SHOW_UNAVAILABLE") && arg && (!strcmp(arg, "0") || !strcmp(arg, "1"))) {
+		show_unavailable = arg[0] == '1';
+		reply(c, save_library_config() ? "ERR persistence\n" : "OK\n");
+		notify_all();
 	} else if (!strcmp(line, "SCAN")) {
 		if (!scanning)
 			scan_new = 0;
@@ -3077,6 +3132,7 @@ int main(void)
 	load_catalog();
 	load_apps();
 	load_console_id();
+	load_library_config();
 	inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	refresh_active_user();
 

@@ -1025,6 +1025,7 @@ fn refresh_system_profile(ui: &QuickMenuWindow) {
             };
             ui.set_performance_profile_label(label.into());
             ui.set_battery_saver(effective == "battery-saver");
+            ui.set_battery_saver_requested(requested == "battery-saver");
         }
         Err(error) => {
             eprintln!("quick-menu: System profile read failed={error}");

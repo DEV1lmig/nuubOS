@@ -58,7 +58,7 @@ git push
 tools/ota/publish.sh ~/nuubos-release
 ```
 
-`publish.sh` creates the versioned release `v<version>-<serial>` with every file
+`publish.sh` creates the versioned release `v<version>` with every file
 (a pre-release unless the channel is stable), then replaces the manifest and
 signature in `channel-<channel>`. Devices on that channel see the update at their
 next check (within a day, or at once with Check).
@@ -71,13 +71,34 @@ next check (within a day, or at once with Check).
 ## Rejoining legal-info
 
 ```sh
-cat nuubOS-<version>-<serial>-legal-info.tar.part* | tar -xf -
+cat nuubOS-<version>-legal-info.tar.part* | tar -xf -
 ```
 
 ## Versions and channels
 
-- `VERSION` holds the product version (`0.5`). The tag adds the build serial:
-  `v0.5-1792000000`.
-- Nightly: Alpha builds for testers, any time.
-- RC: release candidates, bug fixes only.
-- Stable: after RC qualification on every supported device.
+nuubOS uses [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
+
+| Channel | Version | Example | Meaning |
+|---|---|---|---|
+| Stable | `X.Y.Z` | `1.0.0`, `1.0.1` | qualified on every supported device |
+| RC | `X.Y.Z-rc.N` | `1.0.0-rc.1` | release candidate N of `X.Y.Z`: bug fixes only |
+| Nightly | `X.Y.Z-nightly.YYYYMMDD` | `1.0.0-nightly.20261020` | development build towards `X.Y.Z`, UTC build date |
+
+- `PATCH` = bug fixes only, `MINOR` = new features, `MAJOR` = an incompatible change
+  (a new SD card layout, a reflash needed).
+- `VERSION` holds the release in preparation: `1.0.0-rc.1` while RC 1 of 1.0.0 is
+  being prepared, `1.0.0` for the stable release. Bump it in the commit that cuts
+  the release (`1.0.0-rc.1` → `1.0.0-rc.2` → `1.0.0` → `1.0.1-rc.1` or `1.1.0-rc.1`).
+- The image's channel (`NUUBOS_UPDATE_DEFAULT_CHANNEL`, installed as
+  `/usr/share/nuubos/release-channel`) decides the version written to
+  `/etc/os-release`: a nightly build takes `X.Y.Z` from `VERSION` and adds the build
+  date; an RC build needs `VERSION` = `X.Y.Z-rc.N`, a stable build `X.Y.Z`. A
+  mismatch stops the image build, so an image cannot carry the wrong version.
+- The release tag is `v<version>` (`v1.0.0-rc.1`, `v1.0.0-nightly.20261020`), the
+  files `nuubOS-<version>-…`. One nightly per day; a second one the same day needs a
+  new build the next day or a `VERSION` bump.
+- Devices order releases by the build serial (`/usr/share/nuubos/build-serial`,
+  seconds since 1970 at image build), never by the version text: a nightly built
+  after an RC is newer for the nightly channel.
+- Settings → System → Software Update shows the version and the build (`git describe`).
+- Before 2026-10-20 every image was `0.5` (tags `v0.5-<serial>`).

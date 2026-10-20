@@ -1316,3 +1316,6 @@
 1315=Snabb
 1316=Noggrann
 1317=Välj Noggrann om spelet beter sig fel
+1318=Tar bort spelet med omslag och detaljer från biblioteket för alla användare. Sparfiler behålls.
+1319=Visa otillgängliga spel
+1320=Spel vars fil saknas eller ligger på ett SD2-kort som inte är isatt

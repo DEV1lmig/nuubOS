@@ -56,11 +56,13 @@
 
 /* Analog stick poll rate (kernel patch 0106 lets /sys/.../poll go up to
  * 100 ms): the device-tree 4 ms only while a game owns the controllers,
- * 16 ms for menus (stick navigation), 100 ms with the screen off. At 4 ms
- * the GPADC poller alone woke the CPU ~1800 times a second at idle. */
+ * 32 ms for menus (stick navigation), 100 ms with the screen off. At 4 ms
+ * the GPADC poller alone woke the CPU ~1800 times a second at idle; 16 ms
+ * in menus still cost ~1000 of the ~2100 wakeups a second of an idle Home
+ * (CubeXX, 2026-10-20). */
 #define STICK_NAME "adc-joystick"
 #define STICK_POLL_GAME_MS 4
-#define STICK_POLL_MENU_MS 16
+#define STICK_POLL_MENU_MS 32
 #define STICK_POLL_SCREEN_OFF_MS 100
 #define RUN_DIR "/run/nuubos"
 #define SCREEN_OFF_NAME "screen-off"

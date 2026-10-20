@@ -7,10 +7,10 @@
 #
 # Needs a full image build and `compile.sh legal-info` of the same build.
 # Writes into OUTDIR/<tag>/:
-#   nuubOS-<version>-<serial>-anbernic-h700.img.xz     image for SD1
-#   nuubOS-<version>-<serial>-legal-info.tar.partNN    legal-info, split
+#   nuubOS-<version>-anbernic-h700.img.xz     image for SD1
+#   nuubOS-<version>-legal-info.tar.partNN    legal-info, split
 #                                                      below GitHub's 2 GiB
-#   nuubOS-<version>-<serial>-third-party-notices.tar.gz
+#   nuubOS-<version>-third-party-notices.tar.gz
 #   SHA256SUMS                                         every file above + payload
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -26,8 +26,7 @@ TARGET="$ROOT/output/h700/target"
 # legal-info must describe this build.
 [ "$LEGAL/manifest.csv" -nt "$IMAGES/rootfs.tar" ] || {
     echo "[FAIL] legal-info is older than the image: run compile.sh legal-info again" >&2; exit 1; }
-SERIAL="${TAG##*-}"
-BASE="nuubOS-$VERSION-$SERIAL"
+BASE="nuubOS-$VERSION"
 DIR="$OUT/$TAG"
 mkdir -p "$DIR" || exit 1
 

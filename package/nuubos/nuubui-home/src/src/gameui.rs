@@ -700,13 +700,17 @@ fn details_actions(ui: &HomeWindow, st: &State) -> Vec<(String, DetailAction, St
         out.push(("stats".into(), reset,
             armed_detail(&st.armed, "stats", tr(ui, 598, "Press again to reset"), String::new())));
     }
-    if d.available {
-        let mut delete = detail_action(10, tr(ui, 544, "Delete Game"), false);
-        delete.armed = st.armed == "delete";
-        out.push(("delete".into(), delete, armed_detail(&st.armed, "delete",
-            tr(ui, 546, "Press again to delete permanently"),
-            tr(ui, 545, "Permanently deletes the game file for every user. Saves are kept."))));
-    }
+    /* An unavailable game can be deleted too: libraryd then removes only
+     * its library entry, cover and metadata (user request 2026-10-20). */
+    let mut delete = detail_action(10, tr(ui, 544, "Delete Game"), false);
+    delete.armed = st.armed == "delete";
+    out.push(("delete".into(), delete, armed_detail(&st.armed, "delete",
+        tr(ui, 546, "Press again to delete permanently"),
+        if d.available {
+            tr(ui, 545, "Permanently deletes the game file for every user. Saves are kept.")
+        } else {
+            tr(ui, 1318, "Removes the game, its cover and details from the library for every user. Saves are kept.")
+        })));
     out
 }
 
@@ -1556,6 +1560,10 @@ fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     rows.push(("scan".into(), row(tr(ui, 804, "Scan for New Games"),
         if scanning { tr(ui, 410, "Searching for games…") } else { String::new() },
         tr(ui, 805, "Finds games copied to the SD card since the last scan")), !scanning));
+    /* Device-wide, owned by libraryd (user request 2026-10-20). */
+    rows.push(("unavailable".into(), toggle(tr(ui, 1319, "Show Unavailable Games"),
+        crate::library::SHOW_UNAVAILABLE.load(std::sync::atomic::Ordering::Relaxed),
+        tr(ui, 1320, "Games whose file is missing or on an SD2 card that is not inserted")), true));
     let mut source = nav(tr(ui, 792, "Metadata Source"), source_name(&st.ss_provider).to_owned());
     source.detail = source_detail(ui, &st.ss_provider).into();
     rows.push(("ss-source".into(), source, true));
@@ -1755,6 +1763,12 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
                 }
                 "bulk" | "lang" if !STATE.with(|st| st.borrow().ss_busy) => {
                     start_bulk(ui, if key == "lang" { "lang" } else { "all" }.to_owned());
+                }
+                "unavailable" => {
+                    let on = !crate::library::SHOW_UNAVAILABLE.load(std::sync::atomic::Ordering::Relaxed);
+                    crate::library::SHOW_UNAVAILABLE.store(on, std::sync::atomic::Ordering::Relaxed);
+                    render_gaming(ui);
+                    thread::spawn(move || { let _ = library(&format!("SHOW_UNAVAILABLE\t{}", if on { 1 } else { 0 }), false); });
                 }
                 "scan" if !ui.get_library_scanning() => {
                     STATE.with(|st| st.borrow_mut().lib_scan = 1);

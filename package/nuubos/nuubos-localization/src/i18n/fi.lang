@@ -1316,3 +1316,6 @@
 1315=Nopea
 1316=Tarkka
 1317=Valitse Tarkka, jos peli toimii väärin
+1318=Poistaa pelin kansikuvineen ja tietoineen kirjastosta kaikilta käyttäjiltä. Tallennukset säilyvät.
+1319=Näytä pelit, jotka eivät ole saatavilla
+1320=Pelit, joiden tiedosto puuttuu tai on SD2-kortilla, joka ei ole paikallaan

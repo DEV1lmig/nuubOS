@@ -1316,3 +1316,6 @@
 1315=Fast
 1316=Accurate
 1317=Choose Accurate if the game misbehaves
+1318=Removes the game, its cover and details from the library for every user. Saves are kept.
+1319=Show Unavailable Games
+1320=Games whose file is missing or on an SD2 card that is not inserted

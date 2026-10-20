@@ -1662,7 +1662,9 @@ component HomeShowcaseView inherits Rectangle {
                 max-height: 2 * 23px * root.s;
                 vertical-alignment: bottom;
                 color: root.ink;
-                font-size: 18px * root.s;
+                /* Long names get a smaller size so a long word is not
+                 * broken ("Entertainme/nt" on 720x720, 2026-10-20). */
+                font-size: (root.card.title.character-count > 22 ? 15px : 18px) * root.s;
                 font-weight: 700;
             }
             if root.card.detail != "": Text {

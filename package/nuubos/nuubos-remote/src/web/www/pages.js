@@ -494,7 +494,9 @@ async function gamePage(id, from) {
       on: () => { location.href = '/api/download?' + new URLSearchParams({ p: d.file }); } }),
     row({ key: 'stats', title: C(549, 'Reset Play Statistics'), icon: 'rotate-left', arm: { prompt: C(598, 'Press again to reset') },
       on: () => act('lib.statsreset', { id }, { topics: ['details', 'library'] }) }),
-    row({ key: 'del', title: C(544, 'Delete Game'), icon: 'trash-can', danger: true, detail: C(545, 'Permanently deletes the game file for every user. Saves are kept.'),
+    row({ key: 'del', title: C(544, 'Delete Game'), icon: 'trash-can', danger: true,
+      detail: avail === '0' ? C(1318, 'Removes the game, its cover and details from the library for every user. Saves are kept.')
+        : C(545, 'Permanently deletes the game file for every user. Saves are kept.'),
       arm: { prompt: C(546, 'Press again to delete permanently') }, on: async () => {
         await act('lib.delete', { id }, { topics: ['library'] });
         toast(C(547, 'Game deleted'), title);
@@ -1239,6 +1241,8 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
   section(C(704, 'LIBRARY'), 'device'), group(
     row({ key: 'scan', title: C(804, 'Scan for New Games'), detail: C(805, 'Finds games copied to the SD card since the last scan'), busy: scanning,
       value: scanning ? C(410, 'Searching for games…') : '', disabled: scanning, on: () => act('lib.scan') }),
+    row({ key: 'unav', title: C(1319, 'Show Unavailable Games'), detail: C(1320, 'Games whose file is missing or on an SD2 card that is not inserted'),
+      toggle: on01(lib.show_unavailable), set: (v) => act('lib.unavailable', { v }, { topics: ['library'] }) }),
     row({ key: 'src', title: C(792, 'Metadata Source'), value: src[0], detail: C(src[1], SOURCE_DETAILS[src[1]]), chevron: true,
       on: () => pickAndAct(C(792, 'Metadata Source'), Object.entries(SOURCES).map(([value, s]) => ({ value, label: s[0], detail: C(s[1], SOURCE_DETAILS[s[1]]) })), ss.provider, 'scraper.provider') }),
     ss.provider === 'screenscraper' || !ss.provider ? (ss.user

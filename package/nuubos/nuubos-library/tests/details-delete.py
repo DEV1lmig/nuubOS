@@ -91,6 +91,27 @@ try:
     check('other rom kept', os.path.exists(ud + '/roms/snes/Zelda.sfc'))
     check('gone from catalog', 'ERR' in cmd('DETAILS\t' + mario))
 
+    # An unavailable game: only its entry, cover and metadata go.
+    open(ud + '/library/metadata/snes/Zelda.txt', 'w').write('title=Zelda\n')
+    open(ud + '/library/metadata/snes/Zelda.tried', 'w').write('')
+    os.rename(ud + '/roms/snes/Zelda.sfc', t + '/Zelda.sfc')
+    cmd('SCAN')
+    for _ in range(50):
+        if 'scanning=0' in cmd('STATUS') and cmd('DETAILS\t' + zelda).split('\n')[0].split('\t')[8] == '0':
+            break
+        time.sleep(0.1)
+    check('zelda is unavailable', cmd('DETAILS\t' + zelda).split('\n')[0].split('\t')[8] == '0')
+    st = cmd('STATUS')
+    check('unavailable hidden by default', 'show_unavailable=0' in st and zelda not in cmd('GAMES\tsystem:snes'))
+    check('show unavailable', cmd('SHOW_UNAVAILABLE\t1').startswith('OK') and zelda in cmd('GAMES\tsystem:snes')
+          and 'show_unavailable=1' in cmd('STATUS'))
+    check('setting saved', 'SHOW_UNAVAILABLE=1' in open(t + '/state/config/nuubos-library.conf').read())
+    check('bad value refused', cmd('SHOW_UNAVAILABLE\t2').startswith('ERR'))
+    check('unavailable game deleted', cmd('DELETE\t%s\tCONFIRM' % zelda).startswith('OK'))
+    check('unavailable: metadata and tried mark removed', not os.path.exists(ud + '/library/metadata/snes/Zelda.txt')
+          and not os.path.exists(ud + '/library/metadata/snes/Zelda.tried'))
+    check('unavailable: gone from catalog', 'ERR' in cmd('DETAILS\t' + zelda))
+
     check('delete multi-disc', cmd('DELETE\t%s\tCONFIRM' % ff7[0]).startswith('OK'))
     left = os.listdir(ud + '/roms/psx/ff7')
     check('m3u deleted', 'FF7.m3u' not in left)

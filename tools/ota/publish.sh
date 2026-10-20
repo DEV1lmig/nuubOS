@@ -36,7 +36,7 @@ else
     else set -- --notes "nuubOS $VERSION, $CHANNEL channel."; fi
     # shellcheck disable=SC2086
     gh release create "$TAG" $ASSETS --repo "$REPO" --target "$COMMIT" $PRE \
-        --title "nuubOS $VERSION ($CHANNEL)" "$@" || exit 1
+        --title "nuubOS $VERSION" "$@" || exit 1
 fi
 if ! gh release view "channel-$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then
     gh release create "channel-$CHANNEL" --repo "$REPO" --target "$COMMIT" --prerelease --latest=false \

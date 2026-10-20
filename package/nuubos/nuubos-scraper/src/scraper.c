@@ -465,8 +465,65 @@ static void search_title(const char *stem, char *out, size_t size)
 	}
 	if (o >= 5 && !strcasecmp(out + o - 5, ", The"))
 		out[o -= 5] = '\0';
+	/* A year after a separator ("G-Force - 2009"), not one that belongs to
+	 * the title ("FIFA 2002"). */
+	if (o > 7 && !strncmp(out + o - 7, " - ", 3) && (!strncmp(out + o - 4, "19", 2) || !strncmp(out + o - 4, "20", 2)) &&
+	    isdigit((unsigned char)out[o - 2]) && isdigit((unsigned char)out[o - 1]))
+		out[o -= 7] = '\0';
 	while (o && (out[o - 1] == ' ' || out[o - 1] == '-' || out[o - 1] == ','))
 		out[--o] = '\0';
+}
+
+/* Brand words that ScreenScraper's name search does not expect in front of
+ * a title ("Disney 102 Dalmatians", "Disney G-Force": user report
+ * 2026-10-20, both found without it). */
+static const char *const title_brands[] = {
+	"Disney's", "Disney Pixar", "Disney-Pixar", "Disney/Pixar", "Disney", "Pixar",
+	"DreamWorks", "Nickelodeon", "Marvel's", "Tom Clancy's", "Sid Meier's",
+};
+
+/*
+ * Names for the second chance, most exact first, distinct, at most MAX:
+ * NAME itself, NAME without a leading brand word, then its main title
+ * without the subtitle after " - " ("102 Dalmatians"). Returns the count.
+ */
+#define SEARCH_NAMES 3
+static size_t search_names(const char *name, char out[][512])
+{
+	char v[3][512];
+	size_t n = 0;
+
+	copy_text(v[0], sizeof(v[0]), name);
+	copy_text(v[1], sizeof(v[1]), name);
+	for (size_t i = 0; i < sizeof(title_brands) / sizeof(title_brands[0]); i++) {
+		size_t len = strlen(title_brands[i]);
+
+		if (!strncasecmp(name, title_brands[i], len) && name[len] == ' ' && name[len + 1]) {
+			const char *rest = name + len + 1;
+
+			/* "Disney - G-Force" */
+			if (!strncmp(rest, "- ", 2))
+				rest += 2;
+			copy_text(v[1], sizeof(v[1]), rest);
+			break;
+		}
+	}
+	copy_text(v[2], sizeof(v[2]), v[1]);
+	{
+		char *dash = strstr(v[2], " - ");
+
+		if (dash && dash - v[2] >= 3)
+			*dash = '\0';
+	}
+	for (size_t i = 0; i < 3 && n < SEARCH_NAMES; i++) {
+		bool seen = !v[i][0];
+
+		for (size_t k = 0; k < n && !seen; k++)
+			seen = !strcasecmp(out[k], v[i]);
+		if (!seen)
+			copy_text(out[n++], sizeof(out[0]), v[i]);
+	}
+	return n;
 }
 
 static bool game_details(const char *id, struct game_info *g)
@@ -846,6 +903,51 @@ static bool download_media(const char *url, const char *base, char *path, size_t
 	return ok;
 }
 
+/* Width and height of a PNG or JPEG; false when they cannot be read. */
+static bool image_size(const unsigned char *d, size_t len, unsigned *w, unsigned *h)
+{
+	if (len >= 24 && !memcmp(d, "\x89PNG\r\n\x1a\n", 8) && !memcmp(d + 12, "IHDR", 4)) {
+		*w = (unsigned)d[16] << 24 | (unsigned)d[17] << 16 | (unsigned)d[18] << 8 | d[19];
+		*h = (unsigned)d[20] << 24 | (unsigned)d[21] << 16 | (unsigned)d[22] << 8 | d[23];
+		return *w && *h;
+	}
+	if (len < 4 || d[0] != 0xff || d[1] != 0xd8)
+		return false;
+	for (size_t i = 2; i + 9 < len;) {
+		unsigned seg;
+
+		if (d[i] != 0xff) {
+			i++;
+			continue;
+		}
+		/* SOF0-15 except DHT (c4), JPG (c8) and DAC (cc). */
+		if (d[i + 1] >= 0xc0 && d[i + 1] <= 0xcf && d[i + 1] != 0xc4 && d[i + 1] != 0xc8 && d[i + 1] != 0xcc) {
+			*h = (unsigned)d[i + 5] << 8 | d[i + 6];
+			*w = (unsigned)d[i + 7] << 8 | d[i + 8];
+			return *w && *h;
+		}
+		if (d[i + 1] == 0xd8 || d[i + 1] == 0x01 || (d[i + 1] >= 0xd0 && d[i + 1] <= 0xd7)) {
+			i += 2;
+			continue;
+		}
+		seg = (unsigned)d[i + 2] << 8 | d[i + 3];
+		i += 2 + seg;
+	}
+	return false;
+}
+
+/* A front cover, not a box spine or a strip (user report 2026-10-20:
+ * ScreenScraper's box-2D for Madagascar 2 DS was the 124x720 spine).
+ * Real covers run from about 0.5 (tall DVD-style) to 2 (wide boxes). */
+static bool cover_plausible(const unsigned char *d, size_t len)
+{
+	unsigned w, h;
+
+	if (!image_size(d, len, &w, &h))
+		return true;
+	return w * 10 >= h * 4 && w <= h * 5 / 2;
+}
+
 static bool import_media(const char *file, const char *base, char *path, size_t size)
 {
 	struct buffer b = { .limit = 16 * 1024 * 1024 };
@@ -859,6 +961,10 @@ static bool import_media(const char *file, const char *base, char *path, size_t 
 	while ((n = fread(chunk, 1, sizeof(chunk), fp)) > 0 && to_buffer(chunk, 1, n, &b) == n)
 		;
 	fclose(fp);
+	if (b.data && !cover_plausible((const unsigned char *)b.data, b.len)) {
+		free(b.data);
+		return false;
+	}
 	ok = b.data && store_image(b.data, b.len, base, path, size);
 	free(b.data);
 	return ok;
@@ -1024,6 +1130,26 @@ static bool missing_data(const struct game_info *g, const struct metadata *m, in
 	       !m->developer[0] || !m->publisher[0] || !m->players[0];
 }
 
+static enum outcome libretro_lookup(const struct game_info *g, const char *name, struct metadata *m);
+
+/* The libretro thumbnail as the cover, for a game whose source gave no
+ * usable one (a box spine); never stops the run. */
+static void libretro_cover(const struct game_info *g, const char *base)
+{
+	const struct system_map *s = system_of(g->system);
+	const char *reason = stop_reason;
+	struct metadata lm;
+	char name[512], path[PATH_MAX];
+
+	if (!s || !s->libretro[0] || cover_exists(g))
+		return;
+	memset(&lm, 0, sizeof(lm));
+	search_title(g->stem, name, sizeof(name));
+	if (libretro_lookup(g, name[0] ? name : g->stem, &lm) == SCRAPED && lm.cover_url[0])
+		(void)download_media(lm.cover_url, base, path, sizeof(path));
+	stop_reason = reason;
+}
+
 /* Install media: files a source produced (Skyscraper) or references
  * (libretro, older ScreenScraper data) downloaded now. */
 static void install_media(const struct game_info *g, const struct metadata *m, bool replace_cover)
@@ -1033,9 +1159,10 @@ static void install_media(const struct game_info *g, const struct metadata *m, b
 	if (!replace_cover && cover_exists(g))
 		return;
 	snprintf(base, sizeof(base), COVERS_ROOT "/%s/%s", g->system, g->stem);
-	if (m->cover_file[0])
-		(void)import_media(m->cover_file, base, path, sizeof(path));
-	else if (m->cover_url[0] && !strncmp(m->cover_url, LIBRETRO_BASE, strlen(LIBRETRO_BASE)))
+	if (m->cover_file[0]) {
+		if (!import_media(m->cover_file, base, path, sizeof(path)))
+			libretro_cover(g, base);
+	} else if (m->cover_url[0] && !strncmp(m->cover_url, LIBRETRO_BASE, strlen(LIBRETRO_BASE)))
 		(void)download_media(m->cover_url, base, path, sizeof(path));
 }
 
@@ -1834,22 +1961,45 @@ static void scrape_batch(int provider, const struct game_info *games, size_t cou
 	 * Second chance for what the file names did not find (user report
 	 * 2026-10-09: many titles missed): the same source searched by a
 	 * cleaned name, then libretro thumbnails (cover) by the
-	 * title key. Not for games with the user's own search name, nor after
-	 * a stop (quota, network...).
+	 * title key. Not after a stop (quota, network...). The names tried
+	 * (search_names) come from the user's own search name when the game
+	 * has one (it was just tried as it is), else from the file name.
 	 */
 	for (size_t i = 0; i < n && !cancelled && !stop_reason[0]; i++) {
 		struct sky_item one;
 		struct metadata fresh;
-		char clean[512];
+		char clean[512], names[2 * SEARCH_NAMES][512];
+		size_t count = 0;
 		enum outcome o;
 
-		if (items[i].found || olds[i].search[0])
+		if (items[i].found)
 			continue;
+		/* The user's name and its variants first, then the file name's. */
+		if (olds[i].search[0])
+			count = search_names(olds[i].search, names);
 		search_title(items[i].g->stem, clean, sizeof(clean));
+		{
+			char more[SEARCH_NAMES][512];
+			size_t m = search_names(clean, more);
+
+			for (size_t k = 0; k < m; k++) {
+				bool seen = false;
+
+				for (size_t j = 0; j < count && !seen; j++)
+					seen = !strcasecmp(names[j], more[k]);
+				if (!seen)
+					copy_text(names[count++], sizeof(names[0]), more[k]);
+			}
+		}
 		o = NOT_FOUND;
-		if (clean[0] && strcmp(clean, items[i].g->stem)) {
+		for (size_t k = 0; k < count && o == NOT_FOUND && !cancelled && !stop_reason[0]; k++) {
+			/* Already tried by the first pass. */
+			if (!strcmp(names[k], olds[i].search[0] ? olds[i].search : items[i].g->stem))
+				continue;
 			one = items[i];
-			(void)sky_lookup(provider, s, &one, 1, clean, offset + i, total);
+			memset(&one.m, 0, sizeof(one.m));
+			one.found = false;
+			(void)sky_lookup(provider, s, &one, 1, names[k], offset + i, total);
 			if (one.found)
 				o = apply(one.g, mode, &olds[i], &one.m);
 			sky_done();

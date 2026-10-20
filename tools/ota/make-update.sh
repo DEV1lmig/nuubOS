@@ -13,7 +13,8 @@
 #   <tag>/nuubos-system-<version>.img.gz       payload (release <tag>)
 #   channel-<channel>/nuubos-update.manifest(.sig)
 #   release.env, release-notes.txt              what publish.sh needs
-# <tag> = v<version>-<serial>. The manifest is signed with the release key,
+# <tag> = v<version>, the version of the image (/etc/os-release, set by
+# post-build.sh from VERSION and the image's channel, which must be CHANNEL). The manifest is signed with the release key,
 # derived from the release passphrase (tools/ota/release-key.py: asked once
 # here, checked against update-key.pub before the long compression).
 
@@ -43,9 +44,14 @@ if [ -z "${NUUBOS_RELEASE_PASSPHRASE:-}" ]; then
 fi
 export NUUBOS_RELEASE_PASSPHRASE
 python3 "$KEYTOOL" check || exit 1
-VERSION="$(cat "$ROOT/VERSION")"
+VERSION="$(tar -xOf "$TAR" ./etc/os-release 2>/dev/null | sed -n 's/^VERSION_ID=//p' | tr -d '" ')"
+IMAGE_CHANNEL="$(tar -xOf "$TAR" ./usr/share/nuubos/release-channel 2>/dev/null | tr -d ' \n')"
+[ -n "$VERSION" ] || { echo "[FAIL] the image has no VERSION_ID in /etc/os-release" >&2; exit 1; }
+[ "$IMAGE_CHANNEL" = "$CHANNEL" ] || {
+    echo "[FAIL] the image was built for the ${IMAGE_CHANNEL:-unknown} channel, not $CHANNEL" >&2; exit 1; }
 BUILD="$(tar -xOf "$TAR" ./usr/share/nuubos/build-id 2>/dev/null | tr -d ' \n')"
-TAG="v$VERSION-$SERIAL"
+case "$BUILD" in *-dirty) echo "[FAIL] the image was built from a dirty tree ($BUILD)" >&2; exit 1 ;; esac
+TAG="v$VERSION"
 PAYLOAD="nuubos-system-$VERSION.img.gz"
 mkdir -p "$OUT/$TAG" "$OUT/channel-$CHANNEL" || exit 1
 echo "Compressing the system image..."

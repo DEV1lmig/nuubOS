@@ -674,6 +674,7 @@ export component QuickMenuWindow inherits Window {
     /* Effective profile is Battery Saver: the glyph takes the warning colour
      * (same as Home's top bar). */
     in-out property <bool> battery-saver: false;
+    in-out property <bool> battery-saver-requested: false;
     in-out property <string> clock-label: "";
     in-out property <string> performance-profile-label: root.i18n-strings[52];
 
@@ -1353,8 +1354,11 @@ export component QuickMenuWindow inherits Window {
         QmRow {
             x: 16px; y: root.perf-row-y - root.scroll;
             width: parent.width - 32px; height: root.row-height;
-            title: root.i18n-strings[236];
-            value: root.performance-profile-label;
+            /* Battery Saver on/off (user request 2026-10-20: was the
+             * Performance row cycling Auto / Battery Saver). */
+            title: root.i18n-strings[51];
+            toggle: true;
+            toggle-on: root.battery-saver-requested;
             selected: root.selected-index == 4;
         }
         QmRow {

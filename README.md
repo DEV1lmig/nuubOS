@@ -7,8 +7,8 @@ nuubOS boots straight into a controller-first home screen, plays games through
 RetroArch, streams from your PC, plays music and video, and keeps itself up to date
 with signed, rollback-safe updates.
 
-> **Status: Alpha.** Nightly images are for testers. Expect bugs, and keep a backup
-> of your saves. See [Known issues](https://github.com/baf93/nuubOS/wiki/Known-Issues).
+> **Status: release candidate (1.0.0-rc.1).** Bug fixes only until 1.0.0; nightly
+> images are for testers. Keep a backup of your saves. See [Known issues](https://github.com/baf93/nuubOS/wiki/Known-Issues).
 
 **[Download](https://github.com/baf93/nuubOS/releases)** ·
 **[User guide (wiki)](https://github.com/baf93/nuubOS/wiki)** ·

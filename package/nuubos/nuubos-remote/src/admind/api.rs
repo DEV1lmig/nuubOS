@@ -504,6 +504,7 @@ pub fn action(b: &Value) -> R {
 
         /* Library (nuubos-libraryd). */
         "lib.scan" => { sock_ok("libraryd", "SCAN")?; ok() }
+        "lib.unavailable" => { sock_ok("libraryd", &format!("SHOW_UNAVAILABLE\t{}", flag(&a("v"))?))?; ok() }
         "lib.delete" => { sock_ok("libraryd", &format!("DELETE\t{}\tCONFIRM", game_id(&a("id"))?))?; ok() }
         "lib.statsreset" => { sock_ok("libraryd", &format!("STATS_RESET\t{}", game_id(&a("id"))?))?; ok() }
         "coll.create" => { sock_ok("libraryd", &format!("COLLECTION_CREATE\t{}", plain(a("name").trim(), 64)?))?; ok() }
