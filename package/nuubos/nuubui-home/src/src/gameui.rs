@@ -98,6 +98,9 @@ struct Details {
     accuracy_supported: bool,
     accuracy: String,
     accuracy_default: String,
+    /* Nintendo 64 accessory: "" = Rumble Pak (default), "memory". */
+    pak_supported: bool,
+    pak: String,
     /* nuubos-biosctl: missing required firmware for the system. */
     bios_missing: bool,
 }
@@ -315,6 +318,8 @@ fn parse_game_settings(reply: &str, d: &mut Details) {
             "accuracy_supported" => d.accuracy_supported = value == "1",
             "accuracy" => d.accuracy = value.into(),
             "accuracy_default" => d.accuracy_default = value.into(),
+            "pak_supported" => d.pak_supported = value == "1",
+            "pak" => d.pak = value.into(),
             _ => {}
         }
     }
@@ -517,6 +522,11 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                 let mut r = nav(tr(ui, 1314, "Emulation Accuracy"), accuracy);
                 r.detail = tr(ui, 1317, "Choose Accurate if the game misbehaves").into();
                 rows.push(("accuracy".into(), r, true));
+            }
+            if d.pak_supported {
+                let mut r = nav(tr(ui, 1339, "Controller Accessory"), pak_label(ui, &d.pak));
+                r.detail = tr(ui, 1342, "One fits at a time: choose Controller Pak if the game saves on it").into();
+                rows.push(("pak".into(), r, true));
             }
             rows.push(("reset".into(), row(tr(ui, 535, "Reset Game Settings"), String::new(),
                 armed_detail(&st.armed, "reset", tr(ui, 598, "Press again to reset"),
@@ -882,6 +892,10 @@ pub(crate) fn render(ui: &HomeWindow) {
         crate::syncui::render_page(ui);
         return;
     }
+    if view == crate::tsui::VIEW {
+        crate::tsui::render(ui);
+        return;
+    }
     if !(50..=56).contains(&view) && view != 63 {
         return;
     }
@@ -925,7 +939,15 @@ pub(crate) fn apply_rows_split(ui: &HomeWindow, rows: Vec<(String, GenRow, bool)
  * third from `split2.0` (0 = none); `scopes` = the USER/DEVICE chip of each
  * section when they differ (empty = the page's own). */
 pub(crate) fn apply_rows_sections(ui: &HomeWindow, rows: Vec<(String, GenRow, bool)>, section: String,
-    (split, split_label): (i32, String), (split2, split2_label): (i32, String), scopes: &[String]) {
+    first: (i32, String), second: (i32, String), scopes: &[String]) {
+    apply_rows_sections3(ui, rows, section, first, second, (0, String::new()), scopes);
+}
+
+/* Up to four sections: the top one and three inline headers (Syncthing:
+ * DEVICES, WHAT TO SYNC, AVAILABLE FOLDERS). */
+pub(crate) fn apply_rows_sections3(ui: &HomeWindow, rows: Vec<(String, GenRow, bool)>, section: String,
+    (split, split_label): (i32, String), (split2, split2_label): (i32, String),
+    (split3, split3_label): (i32, String), scopes: &[String]) {
     let count = rows.len() as i32;
     let index = ui.get_gen_index().clamp(0, (count - 1).max(0));
     STATE.with(|st| {
@@ -953,12 +975,14 @@ pub(crate) fn apply_rows_sections(ui: &HomeWindow, rows: Vec<(String, GenRow, bo
     ui.set_gen_split_label(split_label.into());
     ui.set_gen_split2(split2);
     ui.set_gen_split2_label(split2_label.into());
+    ui.set_gen_split3(split3);
+    ui.set_gen_split3_label(split3_label.into());
     let scopes: Vec<slint::SharedString> = scopes.iter().map(|s| s.into()).collect();
     if let Some(m) = sync_model(ui.get_gen_scopes(), scopes) {
         ui.set_gen_scopes(m);
     }
     ui.set_gen_scroll(if split > 0 {
-        sectioned_scroll(ui, index, count, ui.get_gen_scroll(), (split, split2, 0))
+        sectioned_scroll(ui, index, count, ui.get_gen_scroll(), (split, split2, split3))
     } else {
         guarded_scroll_offset(index, count, ui.get_settings_list_visible_rows(), ui.get_gen_scroll())
     });
@@ -1282,6 +1306,17 @@ fn accuracy_label(ui: &HomeWindow, v: &str) -> String {
     if v == "accurate" { tr(ui, 1316, "Accurate") } else { tr(ui, 1315, "Fast") }
 }
 
+fn pak_label(ui: &HomeWindow, v: &str) -> String {
+    if v == "memory" { tr(ui, 1341, "Controller Pak") } else { tr(ui, 1340, "Rumble Pak") }
+}
+
+/* Nintendo 64: Rumble Pak (the default, stored empty) or Controller Pak. */
+fn open_pak_choice(ui: &HomeWindow) {
+    let d = STATE.with(|st| st.borrow().details.clone());
+    let options = vec![(String::new(), pak_label(ui, "")), ("memory".to_owned(), pak_label(ui, "memory"))];
+    open_settings_choice(ui, "game-pak", &tr(ui, 1339, "Controller Accessory"), options, &d.pak);
+}
+
 fn open_accuracy_choice(ui: &HomeWindow) {
     let d = STATE.with(|st| st.borrow().details.clone());
     let mut options = vec![(String::new(), default_label(ui, &accuracy_label(ui, &d.accuracy_default)))];
@@ -1325,6 +1360,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-aspect" => game_set(ui, "aspect", value),
         "game-filter" => game_set(ui, "filter", value),
         "game-accuracy" => game_set(ui, "accuracy", value),
+        "game-pak" => game_set(ui, "pak", value),
         "emu-slots" => emu_set(ui, "slots", value),
         "game-fill" => start_bulk(ui, value),
         "update-channel" => {
@@ -1443,6 +1479,7 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
         "aspect" => open_aspect_choice(ui),
         "filter" => open_filter_choice(ui),
         "accuracy" => open_accuracy_choice(ui),
+        "pak" => open_pak_choice(ui),
         "reset" => {
             if arm_or(ui, "reset") {
                 let line = format!("GAME_RESET\t{}", d.id);
@@ -1998,6 +2035,9 @@ fn service_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
         if address.is_empty() { String::new() } else { format!("\\\\{address}\\nuubOS") }), true));
     rows.push(("svc:web".into(), toggle(tr(ui, 603, "Web Administration"), get("web") == "1",
         if address.is_empty() { String::new() } else { format!("https://{address}") }), true));
+    /* Tailscale: its own page (nuubos-tsd). */
+    let (ts_value, ts_detail) = crate::tsui::summary(ui);
+    rows.push(("tailscale".into(), GenRow { navigates: true, ..row(tr(ui, 1328, "Tailscale"), ts_value, ts_detail) }, true));
     rows.push(("password".into(), row(tr(ui, 172, "Password"),
         if st.remote_password.is_empty() { "••••-••••-••••".into() } else { st.remote_password.clone() },
         if st.remote_password.is_empty() { tr(ui, 608, "Press to show") }
@@ -2083,6 +2123,7 @@ pub fn services_confirm(ui: &HomeWindow, index: i32) {
             tool_then(ui, "/usr/sbin/nuubos-remotectl", vec!["set".into(), svc, if on { "0".into() } else { "1".into() }],
                 None, |ui, _| refresh_services(ui));
         }
+        "tailscale" => open_tailscale(ui),
         "password" => {
             /* The local console is the trusted place to read it (EPIC-039). */
             tool_then(ui, "/usr/sbin/nuubos-remotectl", vec!["credential".into(), "show".into()], None, |ui, out| {
@@ -2170,6 +2211,12 @@ fn refresh_update(ui: &HomeWindow) {
 pub fn open_sync(ui: &HomeWindow) {
     set_back(ui, GAMING_VIEW);
     show(ui, crate::syncui::VIEW);
+}
+
+/* Connectivity → SERVICES → Tailscale. */
+pub fn open_tailscale(ui: &HomeWindow) {
+    set_back(ui, 1);
+    show(ui, crate::tsui::VIEW);
 }
 
 /* A row whose operation is running: a bar in place of its detail line,
@@ -2333,6 +2380,7 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
             }
         }
         (66, k) => crate::syncui::page_confirm(ui, k),
+        (crate::tsui::VIEW, k) => crate::tsui::page_confirm(ui, k),
         (63, "update-notes") => {
             let (version, notes) = STATE.with(|st| {
                 let st = st.borrow();

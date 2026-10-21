@@ -167,6 +167,15 @@ try:
     check('set accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\taccurate' % game).startswith('OK'))
     check('accuracy listed', 'accuracy=accurate\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
     check('clear accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\t' % game).startswith('OK'))
+    # Nintendo 64 accessory (2026-10-21): Rumble Pak unless the game keeps
+    # Controller Pak saves; only n64 games offer it.
+    check('pak not for snes', 'pak_supported=0\n' in gs)
+    check('pak offered for n64', 'pak_supported=1\npak=\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tn64' % game))
+    check('reject bad pak', cmd('emud.sock', 'GAME_SET\t%s\tn64\tpak\ttransfer' % game).startswith('ERR'))
+    check('set controller pak', cmd('emud.sock', 'GAME_SET\t%s\tn64\tpak\tmemory' % game).startswith('OK')
+          and 'pak=memory\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tn64' % game))
+    check('rumble is the default (stored empty)', cmd('emud.sock', 'GAME_SET\t%s\tn64\tpak\trumble' % game).startswith('OK')
+          and 'pak=\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tn64' % game))
     conf = open('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)).read()
     check('only overrides stored', conf == 'core=bsnes\naspect=4:3\nfilter=pixel\n')
 

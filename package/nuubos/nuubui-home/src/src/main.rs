@@ -17,6 +17,7 @@ mod steamlink;
 mod storageui;
 mod syncui;
 mod themes;
+mod tsui;
 mod webui;
 slint::include_modules!();
 
@@ -4629,7 +4630,7 @@ fn handle_settings_action(
         }
         return;
     }
-    if (52..=66).contains(&view) || view == filesui::RECOVERY_VIEW {
+    if (52..=66).contains(&view) || view == filesui::RECOVERY_VIEW || view == tsui::VIEW {
         gameui::handle_page(ui, view, action);
         return;
     }
@@ -6059,7 +6060,7 @@ fn main() -> Result<(), slint::PlatformError> {
     /* Also with nobody signed in yet: the user picker wears the last
      * user's Mood (themes::apply_active). */
     if ui.get_active_user_id().is_empty() { themes::apply_active(&ui); }
-    start_users_listener(&ui,user_picker_active.clone()); start_regional_listener(&ui); syncui::start_listener(&ui); castui::start_listener(&ui);
+    start_users_listener(&ui,user_picker_active.clone()); start_regional_listener(&ui); syncui::start_listener(&ui); tsui::start_listener(&ui); castui::start_listener(&ui);
     start_localization_listener(&ui); start_status_listener(&ui);
     start_wifi_product_listener(&ui);
     start_bluetooth_product_listener(&ui);

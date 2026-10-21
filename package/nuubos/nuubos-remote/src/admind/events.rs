@@ -38,7 +38,7 @@ pub fn changed(topic: &str) {
 /* Socket services: (topic, socket name, line that ends a snapshot).
  * statusd only says "changed". Audio has few subscriber slots (the Quick
  * Menu OSD needs one): its D-Bus signal is used instead. */
-const SOCKETS: [(&str, &str, &str); 9] = [
+const SOCKETS: [(&str, &str, &str); 10] = [
     ("status", "statusd", "changed"),
     ("system", "systemd", "end=1"),
     ("users", "usersd", "end=1"),
@@ -48,6 +48,7 @@ const SOCKETS: [(&str, &str, &str); 9] = [
     ("jobs", "jobd", "end=1"),
     ("emu", "emud", "end=1"),
     ("sync", "syncd", "end=1"),
+    ("tailscale", "tsd", "end=1"),
 ];
 const BUSES: [(&str, &str); 6] = [
     ("audio", "Audio"),
@@ -57,7 +58,7 @@ const BUSES: [(&str, &str); 6] = [
     ("lighting", "Lighting"),
     ("rumble", "Rumble"),
 ];
-static RUNNING: [AtomicBool; 15] = [const { AtomicBool::new(false) }; 15];
+static RUNNING: [AtomicBool; 16] = [const { AtomicBool::new(false) }; 16];
 
 
 fn start_watchers() {

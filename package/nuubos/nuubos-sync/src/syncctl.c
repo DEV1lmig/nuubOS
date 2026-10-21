@@ -12,6 +12,10 @@
  *   accept DEVICE [NAME]         same as add
  *   ignore DEVICE                refuse a request
  *   remove DEVICE
+ *   folder-id saves|states|screenshots ID|-   use an existing folder id
+ *                                (- = nuubOS's own folder)
+ *   use FOLDER saves|states|screenshots       take an offered folder
+ *   decline FOLDER               refuse an offered folder
  *
  * Prints OK or ERR <reason>; exit status 0 only for OK.
  */
@@ -99,7 +103,7 @@ static bool on_off(const char *v)
 
 int main(int argc, char **argv)
 {
-	char line[256];
+	char line[512];
 
 	if (argc == 2 && !strcmp(argv[1], "status"))
 		return request("STATUS", true);
@@ -129,7 +133,21 @@ int main(int argc, char **argv)
 		snprintf(line, sizeof(line), "%s\t%.72s", argv[1][0] == 'i' ? "IGNORE" : "REMOVE", argv[2]);
 		return request(line, false);
 	}
+	if ((argc == 4 && (!strcmp(argv[1], "folder-id") || !strcmp(argv[1], "use"))) ||
+	    (argc == 3 && !strcmp(argv[1], "decline"))) {
+		for (int i = 2; i < argc; i++)
+			if (strpbrk(argv[i], "\t\n\r") || strlen(argv[i]) > 199)
+				return puts("ERR value"), 1;
+		if (argv[1][0] == 'f')
+			snprintf(line, sizeof(line), "FOLDER_ID\t%s\t%s", argv[2], argv[3]);
+		else if (argv[1][0] == 'u')
+			snprintf(line, sizeof(line), "USE\t%s\t%s", argv[2], argv[3]);
+		else
+			snprintf(line, sizeof(line), "DECLINE\t%s", argv[2]);
+		return request(line, false);
+	}
 	fprintf(stderr, "Usage: nuubos-syncctl status | enable | disable | folder KIND on|off | internet on|off | relays on|off |\n"
-			"       add DEVICE [NAME] | ignore DEVICE | remove DEVICE\n");
+			"       add DEVICE [NAME] | ignore DEVICE | remove DEVICE |\n"
+			"       folder-id KIND ID|- | use FOLDER KIND | decline FOLDER\n");
 	return 2;
 }

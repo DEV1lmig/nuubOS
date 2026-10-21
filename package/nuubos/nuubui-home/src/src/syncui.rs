@@ -18,10 +18,17 @@
  *   4 console: wait for the other console to accept (then 5 by itself);
  *     computer/phone: accept the nuubOS folders there
  *   5 done
- * plus a single screen with this console's ID and QR code.
+ * plus a single screen with this console's ID and QR code, and the same
+ * full screen for other modules (show_screen: Tailscale's sign-in code).
+ *
+ * Existing shares (user report 2026-10-21: the other devices already share
+ * saves and states): section AVAILABLE FOLDERS lists the folders paired
+ * devices share that this console does not sync yet (name, folder ID,
+ * device); pressing one asks what it syncs as here: saves, states or
+ * screenshots not linked to such a folder yet, or ignore it.
  */
 
-use crate::gameui::{apply_rows_sections, nav, notice, row, toggle};
+use crate::gameui::{apply_rows_sections3, nav, notice, row, toggle};
 use crate::{move_model_selection, open_settings_choice, tr, tr_arg, GenRow, HomeWindow};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use std::cell::RefCell;
@@ -33,6 +40,8 @@ use std::time::Duration;
 
 const SOCKET: &str = "/run/nuubos/syncd.sock";
 pub const VIEW: i32 = 66;
+/* Kinds that may use an existing folder (syncd custom_kind). */
+const CUSTOM_KINDS: [(&str, usize, &str); 3] = [("saves", 673, "Saves"), ("states", 674, "Save States"), ("screenshots", 675, "Screenshots")];
 /* What can be synchronized: (kind, title, fallback, detail, fallback). */
 const KINDS: [(&str, usize, &str, usize, &str); 5] = [
     ("saves", 673, "Saves", 0, ""),
@@ -51,6 +60,18 @@ const CONSOLE: u8 = 1;
 const COMPUTER: u8 = 2;
 const PHONE: u8 = 3;
 const SHOW_ID: u8 = 4;
+/* A screen another module fills (show_screen). */
+const EXTERNAL: u8 = 5;
+
+/* What another module shows on the full screen: a QR code of qr_text (also
+ * printed under it), or waiting while it has none. */
+#[derive(Clone, Default)]
+pub struct ExternalScreen {
+    pub title: String,
+    pub body: String,
+    pub qr_text: String,
+    pub waiting: String,
+}
 
 #[derive(Clone, Default)]
 struct Device {
@@ -60,6 +81,15 @@ struct Device {
     /* 0..100, -1 unknown */
     pct: i32,
     addr: String,
+}
+
+/* A folder a paired device shares that this console does not use. */
+#[derive(Clone, Default)]
+struct Offer {
+    folder: String,
+    label: String,
+    device: String,
+    device_name: String,
 }
 
 #[derive(Clone, Default)]
@@ -76,6 +106,9 @@ struct Snapshot {
     devices: Vec<Device>,
     pending: Vec<Device>,
     nearby: Vec<Device>,
+    /* (kind, Syncthing folder id, an existing folder chosen) */
+    folder_ids: Vec<(String, String, bool)>,
+    offers: Vec<Offer>,
 }
 
 #[derive(Default)]
@@ -91,6 +124,7 @@ struct Guide {
     /* Item keys on screen; "" = not actionable. */
     keys: Vec<String>,
     qr_for: String,
+    external: ExternalScreen,
 }
 
 #[derive(Default)]
@@ -127,6 +161,8 @@ fn parse(text: &str) -> Snapshot {
             }),
             "pending" => s.pending.push(Device { id: field(0), name: field(1), addr: field(2), pct: -1, ..Default::default() }),
             "nearby" => s.nearby.push(Device { id: field(0), addr: field(1), pct: -1, ..Default::default() }),
+            "folderid" => s.folder_ids.push((field(0), field(1), field(2) == "1")),
+            "offer" => s.offers.push(Offer { folder: field(0), label: field(1), device: field(2), device_name: field(3) }),
             _ => {}
         }
     }
@@ -296,7 +332,7 @@ pub fn render_page(ui: &HomeWindow) {
     let s = STATE.with(|st| st.borrow().snap.clone());
     let mut rows: Vec<(String, GenRow, bool)> = Vec::new();
     rows.push(("sync-enabled".into(), toggle(tr(ui, 669, "Syncthing"), s.enabled, status_line(ui, &s)), true));
-    let (mut split, mut split2) = (0, 0);
+    let (mut split, mut split2, mut split3) = (0, 0, 0);
     if s.enabled {
         let mut add = nav(tr(ui, 1028, "Add a Device"), String::new());
         add.detail = tr(ui, 1029, "Another console, a computer or a phone").into();
@@ -320,8 +356,11 @@ pub fn render_page(ui: &HomeWindow) {
         split2 = rows.len() as i32;
         for (kind, idx, fallback, didx, dfallback) in KINDS {
             let (on, state) = s.folders.iter().find(|f| f.0 == kind).map(|f| (f.1, f.2.clone())).unwrap_or_default();
+            /* The Syncthing folder ID, to recognize it on the other devices. */
+            let folder_id = s.folder_ids.iter().find(|f| f.0 == kind).map(|f| f.1.clone());
             let detail = match state.as_str() {
                 _ if !on => kind_detail(ui, didx, dfallback),
+                "idle" | "" if folder_id.is_some() => tr_arg(ui, 1324, "Folder ID {0}", folder_id.as_deref().unwrap_or("")),
                 "syncing" | "sync-preparing" | "sync-waiting" => tr(ui, 323, "Syncing…"),
                 "scanning" | "scan-waiting" => tr(ui, 488, "Checking…"),
                 "error" => tr(ui, 1084, "Cannot sync"),
@@ -337,13 +376,36 @@ pub fn render_page(ui: &HomeWindow) {
             tr(ui, 1088, "If a direct connection is impossible, the encrypted data may pass through public Syncthing servers"));
         relays.enabled = s.internet;
         rows.push(("sync-relays".into(), relays, s.internet));
+        /* Folders the other devices share and this console does not sync
+         * yet; none: no section. */
+        if !s.offers.is_empty() {
+            split3 = rows.len() as i32;
+            for o in &s.offers {
+                rows.push((format!("sync-offer:{}", o.folder), row(offer_label(o), o.folder.clone(),
+                    tr_arg(ui, 1325, "Shared by {0}", &offer_device(ui, o))), true));
+            }
+        }
     }
-    apply_rows_sections(ui, rows, tr(ui, 669, "Syncthing").to_uppercase(),
-        (split, tr(ui, 1030, "DEVICES")), (split2, tr(ui, 1031, "WHAT TO SYNC")), &[]);
+    apply_rows_sections3(ui, rows, tr(ui, 669, "Syncthing").to_uppercase(),
+        (split, tr(ui, 1030, "DEVICES")), (split2, tr(ui, 1031, "WHAT TO SYNC")),
+        (split3, tr(ui, 1343, "AVAILABLE FOLDERS")), &[]);
 }
 
 fn find(list: &[Device], id: &str) -> Option<Device> {
     list.iter().find(|d| d.id == id).cloned()
+}
+
+fn offer_label(o: &Offer) -> String {
+    if o.label.is_empty() { o.folder.clone() } else { o.label.clone() }
+}
+
+fn offer_device(ui: &HomeWindow, o: &Offer) -> String {
+    if o.device_name.is_empty() { tr_arg(ui, 1059, "Device {0}", &short(&o.device)) } else { o.device_name.clone() }
+}
+
+/* The existing folder chosen for a kind, "" = nuubOS's own. */
+fn custom_id(s: &Snapshot, kind: &str) -> String {
+    s.folder_ids.iter().find(|f| f.0 == kind && f.2).map(|f| f.1.clone()).unwrap_or_default()
 }
 
 pub fn page_confirm(ui: &HomeWindow, key: &str) {
@@ -360,7 +422,18 @@ pub fn page_confirm(ui: &HomeWindow, key: &str) {
         k if k.starts_with("sync-folder:") => {
             let kind = &k[12..];
             let on = s.folders.iter().any(|f| f.0 == kind && f.1);
-            command(ui, format!("FOLDER\t{kind}\t{}", u8::from(!on)), page_done);
+            if custom_id(&s, kind).is_empty() {
+                command(ui, format!("FOLDER\t{kind}\t{}", u8::from(!on)), page_done);
+            } else {
+                /* Linked to another device's folder: on/off, or back to
+                 * nuubOS's own folder (user request 2026-10-21). */
+                let title = KINDS.iter().find(|x| x.0 == kind).map(|x| tr(ui, x.1, x.2)).unwrap_or_default();
+                let options = vec![
+                    ("toggle".to_owned(), if on { tr(ui, 1345, "Turn Off") } else { tr(ui, 909, "Turn On") }),
+                    ("own".to_owned(), tr(ui, 1346, "Use the nuubOS Folder")),
+                ];
+                open_settings_choice(ui, &format!("sync-linked:{kind}"), &title, options, "toggle");
+            }
         }
         k if k.starts_with("sync-req:") => {
             if let Some(p) = find(&s.pending, &k[9..]) {
@@ -373,15 +446,39 @@ pub fn page_confirm(ui: &HomeWindow, key: &str) {
                 open_settings_choice(ui, k, &device_label(ui, &d), vec![("remove".into(), tr(ui, 644, "Remove"))], "remove");
             }
         }
+        /* What the offered folder syncs as here: a kind not linked to
+         * another device's folder yet, or ignore it. */
+        k if k.starts_with("sync-offer:") => {
+            if let Some(o) = s.offers.iter().find(|o| o.folder == k[11..]) {
+                let mut options: Vec<(String, String)> = CUSTOM_KINDS.iter()
+                    .filter(|(kind, _, _)| custom_id(&s, kind).is_empty())
+                    .map(|(kind, idx, fallback)| ((*kind).to_owned(), tr(ui, *idx, fallback))).collect();
+                options.push(("decline".into(), tr(ui, 1034, "Ignore")));
+                let first = options[0].0.clone();
+                open_settings_choice(ui, k, &tr_arg(ui, 1344, "Sync {0} as", &offer_label(o)), options, &first);
+            }
+        }
         _ => {}
     }
 }
 
 pub fn owns_choice(context: &str) -> bool {
-    context.starts_with("sync-req:") || context.starts_with("sync-dev:")
+    context.starts_with("sync-req:") || context.starts_with("sync-dev:") || context.starts_with("sync-offer:")
+        || context.starts_with("sync-linked:")
 }
 
 pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
+    if let Some(kind) = context.strip_prefix("sync-linked:") {
+        let on = STATE.with(|st| st.borrow().snap.folders.iter().any(|f| f.0 == kind && f.1));
+        let line = if value == "own" { format!("FOLDER_ID\t{kind}\t-") } else { format!("FOLDER\t{kind}\t{}", u8::from(!on)) };
+        command(ui, line, page_done);
+        return;
+    }
+    if let Some(folder) = context.strip_prefix("sync-offer:") {
+        let line = if value == "decline" { format!("DECLINE\t{folder}") } else { format!("USE\t{folder}\t{value}") };
+        command(ui, line, page_done);
+        return;
+    }
     let id = &context[9..];
     let line = match (&context[..9], value.as_str()) {
         ("sync-req:", "accept") => {
@@ -420,8 +517,44 @@ fn open_id(ui: &HomeWindow) {
 fn close_guide(ui: &HomeWindow) {
     STATE.with(|st| st.borrow_mut().guide = Guide::default());
     ui.set_sync_guide_open(false);
-    if ui.get_settings_view() == VIEW {
-        render_page(ui);
+    if ui.get_settings_open() {
+        crate::gameui::render(ui);
+    }
+}
+
+/* What the QR code of the open screen encodes. */
+fn qr_text(st: &State) -> String {
+    if st.guide.kind == EXTERNAL { st.guide.external.qr_text.clone() } else { st.snap.id.clone() }
+}
+
+/* Opens (or updates, when it is already showing) another module's screen. */
+pub fn show_screen(ui: &HomeWindow, screen: ExternalScreen) {
+    let opening = STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        let opening = !(st.guide.open && st.guide.kind == EXTERNAL);
+        if opening {
+            st.guide = Guide { open: true, kind: EXTERNAL, ..Default::default() };
+        }
+        st.guide.external = screen;
+        opening
+    });
+    if opening {
+        ui.set_sync_guide_index(-1);
+        ui.set_sync_guide_open(true);
+    }
+    render_guide(ui);
+}
+
+pub fn external_open() -> bool {
+    STATE.with(|st| {
+        let g = &st.borrow().guide;
+        g.open && g.kind == EXTERNAL
+    })
+}
+
+pub fn close_external(ui: &HomeWindow) {
+    if external_open() {
+        close_guide(ui);
     }
 }
 
@@ -497,6 +630,15 @@ fn screen(ui: &HomeWindow, s: &Snapshot, g: &Guide) -> Screen {
             sc.items.push((String::new(), row(device_label(ui, d), device_value(ui, d), String::new())));
         }
     };
+    if g.kind == EXTERNAL {
+        let e = &g.external;
+        sc.title = e.title.clone();
+        sc.body = e.body.clone();
+        sc.qr = !e.qr_text.is_empty();
+        sc.id = e.qr_text.clone();
+        sc.waiting = if sc.qr { String::new() } else { e.waiting.clone() };
+        return sc;
+    }
     if g.kind == SHOW_ID {
         sc.title = tr(ui, 671, "This Console's ID");
         sc.body = tr(ui, 1082, "Add it on your other device, or scan the code with your phone.");
@@ -617,11 +759,11 @@ fn render_guide(ui: &HomeWindow) {
     let (sc, error, step, kind, busy, qr_stale) = STATE.with(|st| {
         let st = st.borrow();
         let sc = screen(ui, &st.snap, &st.guide);
-        let stale = sc.qr && st.guide.qr_for != st.snap.id;
+        let stale = sc.qr && st.guide.qr_for != qr_text(&st);
         (sc, st.guide.error.clone(), st.guide.step, st.guide.kind, st.guide.busy, stale)
     });
     if qr_stale {
-        let id = STATE.with(|st| st.borrow().snap.id.clone());
+        let id = STATE.with(|st| qr_text(&st.borrow()));
         if let Some(img) = qr_image(&id) {
             ui.set_sync_guide_qr(img);
             STATE.with(|st| st.borrow_mut().guide.qr_for = id);
@@ -648,7 +790,7 @@ fn render_guide(ui: &HomeWindow) {
     ui.set_sync_guide_error(error.into());
     ui.set_sync_guide_items(ModelRc::from(Rc::new(VecModel::from(rows))));
     ui.set_sync_guide_index(index);
-    ui.set_sync_guide_step(if kind == SHOW_ID { -1 } else { step as i32 });
+    ui.set_sync_guide_step(if kind == SHOW_ID || kind == EXTERNAL { -1 } else { step as i32 });
     STATE.with(|st| st.borrow_mut().guide.keys = keys);
 }
 
@@ -668,7 +810,7 @@ pub fn guide_action(ui: &HomeWindow, action: &str) {
             ui.set_sync_guide_index(actionable[next as usize]);
         }
         "menu_back" => {
-            if kind == SHOW_ID || step == 0 || step == 5 {
+            if kind == SHOW_ID || kind == EXTERNAL || step == 0 || step == 5 {
                 close_guide(ui);
             } else {
                 go(ui, step - 1);

@@ -161,6 +161,7 @@ pub fn topic(t: &str, q: &dyn Fn(&str) -> String) -> R {
         /* SSH public keys (EPIC-039): key = fingerprint, type, comment. */
         "ssh_keys" => kv(&tool_ok("nuubos-remotectl", &["keys", "list"])?),
         "sync" => kv(&sock("syncd", "STATUS")?),
+        "tailscale" => kv(&sock("tsd", "STATUS")?),
         "scraper" => kv(&tool_ok("nuubos-scraper", &["account", "status"])?),
         "bios" => kv(&tool_ok("nuubos-biosctl", &["status"])?),
         "storage" => kv(&tool_ok("nuubos-storagectl", &["status"]).unwrap_or_default()),
@@ -409,6 +410,33 @@ pub fn action(b: &Value) -> R {
         "sync.remove" => {
             svc::reply_ok(&sock_timeout("syncd", &format!("REMOVE\t{}", token(&a("device"))?), Duration::from_secs(30))?)?;
             done("sync")
+        }
+        /* An existing folder of the user's other devices for saves, states
+         * or screenshots ("" = nuubOS's own); USE takes an offered one. */
+        "sync.folder_id" => {
+            let kind = one_of(&a("kind"), &["saves", "states", "screenshots"])?;
+            let id = plain(a("id").trim(), 199)?;
+            let id = if id.is_empty() { "-".to_owned() } else { id };
+            svc::reply_ok(&sock_timeout("syncd", &format!("FOLDER_ID\t{kind}\t{id}"), Duration::from_secs(30))?)?;
+            done("sync")
+        }
+        "sync.use" => {
+            let kind = one_of(&a("kind"), &["saves", "states", "screenshots"])?;
+            let folder = plain(&a("folder"), 199)?;
+            svc::reply_ok(&sock_timeout("syncd", &format!("USE\t{folder}\t{kind}"), Duration::from_secs(30))?)?;
+            done("sync")
+        }
+        "sync.decline" => {
+            let folder = plain(&a("folder"), 199)?;
+            svc::reply_ok(&sock_timeout("syncd", &format!("DECLINE\t{folder}"), Duration::from_secs(30))?)?;
+            done("sync")
+        }
+
+        /* Tailscale (nuubos-tsd): download, on/off, sign in/out. */
+        "ts.install" | "ts.check" | "ts.cancel" | "ts.remove" | "ts.enable" | "ts.disable" | "ts.login" | "ts.logout" => {
+            let cmd = op[3..].to_ascii_uppercase();
+            svc::reply_ok(&sock_timeout("tsd", &cmd, Duration::from_secs(30))?)?;
+            done("tailscale")
         }
 
         /* Wi-Fi (org.nuubOS.Wifi1). */

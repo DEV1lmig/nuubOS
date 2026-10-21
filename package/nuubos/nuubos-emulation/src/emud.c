@@ -437,6 +437,10 @@ struct game_overrides {
 	 * its next launch (user request 2026-10-18). */
 	char nds_layout[16];
 	char stylus[8];
+	/* Nintendo 64: the accessory in the controllers' slot, rumble (the
+	 * default, empty) or memory (Controller Pak saves). One slot, as on the
+	 * console (user request 2026-10-21: "scelta per gioco"). */
+	char n64_pak[8];
 };
 
 
@@ -1491,6 +1495,8 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 			copy_text(o->nds_layout, sizeof(o->nds_layout), eq);
 		else if (!strcmp(line, "stylus"))
 			copy_text(o->stylus, sizeof(o->stylus), eq);
+		else if (!strcmp(line, "n64_pak"))
+			copy_text(o->n64_pak, sizeof(o->n64_pak), eq);
 	}
 	fclose(fp);
 }
@@ -1506,7 +1512,7 @@ static int save_overrides(const char *user, const char *game, const struct game_
 	overrides_path(user, game, path, sizeof(path));
 	/* Nothing overridden: no file, the game inherits everything. */
 	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
-	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0])
+	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] && !o->n64_pak[0])
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
 	if (mkdir_p(dir) != 0)
@@ -1531,6 +1537,8 @@ static int save_overrides(const char *user, const char *game, const struct game_
 		fprintf(fp, "nds_layout=%s\n", o->nds_layout);
 	if (o->stylus[0])
 		fprintf(fp, "stylus=%s\n", o->stylus);
+	if (o->n64_pak[0])
+		fprintf(fp, "n64_pak=%s\n", o->n64_pak);
 	if (ferror(fp))
 		rc = -1;
 	if (fclose(fp) != 0)
@@ -1923,8 +1931,11 @@ static bool square_panel(void)
  * only, never HDMI or 4:3/3:2 panels; integer 3x cropped PS1 too much).
  * display.conf field 4 sets the share per system (PS1 5 %, user request
  * 2026-10-14: 8 % cut its borders a little too much). Only with the default
- * presentation (or the per-game Integer Scaling). Returns the percentage of
- * the width that may be cropped, 0 = off. */
+ * presentation (or the per-game Integer Scaling). 0 crops nothing: the
+ * picture is as wide as the screen, any margin at the bottom (Dreamcast,
+ * NAOMI, Atomiswave: user request 2026-10-21, their games use the whole
+ * 640 pixels). Returns the percentage of the width that may be cropped,
+ * -1 = off. */
 #define TV_OVERSCAN_DEFAULT_PCT 8
 
 static int tv_overscan(const char *system, const struct game_overrides *o)
@@ -1933,15 +1944,17 @@ static int tv_overscan(const char *system, const struct game_overrides *o)
 	int value;
 
 	if (o->aspect[0] && strcmp(o->aspect, "integer"))
-		return 0;
+		return -1;
 	if (!square_panel()) /* HDMI turns the panel off */
-		return 0;
+		return -1;
 	system_screen(system, screen, sizeof(screen));
 	if (strcmp(screen, "crt"))
-		return 0;
+		return -1;
 	display_field(system, 3, pct, sizeof(pct));
+	if (!pct[0])
+		return TV_OVERSCAN_DEFAULT_PCT;
 	value = atoi(pct);
-	return value > 0 && value < 50 ? value : TV_OVERSCAN_DEFAULT_PCT;
+	return value >= 0 && value < 50 ? value : TV_OVERSCAN_DEFAULT_PCT;
 }
 
 /* systems.conf colour (field 6, #rrggbb) as 0..1 components. */
@@ -3423,6 +3436,45 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		if (overrides.accuracy[0])
 			session_core_option("melonds_accuracy", overrides.accuracy);
 	}
+	if (!strncmp(session.core, "pcsx_rearmed", 12)) {
+		/* PlayStation: a DualShock in every port (the core's default is
+		 * the digital pad, which never vibrates). Games that do not know
+		 * the DualShock see a digital pad: it starts in digital mode until
+		 * the game asks for analog. A RetroArch core override, so other
+		 * cores keep the plain joypad; a device the user chose is kept. */
+		char override[PATH_MAX], value[16];
+		FILE *fp;
+
+		snprintf(override, sizeof(override), "%s/config/PCSX-ReARMed", ra_dir);
+		if (mkdir_p(override) == 0) {
+			snprintf(override, sizeof(override), "%s/config/PCSX-ReARMed/PCSX-ReARMed.cfg", ra_dir);
+			if (access(override, F_OK) != 0 && (fp = fopen(override, "w")))
+				fclose(fp);
+			for (int port = 1; port <= 4; port++) {
+				char key[32];
+
+				snprintf(key, sizeof(key), "input_libretro_device_p%d", port);
+				/* RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_ANALOG, 1) */
+				if (!read_core_option(override, key, value, sizeof(value)))
+					write_core_option(override, key, "517");
+			}
+		}
+	}
+	if (!strcmp(session.system, "n64")) {
+		/* The game's accessory in every player's slot, for both N64
+		 * cores (ParaLLEl and Mupen64Plus, bundled or downloaded):
+		 * Rumble Pak unless the game keeps Controller Pak saves. */
+		const char *pak = !strcmp(overrides.n64_pak, "memory") ? "memory" : "rumble";
+		static const char *const prefixes[] = { "parallel-n64-pak", "mupen64plus-pak" };
+
+		for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+			for (int player = 1; player <= 4; player++) {
+				char key[32];
+
+				snprintf(key, sizeof(key), "%s%d", prefixes[i], player);
+				write_core_option(path, key, pak);
+			}
+	}
 
 	snprintf(path, sizeof(path), "%s/config/global.glslp", ra_dir);
 	(void)seed_file(DEFAULT_SHADER_PRESET, path);
@@ -3526,7 +3578,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		setenv("WAYLAND_DISPLAY", "wayland-0", 1);
 		setenv("PIPEWIRE_RUNTIME_DIR", PIPEWIRE_RUNTIME, 1);
 		setenv("LANG", "C.UTF-8", 1);
-		if (overscan > 0) {
+		if (overscan >= 0) {
 			char pct[16];
 
 			snprintf(pct, sizeof(pct), "%d", overscan);
@@ -3540,6 +3592,13 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		}
 		if (session.bezel_env[0])
 			setenv("NUUBOS_RA_BEZEL", session.bezel_env, 1);
+		/* Dreamcast family (Flycast-nuubOS draws each frame at the start of
+		 * the next retro_run, so it reaches the GPU late): a swap may wait
+		 * two frames back instead of one (Mesa patch 0005). Crazy Taxi
+		 * while driving 53-56 -> 59.6 fps (2026-10-21). */
+		if (!strcmp(session.system, "dreamcast") || !strcmp(session.system, "naomi") ||
+		    !strcmp(session.system, "atomiswave"))
+			setenv("NUUBOS_THROTTLE_DEPTH", "2", 1);
 		execv(RETROARCH_BIN, argv);
 		_exit(127);
 	}
@@ -4020,10 +4079,12 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 		len = snprintf(out, sizeof(out),
 			       "core=%s\ncore_default=%s\ncore_override=%s\ncores=%s\n"
 			       "aspect=%s\nfilter=%s\nfilter_default=%s\n"
-			       "accuracy_supported=%d\naccuracy=%s\naccuracy_default=%s\nend=1\n",
+			       "accuracy_supported=%d\naccuracy=%s\naccuracy_default=%s\n"
+			       "pak_supported=%d\npak=%s\nend=1\n",
 			       effective, def_core, o.core, cores, o.aspect, o.filter,
 			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp",
-			       !strcmp(effective, MELONDS_NUUBOS), o.accuracy, accuracy_default);
+			       !strcmp(effective, MELONDS_NUUBOS), o.accuracy, accuracy_default,
+			       !strcmp(fields[1], "n64"), o.n64_pak);
 		if (len > 0 && write_all(c->fd, out, (size_t)len) != 0)
 			close_client(c);
 		return;
@@ -4045,6 +4106,9 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 	else if (!strcmp(fields[2], "accuracy") &&
 		 (!fields[3][0] || !strcmp(fields[3], "fast") || !strcmp(fields[3], "accurate")))
 		copy_text(o.accuracy, sizeof(o.accuracy), fields[3]);
+	else if (!strcmp(fields[2], "pak") &&
+		 (!fields[3][0] || !strcmp(fields[3], "rumble") || !strcmp(fields[3], "memory")))
+		copy_text(o.n64_pak, sizeof(o.n64_pak), strcmp(fields[3], "rumble") ? fields[3] : "");
 	else {
 		reply(c, "ERR value\n");
 		return;

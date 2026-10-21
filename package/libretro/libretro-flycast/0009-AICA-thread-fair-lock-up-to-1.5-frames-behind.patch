@@ -1,0 +1,359 @@
+From f11d8d132b82a92fd089c74ceef396723f82fdfe Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 21:05:23 +0200
+Subject: [PATCH 09/11] AICA thread: fair lock, up to 1.5 frames behind
+ (nuubOS)
+
+aica_lock (SH4 register accesses against the AICA thread's samples) was
+a std::mutex: the SH4 thread slept in the kernel ~18000 times a second in
+Shenmue II, ~6 ms of every frame that renders, because the AICA thread
+took it back for the next sample before the sleeper woke. It is now a
+ticket spinlock (fair, yields only if the holder is not running).
+
+At vblank the emulation thread waited for every AICA tick asked for; in
+frames where the game only waits, the SH4 got there early and idled
+~5 ms for the AICA, which had time to spare in the next frame. It now
+waits only while the AICA is more than 32 ticks (~23 ms) behind
+(libAICA_SyncLag); save states, reset and unload still wait for all
+(emu_hold_synced, reset_requested). The SH4 sees the AICA up to that
+late. Samples go through a single-writer single-reader ring and each
+retro_run sends what has been made (about, not exactly, a frame's 735);
+RetroArch's rate control evens it out.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/hw/aica/aica.cpp         | 24 ++++++++--
+ core/hw/aica/aica_if.cpp      |  6 +--
+ core/hw/aica/aica_lock.h      | 42 ++++++++++++++++++
+ core/libretro/audiostream.cpp | 84 +++++++++++++----------------------
+ core/libretro/libretro.cpp    | 23 +++++++---
+ 5 files changed, 113 insertions(+), 66 deletions(-)
+ create mode 100644 core/hw/aica/aica_lock.h
+
+diff --git a/core/hw/aica/aica.cpp b/core/hw/aica/aica.cpp
+index 41f7cd8..07db6d8 100644
+--- a/core/hw/aica/aica.cpp
++++ b/core/hw/aica/aica.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include <atomic>
+ #include <condition_variable>
++#include "aica_lock.h"
+ #include <mutex>
+ #include <thread>
+ 
+@@ -86,7 +87,7 @@ static void update_arm_interrupts()
+  * are passed on by the emulation thread at the next tick; CD audio sectors
+  * are read ahead by the emulation thread (cdda_prefetch), since reading
+  * the disc belongs to the GD-ROM emulation. */
+-std::mutex aica_lock;
++AicaLock aica_lock;
+ static thread_local bool aica_on_thread;
+ static std::atomic<bool> sh4_ints_dirty;
+ static bool aica_threaded;
+@@ -157,7 +158,7 @@ static void aica_thread_func()
+       }
+       for (int i = 0; i < 32; i++)
+       {
+-         std::lock_guard<std::mutex> lk(aica_lock);
++         std::lock_guard<AicaLock> lk(aica_lock);
+          aicaarm::run(1);
+       }
+       {
+@@ -173,7 +174,7 @@ static void aica_pass_sh4_ints()
+ {
+    if (sh4_ints_dirty.exchange(false))
+    {
+-      std::lock_guard<std::mutex> lk(aica_lock);
++      std::lock_guard<AicaLock> lk(aica_lock);
+       UpdateSh4Ints();
+    }
+ }
+@@ -203,7 +204,22 @@ static int AicaUpdate(int tag, int c, int j)
+ 	return AICA_TICK;
+ }
+ 
+-/* Emulation thread, at vblank: wait for the ticks asked for. */
++/* Emulation thread, at vblank: let the AICA thread be at most @lag ticks
++ * behind (nuubOS). Waiting for all of them made the SH4 idle ~5 ms in the
++ * frames where the game only waits (Shenmue II), while in the next frame
++ * the AICA had time to spare: across two frames the work fits. */
++void libAICA_SyncLag(u32 lag)
++{
++   if (!aica_threaded)
++      return;
++   {
++      std::unique_lock<std::mutex> lk(aica_qlock);
++      aica_qcv.wait(lk, [lag] { return ticks_asked - ticks_made <= lag; });
++   }
++   aica_pass_sh4_ints();
++}
++
++/* The machine is taken (save state, reset): wait for every tick asked for. */
+ void libAICA_Sync()
+ {
+    if (!aica_threaded)
+diff --git a/core/hw/aica/aica_if.cpp b/core/hw/aica/aica_if.cpp
+index 3cdf467..b2c3ee8 100644
+--- a/core/hw/aica/aica_if.cpp
++++ b/core/hw/aica/aica_if.cpp
+@@ -81,11 +81,11 @@ void WriteMem_aica_rtc(u32 addr,u32 data,u32 sz)
+ 
+ /* The SH4's way to the AICA registers; the AICA may be running on its own
+  * thread (aica.cpp). */
+-extern std::mutex aica_lock;
++#include "aica_lock.h"
+ 
+ u32 ReadMem_aica_reg(u32 addr,u32 sz)
+ {
+-	std::lock_guard<std::mutex> lk(aica_lock);
++	std::lock_guard<AicaLock> lk(aica_lock);
+ 	addr&=0x7FFF;
+ 	if (sz==1)
+ 	{
+@@ -122,7 +122,7 @@ static void ArmSetRST()
+ }
+ void WriteMem_aica_reg(u32 addr,u32 data,u32 sz)
+ {
+-	std::lock_guard<std::mutex> lk(aica_lock);
++	std::lock_guard<AicaLock> lk(aica_lock);
+ 	addr&=0x7FFF;
+ 
+ 	if (sz==1)
+diff --git a/core/hw/aica/aica_lock.h b/core/hw/aica/aica_lock.h
+new file mode 100644
+index 0000000..6dc864e
+--- /dev/null
++++ b/core/hw/aica/aica_lock.h
+@@ -0,0 +1,42 @@
++#pragma once
++#include <atomic>
++#include <sched.h>
++
++/* nuubOS: the lock between the SH4 (each AICA register access) and the
++ * AICA thread (each sample). A std::mutex made the SH4 thread sleep in the
++ * kernel ~18000 times a second in Shenmue II (~6 ms of every frame that
++ * renders): the AICA thread took it back for the next sample before the
++ * sleeper woke up. A ticket lock is fair (the SH4 goes right after the
++ * sample in progress, a few microseconds) and spins instead of sleeping;
++ * it yields the CPU only if the holder is not running. */
++class AicaLock
++{
++	std::atomic<unsigned> next{0};
++	std::atomic<unsigned> serving{0};
++
++public:
++	void lock()
++	{
++		unsigned ticket = next.fetch_add(1, std::memory_order_relaxed);
++		unsigned spins = 0;
++
++		while (serving.load(std::memory_order_acquire) != ticket)
++		{
++			if (++spins < 4096)
++			{
++#if defined(__aarch64__) || defined(__arm__)
++				asm volatile("yield");
++#endif
++			}
++			else
++				sched_yield();
++		}
++	}
++
++	void unlock()
++	{
++		serving.store(serving.load(std::memory_order_relaxed) + 1, std::memory_order_release);
++	}
++};
++
++extern AicaLock aica_lock;
+diff --git a/core/libretro/audiostream.cpp b/core/libretro/audiostream.cpp
+index f568bff..c565416 100644
+--- a/core/libretro/audiostream.cpp
++++ b/core/libretro/audiostream.cpp
+@@ -4,78 +4,54 @@
+ #include <string.h>
+ #include <libretro.h>
+ 
+-/* One retro_run is one video frame, and it comes with the sound the console
+- * put out during that frame, in one consecutive batch. How much sound that
+- * is follows from the hardware: the AICA runs at 44100 Hz and a frame lasts
+- * as long as the sync generator says, so an NTSC or VGA frame (59.94 Hz)
+- * carries 735 or 736 samples and a PAL frame (50 Hz) 882.
+- *
+- * The AICA is emulated a tick of 32 samples at a time, so at the end of a
+- * frame the sound made so far is whole ticks: 704 or 736 samples for an
+- * NTSC frame, not what the hardware puts out. FlushAudioFrame() therefore
+- * asks how far into the current tick the frame ended and sends exactly the
+- * samples due by then, keeping the rest for the next frame. To have them to
+- * send it runs one tick, 32 samples or 0.7 ms, behind.
+- *
+- * The buffer comfortably exceeds one frame's worth of samples. If it is
+- * ever exceeded it is flushed early as a safety valve. */
+-#define AUDIO_BUFFER_SIZE 4096
++#include <atomic>
+ 
+-/* Samples in one AICA tick: how far FlushAudioFrame() runs behind. */
+-#define AUDIO_TICK_SAMPLES 32
++/* nuubOS: the AICA may run on its own thread and a little behind the SH4
++ * (aica.cpp, libAICA_SyncLag), so its samples go through a ring with one
++ * writer (WriteSample, the AICA) and one reader (FlushAudioFrame, the
++ * libretro thread at the end of retro_run), which sends what has been made
++ * so far. A frame then carries about, not exactly, the frame's 735 samples;
++ * RetroArch's rate control evens that out. A full ring drops samples. */
++#define AUDIO_RING_SIZE 8192	/* power of two, ~186 ms */
+ 
+ extern retro_audio_sample_batch_t audio_batch_cb;
+ 
+-/* Samples of the current AICA tick the hardware has put out by now, 0..31. */
+-u32 libAICA_SamplesIntoTick();
+-
+-/* File-scope so the batch boundary can be reset deterministically on state
+- * load / reset. If writePtr survived a load, two states saved at different
+- * intra-batch offsets would replay a different partial batch, so identical
+- * inputs would no longer produce identical audio output -- breaking netplay and
+- * runahead determinism. */
+-static SoundFrame Buffer[AUDIO_BUFFER_SIZE];
+-static u32 writePtr; /* next sample index */
+-
++static SoundFrame Ring[AUDIO_RING_SIZE];
++static std::atomic<u32> ring_write, ring_read;
+ 
+ void WriteSample(s16 r, s16 l)
+ {
+-   Buffer[writePtr].r = r;
+-   Buffer[writePtr].l = l;
+-   ++writePtr;
++   const u32 w = ring_write.load(std::memory_order_relaxed);
+ 
+-   /* The safety valve only trips if a single frame somehow overruns the
+-    * buffer. */
+-   if (writePtr == AUDIO_BUFFER_SIZE)
+-   {
+-      if (dc_is_running())
+-         audio_batch_cb((const int16_t*)Buffer, writePtr);
+-      writePtr = 0;
+-   }
++   if (w - ring_read.load(std::memory_order_acquire) >= AUDIO_RING_SIZE)
++      return;
++   Ring[w & (AUDIO_RING_SIZE - 1)].r = r;
++   Ring[w & (AUDIO_RING_SIZE - 1)].l = l;
++   ring_write.store(w + 1, std::memory_order_release);
+ }
+ 
+-/* Send the sound of the frame that just ran, at the end of retro_run. The dc
+- * is stopped at the frame boundary, so this is not gated on dc_is_running(). */
++/* Send the sound made so far, at the end of retro_run. */
+ void FlushAudioFrame(void)
+ {
+-   /* Of the last tick made, the hardware has only put out the part that
+-    * lies before the end of this frame; hold the rest back, on top of the
+-    * one tick this runs behind. */
+-   const u32 keep = AUDIO_TICK_SAMPLES - libAICA_SamplesIntoTick();
++   u32 r = ring_read.load(std::memory_order_relaxed);
++   const u32 w = ring_write.load(std::memory_order_acquire);
+ 
+-   if (writePtr > keep)
++   while (r != w)
+    {
+-      const u32 count = writePtr - keep;
++      const u32 i = r & (AUDIO_RING_SIZE - 1);
++      u32 n = w - r;
+ 
+-      audio_batch_cb((const int16_t*)Buffer, count);
+-      memmove(Buffer, Buffer + count, keep * sizeof(Buffer[0]));
+-      writePtr = keep;
++      if (n > AUDIO_RING_SIZE - i)
++         n = AUDIO_RING_SIZE - i;
++      audio_batch_cb((const int16_t*)&Ring[i], n);
++      r += n;
+    }
++   ring_read.store(r, std::memory_order_release);
+ }
+ 
+-/* Drop any partially-filled batch and rewind to a known boundary. Called after
+- * (un)serialize and reset so the audio ring is in a deterministic state. */
++/* Drop what is pending, after (un)serialize and reset (the machine is taken
++ * and the AICA thread caught up). */
+ void ResetAudioBuffer(void)
+ {
+-   writePtr = 0;
++   ring_read.store(ring_write.load(std::memory_order_acquire), std::memory_order_release);
+ }
+diff --git a/core/libretro/libretro.cpp b/core/libretro/libretro.cpp
+index 92a6eb0..2491525 100644
+--- a/core/libretro/libretro.cpp
++++ b/core/libretro/libretro.cpp
+@@ -189,6 +189,11 @@ void FlushAudioFrame(void);	// emit one frame's accumulated audio (non-threaded)
+ void CaptureInput(void);	// sample input on the main thread, once per frame
+ bool rend_single_frame();
+ void libAICA_Sync();
++void libAICA_SyncLag(u32 lag);
++/* How far the AICA thread may be behind the SH4 at a vblank: 32 ticks of
++ * 32 samples, ~23 ms (a frame and a half). The SH4 then sees the AICA up to
++ * that late; its sound reaches the frontend as it is made. */
++#define AICA_FRAME_LAG 32
+ bool rend_draw_deferred(void);
+ extern bool rend_deferred_swapped;
+ 
+@@ -236,12 +241,13 @@ static void *emu_thread_func(void *)
+    {
+       if (retro_atomic_load_acquire_int(&reset_requested))
+       {
++         libAICA_Sync();
+          dc_reset(false);
+          retro_atomic_store_release_int(&reset_requested, 0);
+       }
+       dc_run();
+-      /* The AICA thread catches up with the SH4 before the frame is over. */
+-      libAICA_Sync();
++      /* The AICA thread keeps up with the SH4, a little behind. */
++      libAICA_SyncLag(AICA_FRAME_LAG);
+       emu_baton.EndFrame();
+    }
+ 
+@@ -255,6 +261,13 @@ static void emu_hold(void)
+    emu_baton.Hold();
+ }
+ 
++/* Take the machine with the AICA thread caught up: save states, reset. */
++static void emu_hold_synced(void)
++{
++   emu_baton.Hold();
++   libAICA_Sync();
++}
++
+ static void emu_release(void)
+ {
+    emu_baton.Release();
+@@ -1336,7 +1349,7 @@ void retro_run (void)
+ void retro_reset (void)
+ {
+ #if !defined(TARGET_NO_THREADS)
+-   emu_hold();
++   emu_hold_synced();
+ #endif
+ 
+    settings.dreamcast.cable = 3;
+@@ -2265,7 +2278,7 @@ bool retro_serialize(void *data, size_t size)
+    bool result = false ;
+ 
+ #if !defined(TARGET_NO_THREADS)
+-   emu_hold();
++   emu_hold_synced();
+ #endif
+ 
+    result = dc_serialize(&data_ptr, &total_size) ;
+@@ -2285,7 +2298,7 @@ bool retro_unserialize(const void * data, size_t size)
+    int i ;
+ 
+ #if !defined(TARGET_NO_THREADS)
+-   emu_hold();
++   emu_hold_synced();
+ #endif
+ 
+ #if FEAT_AREC == DYNAREC_JIT
+-- 
+2.56.0
+

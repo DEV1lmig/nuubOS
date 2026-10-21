@@ -1,0 +1,119 @@
+From c5ddeccf326c6d2a004ac11af11a9087153fc2e5 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 17:58:12 +0200
+Subject: [PATCH 11/11] Hand plain renders over without waiting (nuubOS)
+
+With threaded rendering the emulation thread handed each render to the
+libretro thread and slept until it was taken, but the libretro thread is
+still drawing and showing the frame before at that point: Dead or Alive 2
+and Shenmue II lost ~2.5 ms of every frame there. A render that is not to
+a texture nor from the framebuffer is now left in a one-slot mailbox
+(filled only by the emulation thread when empty, emptied only by the
+libretro thread) and drawn at the next frame as before; the emulation
+goes on at once. Anything else, or a second render while the slot is
+full, still goes through the hand-over, which draws the slot first.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/hw/pvr/Renderer_if.cpp | 40 +++++++++++++++++++++++++++++++------
+ 1 file changed, 34 insertions(+), 6 deletions(-)
+
+diff --git a/core/hw/pvr/Renderer_if.cpp b/core/hw/pvr/Renderer_if.cpp
+index c41b6eb..d7c9185 100644
+--- a/core/hw/pvr/Renderer_if.cpp
++++ b/core/hw/pvr/Renderer_if.cpp
+@@ -106,13 +106,21 @@ TA_context* _pvrrc;
+ static TA_context *rend_deferred;
+ static bool rend_deferred_read;	/* Process() has been done for it */
+ bool rend_deferred_swapped;
++/* A plain render (not to a texture, not from the framebuffer) left here by
++ * the emulation thread, which goes on at once instead of waiting for the
++ * libretro thread to take it: that one is still drawing and showing the
++ * frame before (Dead or Alive 2, Shenmue II: ~2.5 ms of every frame).
++ * Filled only by the emulation thread and only when empty, emptied only by
++ * the libretro thread. Older than rend_deferred whenever both are set. */
++static retro_atomic_ptr_t rend_posted;
+ 
+ bool rend_skip_frame(void);	/* libretro.cpp */
+ 
+ /* Libretro thread: draw the render left for later, if any. */
+ bool rend_draw_deferred(void)
+ {
+-   TA_context *ctx = rend_deferred;
++   TA_context *ctx = (TA_context *)retro_atomic_load_acquire_ptr(&rend_posted);
++   bool read = false;
+    TA_context *cur = _pvrrc;
+    u8 *cur_regs = rend_pvr_regs;
+ 
+@@ -123,12 +131,18 @@ bool rend_draw_deferred(void)
+    static bool render_before;
+    const bool every_vblank = render_before;
+ 
++   if (ctx != NULL)
++      retro_atomic_store_release_ptr(&rend_posted, NULL);
++   else if ((ctx = rend_deferred) != NULL)
++   {
++      rend_deferred = NULL;
++      read = rend_deferred_read;
++   }
+    render_before = ctx != NULL;
+    if (ctx == NULL)
+       return false;
+-   rend_deferred = NULL;
+    /* Automatic frameskip: this one is neither read nor drawn. */
+-   if (!rend_deferred_read && every_vblank && rend_skip_frame())
++   if (!read && every_vblank && rend_skip_frame())
+    {
+       tactx_Recycle(ctx);
+       return false;
+@@ -136,7 +150,7 @@ bool rend_draw_deferred(void)
+    _pvrrc = ctx;
+    rend_pvr_regs = ctx->regs;
+    bool proc = true;
+-   if (!rend_deferred_read)
++   if (!read)
+    {
+       palette_update();
+       proc = renderer->Process(ctx);
+@@ -154,6 +168,11 @@ bool rend_draw_deferred(void)
+  * later. */
+ void rend_drop_deferred(void)
+ {
++   TA_context *posted = (TA_context *)retro_atomic_load_acquire_ptr(&rend_posted);
++
++   if (posted != NULL)
++      tactx_Recycle(posted);
++   retro_atomic_store_release_ptr(&rend_posted, NULL);
+    if (rend_deferred != NULL)
+       tactx_Recycle(rend_deferred);
+    rend_deferred = NULL;
+@@ -241,7 +260,8 @@ bool rend_frame(TA_context* ctx, bool draw_osd)
+       /* A second render in the same frame: the one before is drawn first.
+        * Only then: a call with nothing left would tell the frameskip that
+        * no frame was made at this vblank. */
+-      if (rend_deferred != NULL)
++      while (rend_deferred != NULL
++            || retro_atomic_load_acquire_ptr(&rend_posted) != NULL)
+          rend_draw_deferred();
+       rend_pvr_regs = ctx->regs;
+    }
+@@ -385,7 +405,15 @@ void rend_start_render(void)
+                memcpy(ctx->regs, pvr_regs, pvr_RendRegSize);
+                if (!ctx->rend.isRenderFramebuffer)
+                   ta_save_regions(ctx);
+-               emu_baton.HandOver(ctx);
++               if (!is_rtt && !ctx->rend.isRenderFramebuffer
++                     && renderer != NULL && !renderer_changed
++                     && retro_atomic_load_acquire_ptr(&rend_posted) == NULL)
++               {
++                  DetachRender(ctx);
++                  retro_atomic_store_release_ptr(&rend_posted, ctx);
++               }
++               else
++                  emu_baton.HandOver(ctx);
+             }
+             else
+ #endif
+-- 
+2.56.0
+

@@ -1,0 +1,331 @@
+From 4dee219a9f4c1c8d8e48f273aeade9f779581260 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 15:54:36 +0200
+Subject: [PATCH 4/6] Run the AICA on a thread of its own (nuubOS)
+
+The sound chip took a quarter to a third of the emulation thread in heavy
+games (Shenmue II on the RG CubeXX: mixing 13 %, DSP 9 %, stream and
+envelope steps, the ARM7). On the console the ARM7 and the SH4 run side
+by side and talk through sound RAM and the AICA registers, so with
+threaded rendering the AICA now runs on its own thread, a tick of 32
+samples at a time and never ahead of the SH4: each AICA tick of SH4 time
+asks for one more, and at vblank the emulation thread waits until all
+asked for are made (libAICA_Sync), so between frames (save states,
+reset, the frame's audio) it is as before.
+
+The SH4 now sees the AICA up to a tick (0.7 ms) late. The registers are
+shared under aica_lock (the SH4 takes it for each access, the AICA thread
+for each sample); interrupts the AICA raises for the SH4 are passed on by
+the emulation thread at the next tick; CD audio sectors are read ahead
+by the emulation thread (cdda_prefetch), reading the disc being the
+GD-ROM's business.
+
+Shenmue II, Hong Kong street, 640x480: 36 -> 55-60 fps.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/hw/aica/aica.cpp      | 119 ++++++++++++++++++++++++++++++++++++-
+ core/hw/aica/aica_if.cpp   |   7 +++
+ core/hw/aica/aica_if.h     |   1 +
+ core/hw/aica/sgc_if.cpp    |  36 ++++++++++-
+ core/hw/aica/sgc_if.h      |   1 +
+ core/libretro/libretro.cpp |   3 +
+ 6 files changed, 165 insertions(+), 2 deletions(-)
+
+diff --git a/core/hw/aica/aica.cpp b/core/hw/aica/aica.cpp
+index be4135b..41f7cd8 100644
+--- a/core/hw/aica/aica.cpp
++++ b/core/hw/aica/aica.cpp
+@@ -6,6 +6,11 @@
+ #include "hw/holly/sb.h"
+ #include "hw/sh4/sh4_sched.h"
+ 
++#include <atomic>
++#include <condition_variable>
++#include <mutex>
++#include <thread>
++
+ #define SH4_IRQ_BIT (1 << (holly_SPU_IRQ & 31))
+ 
+ CommonData_struct* CommonData;
+@@ -63,9 +68,43 @@ static void update_arm_interrupts()
+    libARM_InterruptChange(p_ints,Lval);
+ }
+ 
++/* The AICA on a thread of its own (threaded rendering).
++ *
++ * The sound chip took a quarter to a third of the emulation thread in
++ * heavy games (Shenmue II: mixing 13 %, DSP 9 %, stream and envelope
++ * steps, the ARM7). On the console the ARM7 and the SH4 run side by side
++ * and talk through sound RAM and the AICA registers, so here the AICA runs
++ * on its own thread, a tick of 32 samples at a time, never ahead of the
++ * SH4: each AICA tick of SH4 time (AicaUpdate) asks for one more, and at
++ * vblank the emulation thread waits until all asked for are made
++ * (libAICA_Sync), so between frames (save states, reset, the frame's
++ * audio) the AICA is as before.
++ *
++ * What changes: the SH4 sees the AICA up to a tick (0.7 ms) late. The
++ * registers are shared under aica_lock (the SH4 takes it for each access,
++ * the AICA thread for each sample); interrupts the AICA raises for the SH4
++ * are passed on by the emulation thread at the next tick; CD audio sectors
++ * are read ahead by the emulation thread (cdda_prefetch), since reading
++ * the disc belongs to the GD-ROM emulation. */
++std::mutex aica_lock;
++static thread_local bool aica_on_thread;
++static std::atomic<bool> sh4_ints_dirty;
++static bool aica_threaded;
++static std::thread aica_thread;
++static std::mutex aica_qlock;
++static std::condition_variable aica_qcv;
++static u32 ticks_asked, ticks_made;
++static bool aica_exit;
++
+ //sh4 side
+ static void UpdateSh4Ints()
+ {
++   if (aica_on_thread)
++   {
++      /* The SH4's interrupt state belongs to the emulation thread. */
++      sh4_ints_dirty = true;
++      return;
++   }
+    u32 p_ints = MCIEB->full & MCIPD->full;
+    if (p_ints)
+    {
+@@ -105,13 +144,90 @@ u32 libAICA_SamplesIntoTick()
+ 	return samples > 31 ? 31 : samples;
+ }
+ 
++static void aica_thread_func()
++{
++   aica_on_thread = true;
++   for (;;)
++   {
++      {
++         std::unique_lock<std::mutex> lk(aica_qlock);
++         aica_qcv.wait(lk, [] { return aica_exit || ticks_made != ticks_asked; });
++         if (aica_exit)
++            return;
++      }
++      for (int i = 0; i < 32; i++)
++      {
++         std::lock_guard<std::mutex> lk(aica_lock);
++         aicaarm::run(1);
++      }
++      {
++         std::lock_guard<std::mutex> lk(aica_qlock);
++         ticks_made++;
++      }
++      aica_qcv.notify_all();
++   }
++}
++
++/* Emulation thread: the interrupts the AICA thread raised for the SH4. */
++static void aica_pass_sh4_ints()
++{
++   if (sh4_ints_dirty.exchange(false))
++   {
++      std::lock_guard<std::mutex> lk(aica_lock);
++      UpdateSh4Ints();
++   }
++}
++
+ static int AicaUpdate(int tag, int c, int j)
+ {
+-   aicaarm::run(32);
++   if (!settings.rend.ThreadedRendering)
++   {
++      aicaarm::run(32);
++      return AICA_TICK;
++   }
++   if (!aica_threaded)
++   {
++      aica_exit = false;
++      ticks_asked = ticks_made = 0;
++      aica_thread = std::thread(aica_thread_func);
++      aica_threaded = true;
++   }
++   cdda_prefetch();
++   aica_pass_sh4_ints();
++   {
++      std::lock_guard<std::mutex> lk(aica_qlock);
++      ticks_asked++;
++   }
++   aica_qcv.notify_all();
+ 
+ 	return AICA_TICK;
+ }
+ 
++/* Emulation thread, at vblank: wait for the ticks asked for. */
++void libAICA_Sync()
++{
++   if (!aica_threaded)
++      return;
++   {
++      std::unique_lock<std::mutex> lk(aica_qlock);
++      aica_qcv.wait(lk, [] { return ticks_made == ticks_asked; });
++   }
++   aica_pass_sh4_ints();
++}
++
++static void aica_stop_thread()
++{
++   if (!aica_threaded)
++      return;
++   {
++      std::lock_guard<std::mutex> lk(aica_qlock);
++      aica_exit = true;
++   }
++   aica_qcv.notify_all();
++   aica_thread.join();
++   aica_threaded = false;
++}
++
+ //Mainloop
+ 
+ void libAICA_TimeStep()
+@@ -301,6 +417,7 @@ void libAICA_Reset(bool hard)
+ 
+ void libAICA_Term()
+ {
++	aica_stop_thread();
+ 	sgc_Term();
+ 	term_mem();
+ }
+diff --git a/core/hw/aica/aica_if.cpp b/core/hw/aica/aica_if.cpp
+index 638eacc..3cdf467 100644
+--- a/core/hw/aica/aica_if.cpp
++++ b/core/hw/aica/aica_if.cpp
+@@ -12,6 +12,7 @@
+ #include "hw/sh4/dyna/blockmanager.h"
+ 
+ #include <time.h>
++#include <mutex>
+ 
+ VArray2 aica_ram;
+ u32 VREG;
+@@ -78,8 +79,13 @@ void WriteMem_aica_rtc(u32 addr,u32 data,u32 sz)
+ 	}
+ }
+ 
++/* The SH4's way to the AICA registers; the AICA may be running on its own
++ * thread (aica.cpp). */
++extern std::mutex aica_lock;
++
+ u32 ReadMem_aica_reg(u32 addr,u32 sz)
+ {
++	std::lock_guard<std::mutex> lk(aica_lock);
+ 	addr&=0x7FFF;
+ 	if (sz==1)
+ 	{
+@@ -116,6 +122,7 @@ static void ArmSetRST()
+ }
+ void WriteMem_aica_reg(u32 addr,u32 data,u32 sz)
+ {
++	std::lock_guard<std::mutex> lk(aica_lock);
+ 	addr&=0x7FFF;
+ 
+ 	if (sz==1)
+diff --git a/core/hw/aica/aica_if.h b/core/hw/aica/aica_if.h
+index 2737215..a96a7ef 100644
+--- a/core/hw/aica/aica_if.h
++++ b/core/hw/aica/aica_if.h
+@@ -21,3 +21,4 @@ void aica_sb_Term();
+ s32 libAICA_Init();
+ void libAICA_Reset(bool hard);
+ void libAICA_Term();
++void libAICA_Sync();
+diff --git a/core/hw/aica/sgc_if.cpp b/core/hw/aica/sgc_if.cpp
+index 8a14958..26f09db 100644
+--- a/core/hw/aica/sgc_if.cpp
++++ b/core/hw/aica/sgc_if.cpp
+@@ -24,6 +24,7 @@
+ #include "aica_if.h"
+ #include <math.h>
+ #include <algorithm>
++#include <atomic>
+ #undef FAR
+ 
+ //#define CLIP_WARN
+@@ -1343,6 +1344,39 @@ void WriteCommonReg8(u32 reg,u32 data)
+ s16 cdda_sector[CDDA_SIZE]={0};
+ u32 cdda_index=CDDA_SIZE<<1;
+ 
++/* CD audio sectors read ahead on the emulation thread for an AICA running
++ * on its own thread (aica.cpp): a single-producer, single-consumer ring. */
++#define CDDA_AHEAD 4
++static s16 cdda_ring[CDDA_AHEAD][CDDA_SIZE];
++static std::atomic<u32> cdda_ring_w, cdda_ring_r;
++
++void cdda_prefetch()
++{
++	while (cdda_ring_w.load(std::memory_order_relaxed) - cdda_ring_r.load(std::memory_order_acquire) < CDDA_AHEAD - 1)
++	{
++		u32 w = cdda_ring_w.load(std::memory_order_relaxed);
++		libCore_CDDA_Sector(cdda_ring[w % CDDA_AHEAD]);
++		cdda_ring_w.store(w + 1, std::memory_order_release);
++	}
++}
++
++static void cdda_next_sector(s16 *sector)
++{
++	if (!settings.rend.ThreadedRendering)
++	{
++		libCore_CDDA_Sector(sector);
++		return;
++	}
++	u32 r = cdda_ring_r.load(std::memory_order_relaxed);
++	if (r == cdda_ring_w.load(std::memory_order_acquire))
++	{
++		memset(sector, 0, CDDA_SIZE * sizeof(s16));
++		return;
++	}
++	memcpy(sector, cdda_ring[r % CDDA_AHEAD], CDDA_SIZE * sizeof(s16));
++	cdda_ring_r.store(r + 1, std::memory_order_release);
++}
++
+ void AICA_Sample()
+ {
+ 	SampleType mixl,mixr;
+@@ -1358,7 +1392,7 @@ void AICA_Sample()
+ 	if (cdda_index>=CDDA_SIZE)
+ 	{
+ 		cdda_index=0;
+-		libCore_CDDA_Sector(cdda_sector);
++		cdda_next_sector(cdda_sector);
+ 	}
+ 	s32 EXTS0L=cdda_sector[cdda_index];
+ 	s32 EXTS0R=cdda_sector[cdda_index+1];
+diff --git a/core/hw/aica/sgc_if.h b/core/hw/aica/sgc_if.h
+index f783d46..4363467 100644
+--- a/core/hw/aica/sgc_if.h
++++ b/core/hw/aica/sgc_if.h
+@@ -74,3 +74,4 @@ void WriteCommonReg8(u32 reg,u32 data);
+ #define clip16(x) clip(x,-32768,32767)
+ bool channel_serialize(void **data, unsigned int *total_size);
+ bool channel_unserialize(void **data, unsigned int *total_size, serialize_version_enum version);
++void cdda_prefetch();
+diff --git a/core/libretro/libretro.cpp b/core/libretro/libretro.cpp
+index e4af20c..e2b1157 100644
+--- a/core/libretro/libretro.cpp
++++ b/core/libretro/libretro.cpp
+@@ -188,6 +188,7 @@ void ResetAudioBuffer(void);
+ void FlushAudioFrame(void);	// emit one frame's accumulated audio (non-threaded)
+ void CaptureInput(void);	// sample input on the main thread, once per frame
+ bool rend_single_frame();
++void libAICA_Sync();
+ bool rend_draw_deferred(void);
+ extern bool rend_deferred_swapped;
+ 
+@@ -239,6 +240,8 @@ static void *emu_thread_func(void *)
+          retro_atomic_store_release_int(&reset_requested, 0);
+       }
+       dc_run();
++      /* The AICA thread catches up with the SH4 before the frame is over. */
++      libAICA_Sync();
+       emu_baton.EndFrame();
+    }
+ 
+-- 
+2.56.0
+

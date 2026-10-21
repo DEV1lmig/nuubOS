@@ -1,0 +1,334 @@
+From 9e310f9f0d687de665e08f66b7e5414f8b12b0db Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 14:39:34 +0200
+Subject: [PATCH 2/6] GLES renderer: cheaper on Mali with Panfrost (nuubOS)
+
+Three changes for the H700 (Mali-G31 MP1, one shader core; Mesa
+Panfrost), measured on Dead or Alive 2 at 640x480 on the RG CubeXX:
+
+- Strips are drawn with glDrawRangeElements (GLES 3), their vertex range
+  being their first and last index (make_index writes the indices of a
+  strip in ascending order). Without a range Panfrost finds it by
+  reading every index back from the uncached mapping of the index
+  buffer: 27 % of the rendering thread.
+
+- The depth test goes by the depth the vertex shader gives (an affine
+  function of 1/w, exact across a triangle), as the GLES 2 path did. The
+  fragment shaders wrote a logarithmic gl_FragDepth on GL/GLES 3, which
+  turns off early depth testing and forward pixel kill: every hidden
+  fragment was shaded (~9 layers a pixel). GPU busy 88 % -> 61 %.
+
+- Vertex, index and modifier volume data go into three buffers of each,
+  used in turn and written in place with glBufferSubData once the fence
+  of the frame that last drew from them has passed. A new store every
+  frame (glBufferData) was a new GPU buffer in Panfrost, its pages
+  faulted in and cleared by the kernel as they were written (~20 % of
+  the rendering thread); without the fence Panfrost let the GPU read the
+  new data for a frame still being drawn.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/rend/gles/gldraw.cpp |  28 ++++++++--
+ core/rend/gles/gles.cpp   | 105 ++++++++++++++++++++++++++++++--------
+ core/rend/gles/gles.h     |  12 +++++
+ 3 files changed, 119 insertions(+), 26 deletions(-)
+
+diff --git a/core/rend/gles/gldraw.cpp b/core/rend/gles/gldraw.cpp
+index e12336b..3beffc9 100644
+--- a/core/rend/gles/gldraw.cpp
++++ b/core/rend/gles/gldraw.cpp
+@@ -245,6 +245,28 @@ __forceinline
+ 	}
+ }
+ 
++/* Draw the strip of index entries [first, first + count). Without a range
++ * Mesa's Panfrost finds the vertices a draw uses by reading every index
++ * back from the uncached mapping of the index buffer, which is new every
++ * frame: perf on Dead or Alive 2 (Mali-G31, Cortex-A53) put 27 % of the
++ * rendering thread there. make_index() writes the indices of a strip in
++ * ascending order, so its first and last ones are the range. */
++static void DrawStrip(u32 first, u32 count)
++{
++	const void *offset = (GLvoid*)(gl.get_index_size() * first);
++
++	if (count == 0)
++		return;
++	if (gl.draw_range_elements != NULL)
++	{
++		const u32 *idx = pvrrc.idx.head();
++		gl.draw_range_elements(GL_TRIANGLE_STRIP, idx[first],
++				idx[first + count - 1], count, gl.index_type, offset);
++	}
++	else
++		glDrawElements(GL_TRIANGLE_STRIP, count, gl.index_type, offset);
++}
++
+ template <u32 Type, bool SortingEnabled>
+ static void DrawList(const List<PolyParam>& gply, int first, int count)
+ {
+@@ -271,8 +293,7 @@ static void DrawList(const List<PolyParam>& gply, int first, int count)
+ 		if (params->count>2) /* this actually happens for some games. No idea why .. */
+ 		{
+ 			SetGPState<Type,SortingEnabled>(params);
+-			glDrawElements(GL_TRIANGLE_STRIP, params->count, gl.index_type,
+-						(GLvoid*)(gl.get_index_size() * params->first));
++			DrawStrip(params->first, params->count);
+ 		}
+ 
+ 		params++;
+@@ -562,8 +583,7 @@ static void DrawShadowed(const List<PolyParam>& gply, int first, int count, cons
+ 			glcache.StencilFunc(GL_EQUAL, 0x81, 0xC1);
+ 			glcache.StencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+ 		}
+-		glDrawElements(GL_TRIANGLE_STRIP, gp->count, gl.index_type,
+-				(GLvoid*)(gl.get_index_size() * gp->first));
++		DrawStrip(gp->first, gp->count);
+ 	}
+ }
+ 
+diff --git a/core/rend/gles/gles.cpp b/core/rend/gles/gles.cpp
+index c261555..c816dae 100644
+--- a/core/rend/gles/gles.cpp
++++ b/core/rend/gles/gles.cpp
+@@ -1,6 +1,7 @@
+ #define PVR_REGS_FOR_RENDERER	// see hw/pvr/pvr_regs.h
+ #include <math.h>
+ #include <string.h>
++#include <dlfcn.h>
+ 
+ #include <libretro.h>
+ 
+@@ -82,15 +83,19 @@ void main()
+ 	vtx_uv = in_uv;
+ 	highp vec4 vpos = normal_matrix * in_pos;
+ 	vpos.w = 1.0 / vpos.z;
+-#if TARGET_GL != GLES2
+-   vpos.z = vpos.w;
+-#else
++#if TARGET_GL == GLES2
+    // Interpolated with perspective correction, 1/depth comes out as one over
+    // the depth at the pixel, which is what fog goes by. depth itself does not:
+    // it came out too large inside any triangle that spans a range of depths.
+    fog_depth = vpos.w;
+-   vpos.z=depth_scale.x+depth_scale.y*vpos.w; 
+ #endif
++   // The depth test goes by the Dreamcast's own depth value (1/w), which is
++   // linear across the screen, so the rasteriser interpolates it exactly.
++   // The fragment shaders used to write a logarithmic depth instead (GL and
++   // GLES 3): that turns off early depth testing and Mali's forward pixel
++   // kill, and every hidden fragment was shaded (Dead or Alive 2: ~9 layers
++   // a pixel on a Mali-G31 with one shader core).
++   vpos.z=depth_scale.x+depth_scale.y*vpos.w;
+ 	vpos.xy *= vpos.w;
+ 	gl_Position = vpos;
+ }
+@@ -346,10 +351,6 @@ void main()
+ 		color.a=1.0;
+ 	#endif 
+ 	//color.rgb=vec3(gl_FragCoord.w * sp_FOG_DENSITY / 128.0);
+-#if TARGET_GL != GLES2
+-	highp float w = gl_FragCoord.w * 100000.0;
+-	gl_FragDepth = log2(1.0 + w) / 34.0;
+-#endif
+ 	gl_FragColor =color;
+ }
+ )";
+@@ -377,10 +378,6 @@ uniform lowp float sp_ShaderColor;
+ /* Vertex input*/
+ void main()
+ {
+-#if TARGET_GL != GLES2
+-   highp float w = gl_FragCoord.w * 100000.0;
+-   gl_FragDepth = log2(1.0 + w) / 34.0;
+-#endif
+    gl_FragColor=vec4(0.0, 0.0, 0.0, sp_ShaderColor);
+ }
+ )";
+@@ -457,6 +454,8 @@ void findGLVersion()
+ {
+ 	gl.stencil_present = true;
+ 	gl.index_type = GL_UNSIGNED_INT;
++	gl.draw_range_elements = NULL;
++	gl.fence_sync = NULL;
+ 
+ 	while (true)
+ 		if (glGetError() == GL_NO_ERROR)
+@@ -476,6 +475,16 @@ void findGLVersion()
+ 		{
+ 			gl.gl_version = "GLES3";
+ 			gl.glsl_version_header = "#version 300 es";
++			/* The headers are GLES 2 ones; the library the frontend
++			 * loaded has the GLES 3 entry point. */
++			gl.draw_range_elements = (void (*)(GLenum, GLuint, GLuint, GLsizei, GLenum, const void *))
++					dlsym(RTLD_DEFAULT, "glDrawRangeElements");
++			gl.fence_sync = (void *(*)(GLenum, GLbitfield))dlsym(RTLD_DEFAULT, "glFenceSync");
++			gl.client_wait_sync = (GLenum (*)(void *, GLbitfield, uint64_t))
++					dlsym(RTLD_DEFAULT, "glClientWaitSync");
++			gl.delete_sync = (void (*)(void *))dlsym(RTLD_DEFAULT, "glDeleteSync");
++			if (gl.fence_sync == NULL || gl.client_wait_sync == NULL || gl.delete_sync == NULL)
++				gl.fence_sync = NULL;
+ 		}
+ 		else
+ 		{
+@@ -736,9 +745,15 @@ static void gl_term(void)
+ 	glcache.DeleteTextures(ARRAY_SIZE(lightgunTextureId), lightgunTextureId);
+ 	memset(lightgunTextureId, 0, sizeof(lightgunTextureId));
+ 
+-	glDeleteBuffers(1, &gl.vbo.geometry);
+-	glDeleteBuffers(1, &gl.vbo.modvols);
+-	glDeleteBuffers(1, &gl.vbo.idxs);
++	for (int i = 0; i < 3; i++)
++		if (gl.vbo.ring_fence[i] != NULL)
++		{
++			gl.delete_sync(gl.vbo.ring_fence[i]);
++			gl.vbo.ring_fence[i] = NULL;
++		}
++	glDeleteBuffers(3, gl.vbo.ring_geometry);
++	glDeleteBuffers(3, gl.vbo.ring_modvols);
++	glDeleteBuffers(3, gl.vbo.ring_idxs);
+ 	glDeleteBuffers(1, &gl.vbo.idxs2);
+ 	glDeleteTextures(1, &fbTextureId);
+ 	fbTextureId = 0;
+@@ -753,9 +768,14 @@ static void gl_term(void)
+ static bool gl_create_resources(void)
+ {
+ 	/* create VBOs */
+-	glGenBuffers(1, &gl.vbo.geometry);
+-	glGenBuffers(1, &gl.vbo.modvols);
+-	glGenBuffers(1, &gl.vbo.idxs);
++	glGenBuffers(3, gl.vbo.ring_geometry);
++	glGenBuffers(3, gl.vbo.ring_modvols);
++	glGenBuffers(3, gl.vbo.ring_idxs);
++	gl.vbo.ring_pos = 0;
++	memset(gl.vbo.ring_fence, 0, sizeof(gl.vbo.ring_fence));
++	gl.vbo.geometry = gl.vbo.ring_geometry[0];
++	gl.vbo.modvols = gl.vbo.ring_modvols[0];
++	gl.vbo.idxs = gl.vbo.ring_idxs[0];
+ 	glGenBuffers(1, &gl.vbo.idxs2);
+ 
+    findGLVersion();
+@@ -848,6 +868,32 @@ void vertex_buffer_unmap(void)
+ void DoCleanup() {
+ }
+ 
++/* Fill the buffer bound to @target. The vertex, index and modifier volume
++ * buffers are three of each, used in turn, and the frame that drew from
++ * one last left a fence: once the GPU is past it the buffer is written in
++ * place. A new store each frame (glBufferData) was a new GPU buffer each
++ * frame in Panfrost, its pages faulted in and cleared by the kernel as
++ * they were written: ~20 % of the rendering thread in Dead or Alive 2.
++ * Writing in place without the fence is not safe: Panfrost let the GPU
++ * read the new data for a frame still being drawn (tiles of two frames).
++ * The store only grows; the small quads drawn on the side (framebuffer,
++ * VMU screens) still replace it with their own, and it grows back. */
++static void upload_buffer(GLenum target, size_t bytes, const void *data)
++{
++	GLint size = 0;
++
++	if (gl.fence_sync == NULL)
++	{
++		glBufferData(target, bytes, data, GL_STREAM_DRAW);
++		return;
++	}
++	glGetBufferParameteriv(target, GL_BUFFER_SIZE, &size);
++	if ((size_t)size < bytes)
++		glBufferData(target, bytes + bytes / 4, NULL, GL_DYNAMIC_DRAW);
++	if (bytes > 0)
++		glBufferSubData(target, 0, bytes, data);
++}
++
+ static void upload_vertex_indices()
+ {
+ 	if (gl.index_type == GL_UNSIGNED_SHORT)
+@@ -859,10 +905,10 @@ static void upload_vertex_indices()
+ 		short_idx.Init(pvrrc.idx.used(), &overrun, NULL);
+ 		for (u32 *p = pvrrc.idx.head(); p < pvrrc.idx.LastPtr(0); p++)
+ 			*(short_idx.Append()) = *p;
+-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, short_idx.bytes(), short_idx.head(), GL_STREAM_DRAW);
++		upload_buffer(GL_ELEMENT_ARRAY_BUFFER, short_idx.bytes(), short_idx.head());
+ 	}
+ 	else
+-		glBufferData(GL_ELEMENT_ARRAY_BUFFER,pvrrc.idx.bytes(),pvrrc.idx.head(),GL_STREAM_DRAW);
++		upload_buffer(GL_ELEMENT_ARRAY_BUFFER, pvrrc.idx.bytes(), pvrrc.idx.head());
+ }
+ 
+ static bool RenderFrame(void)
+@@ -1017,13 +1063,25 @@ static bool RenderFrame(void)
+ 
+ 	//move vertex to gpu
+ 
++	gl.vbo.ring_pos = (gl.vbo.ring_pos + 1) % 3;
++	if (gl.vbo.ring_fence[gl.vbo.ring_pos] != NULL)
++	{
++		/* GL_SYNC_FLUSH_COMMANDS_BIT, no time limit */
++		gl.client_wait_sync(gl.vbo.ring_fence[gl.vbo.ring_pos], 0x1, ~(uint64_t)0);
++		gl.delete_sync(gl.vbo.ring_fence[gl.vbo.ring_pos]);
++		gl.vbo.ring_fence[gl.vbo.ring_pos] = NULL;
++	}
++	gl.vbo.geometry = gl.vbo.ring_geometry[gl.vbo.ring_pos];
++	gl.vbo.modvols = gl.vbo.ring_modvols[gl.vbo.ring_pos];
++	gl.vbo.idxs = gl.vbo.ring_idxs[gl.vbo.ring_pos];
++
+ 	if (!pvrrc.isRenderFramebuffer)
+ 	{
+ 		//Main VBO
+ 		glBindBuffer(GL_ARRAY_BUFFER, gl.vbo.geometry); glCheck();
+ 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gl.vbo.idxs); glCheck();
+ 
+-		glBufferData(GL_ARRAY_BUFFER,pvrrc.verts.bytes(),pvrrc.verts.head(),GL_STREAM_DRAW); glCheck();
++		upload_buffer(GL_ARRAY_BUFFER, pvrrc.verts.bytes(), pvrrc.verts.head()); glCheck();
+ 
+ 		upload_vertex_indices();
+ 
+@@ -1031,7 +1089,7 @@ static bool RenderFrame(void)
+ 		if (pvrrc.modtrig.used())
+ 		{
+ 			glBindBuffer(GL_ARRAY_BUFFER, gl.vbo.modvols); glCheck();
+-			glBufferData(GL_ARRAY_BUFFER,pvrrc.modtrig.bytes(),pvrrc.modtrig.head(),GL_STREAM_DRAW); glCheck();
++			upload_buffer(GL_ARRAY_BUFFER, pvrrc.modtrig.bytes(), pvrrc.modtrig.head()); glCheck();
+ 		}
+ 
+ 		if (!wide_screen_on)
+@@ -1132,6 +1190,9 @@ static bool RenderFrame(void)
+ 
+ 	KillTex = false;
+ 
++	if (gl.fence_sync != NULL)	/* GL_SYNC_GPU_COMMANDS_COMPLETE */
++		gl.vbo.ring_fence[gl.vbo.ring_pos] = gl.fence_sync(0x9117, 0);
++
+ 	if (is_rtt)
+ 		ReadRTTBuffer();
+ 
+diff --git a/core/rend/gles/gles.h b/core/rend/gles/gles.h
+index 8c2d439..7fdcbf6 100644
+--- a/core/rend/gles/gles.h
++++ b/core/rend/gles/gles.h
+@@ -93,6 +93,10 @@ struct gl_ctx
+ 	struct
+ 	{
+ 		GLuint geometry,modvols,idxs,idxs2;
++		/* geometry, modvols and idxs are the current ones of these */
++		GLuint ring_geometry[3], ring_modvols[3], ring_idxs[3];
++		void *ring_fence[3];	/* GLsync of the frame that drew from them */
++		int ring_pos;
+ 	} vbo;
+ 
+ 	struct
+@@ -112,6 +116,14 @@ struct gl_ctx
+ 	GLenum index_type;
+ 	bool stencil_present;
+ 	f32 max_anisotropy;
++	/* glDrawRangeElements (GLES 3), NULL when there is none. */
++	void (*draw_range_elements)(GLenum mode, GLuint start, GLuint end,
++			GLsizei count, GLenum type, const void *indices);
++	/* glFenceSync, glClientWaitSync, glDeleteSync (GLES 3), NULL when
++	 * there are none: the buffers are then filled the old way. */
++	void *(*fence_sync)(GLenum condition, GLbitfield flags);
++	GLenum (*client_wait_sync)(void *sync, GLbitfield flags, uint64_t timeout);
++	void (*delete_sync)(void *sync);
+ 
+ 	size_t get_index_size() { return index_type == GL_UNSIGNED_INT ? sizeof(u32) : sizeof(u16); }
+ };
+-- 
+2.56.0
+

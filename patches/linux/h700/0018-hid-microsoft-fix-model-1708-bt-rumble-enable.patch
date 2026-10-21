@@ -3,13 +3,27 @@ Subject: [PATCH] HID: microsoft: fix Model 1708 Bluetooth rumble enable mask
 
 Enable all four actuator bits for Xbox One S Model 1708 Bluetooth force-feedback reports so vibration works on the qualified controller path.
 
+The first version of this patch had zero-context hunks: on newer kernels its
+table hunk landed on the 8BitDo SN30 Pro+ entry instead of the Model 1708
+one, so the 1708 (045e:02fd) still sent enable 0x03 and never rumbled (user
+report 2026-10-21). Regenerated against Linux 7.3 with context.
+
 Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
 ---
 --- a/drivers/hid/hid-microsoft.c
 +++ b/drivers/hid/hid-microsoft.c
-@@ -29,0 +30 @@
+@@ -27,6 +27,7 @@
+ #define MS_DUPLICATE_USAGES	BIT(5)
+ #define MS_SURFACE_DIAL		BIT(6)
+ #define MS_QUIRK_FF		BIT(7)
 +#define MS_QUIRK_FF_ENABLE_ALL	BIT(8)
-@@ -291,0 +293,9 @@
+ 
+ struct ms_data {
+ 	unsigned long quirks;
+@@ -289,6 +290,15 @@
+ 
+ 	r->report_id = XB1S_FF_REPORT;
+ 	r->enable = ENABLE_WEAK | ENABLE_STRONG;
 +
 +	/*
 +	 * Xbox One S Model 1708 Bluetooth firmware requires all four
@@ -19,6 +33,15 @@ Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
 +	 */
 +	if (ms->quirks & MS_QUIRK_FF_ENABLE_ALL)
 +		r->enable |= BIT(2) | BIT(3);
-@@ -451 +461 @@
+ 	/*
+ 	 * Specifying maximum duration and maximum loop count should
+ 	 * cover maximum duration of a single effect, which is 65536
+@@ -425,7 +435,7 @@
+ 		.driver_data = MS_SURFACE_DIAL },
+ 
+ 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_MICROSOFT, USB_DEVICE_ID_MS_XBOX_CONTROLLER_MODEL_1708),
 -		.driver_data = MS_QUIRK_FF },
 +		.driver_data = MS_QUIRK_FF | MS_QUIRK_FF_ENABLE_ALL },
+ 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_MICROSOFT, USB_DEVICE_ID_MS_XBOX_CONTROLLER_MODEL_1708_BLE),
+ 		.driver_data = MS_QUIRK_FF },
+ 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_MICROSOFT, USB_DEVICE_ID_MS_XBOX_CONTROLLER_MODEL_1914),

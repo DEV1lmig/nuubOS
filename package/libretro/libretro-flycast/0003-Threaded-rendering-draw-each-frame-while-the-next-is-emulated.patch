@@ -1,0 +1,480 @@
+From 1e28c180e5c9d49b303ae86f0c95393027cc4e59 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 14:39:34 +0200
+Subject: [PATCH 3/6] Threaded rendering: draw each frame while the next one is
+ emulated (nuubOS)
+
+A Dreamcast game starts its render late in the frame (Dead or Alive 2:
+after 18 of 18.5 ms of emulation), and the render was read (Process)
+and drawn on the libretro thread right away while the emulation thread
+waited, so the two threads took turns: ~31 ms a frame where each needed
+~16.
+
+Now the render the game starts in frame N is read and drawn at the start
+of the retro_run() of frame N + 1, while the emulation thread runs that
+frame, and handed to the frontend at once, so that the frontend's
+presentation overlaps the emulation too. The frame shown is the one
+before: one frame more of latency. Reading a render later is made safe
+by taking everything it needs from the render itself: the registers
+(ctx->regs; rend_pvr_regs is per thread now, and ta_vtx.cpp reads
+through it) and what the region array says (ta_save_regions, at the
+hand-over). Textures are still read from video memory, but a texture is
+protected (or hashed) before it is decoded, so one the game rewrites
+meanwhile is decoded again at its next use. A render to a texture is
+still drawn at once with the emulation asleep, a frame taken from the
+framebuffer still read at once.
+
+Dead or Alive 2, 640x480, RG CubeXX, with the GLES changes: 30-36 ->
+45-48 fps in a fight; Test Drive Le Mans 46-50 in a race.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/hw/pvr/Renderer_if.cpp | 104 +++++++++++++++++++++++++++++++++---
+ core/hw/pvr/pvr_regs.cpp    |   2 +-
+ core/hw/pvr/pvr_regs.h      |   8 ++-
+ core/hw/pvr/ta_ctx.cpp      |   8 +++
+ core/hw/pvr/ta_ctx.h        |  10 ++++
+ core/hw/pvr/ta_vtx.cpp      |  42 +++++++++++++--
+ core/libretro/libretro.cpp  |  34 ++++++++++--
+ core/rend/TexCache.cpp      |  32 ++++++-----
+ 8 files changed, 209 insertions(+), 31 deletions(-)
+
+diff --git a/core/hw/pvr/Renderer_if.cpp b/core/hw/pvr/Renderer_if.cpp
+index b745d8b..805d031 100644
+--- a/core/hw/pvr/Renderer_if.cpp
++++ b/core/hw/pvr/Renderer_if.cpp
+@@ -90,6 +90,60 @@ bool fb_dirty;
+ 
+ TA_context* _pvrrc;
+ 
++#if !defined(TARGET_NO_THREADS)
++/* Threaded rendering draws a frame one retro_run() late: the render the
++ * game starts in frame N is read (Process) and drawn (Render) at the start
++ * of frame N + 1, while the emulation thread runs that frame. Games start
++ * their render late in the frame (Dead or Alive 2: after 18 of 18.5 ms of
++ * emulation), so reading and drawing it right away left the emulation
++ * thread idle all that time and the two threads took turns. The frame
++ * shown is the one before: one frame more of latency.
++ *
++ * A render to a texture is still drawn at once with the emulation asleep
++ * (it ends up in the game's memory), and a frame taken from the
++ * framebuffer is still read at once (it reads video memory the game draws
++ * into); its drawing waits like any other. */
++static TA_context *rend_deferred;
++static bool rend_deferred_read;	/* Process() has been done for it */
++bool rend_deferred_swapped;
++
++/* Libretro thread: draw the render left for later, if any. */
++bool rend_draw_deferred(void)
++{
++   TA_context *ctx = rend_deferred;
++   TA_context *cur = _pvrrc;
++   u8 *cur_regs = rend_pvr_regs;
++
++   if (ctx == NULL)
++      return false;
++   rend_deferred = NULL;
++   _pvrrc = ctx;
++   rend_pvr_regs = ctx->regs;
++   bool proc = true;
++   if (!rend_deferred_read)
++   {
++      palette_update();
++      proc = renderer->Process(ctx);
++   }
++   bool do_swp = proc && renderer->Render();
++   _pvrrc = cur;
++   rend_pvr_regs = cur_regs;
++   tactx_Recycle(ctx);
++   if (do_swp)
++      rend_deferred_swapped = true;
++   return do_swp;
++}
++
++/* Libretro thread, the renderer going away: forget the render left for
++ * later. */
++void rend_drop_deferred(void)
++{
++   if (rend_deferred != NULL)
++      tactx_Recycle(rend_deferred);
++   rend_deferred = NULL;
++}
++#endif
++
+ void rend_create_renderer()
+ {
+ 	switch (settings.pvr.rend)
+@@ -137,6 +191,9 @@ void rend_init_renderer()
+ 
+ void rend_term_renderer()
+ {
++#if !defined(TARGET_NO_THREADS)
++	rend_drop_deferred();
++#endif
+ 	if (renderer != NULL)
+ 	{
+ 		renderer->Term();
+@@ -164,7 +221,27 @@ bool rend_frame(TA_context* ctx, bool draw_osd)
+    /* The renderer reads the registers as they were when the game started
+     * this render. */
+    if (settings.rend.ThreadedRendering)
++   {
++      /* A second render in the same frame: the one before is drawn first. */
++      rend_draw_deferred();
+       rend_pvr_regs = ctx->regs;
++   }
++   /* Reading a render (Process) takes its display lists from the render's
++    * own copy, its registers from ctx->regs and what it needs of the
++    * region array from what was saved at the hand-over (ta_save_regions),
++    * so it is left for later too and the emulation goes on at once (it
++    * used to wait 4-6 ms a frame in Dead or Alive 2). Textures are still
++    * read from video memory: a texture is protected before it is decoded,
++    * so one the game rewrites meanwhile is decoded again at its next use. */
++   const bool early_ack = settings.rend.ThreadedRendering
++         && !ctx->rend.isRTT && !ctx->rend.isRenderFramebuffer;
++   if (early_ack)
++   {
++      emu_baton.AckWork();
++      rend_deferred = ctx;
++      rend_deferred_read = false;
++      return false;
++   }
+ #endif
+    /* The palette this frame is drawn with, converted here, on the thread
+     * that draws, from the registers the frame is drawn with. */
+@@ -172,16 +249,20 @@ bool rend_frame(TA_context* ctx, bool draw_osd)
+ 
+    bool proc = renderer->Process(ctx);
+ #if !defined(TARGET_NO_THREADS)
+-   /* Process() has read everything the frame takes from the game's memory:
+-    * the display lists, the textures, the framebuffer. The emulation thread
+-    * has been asleep since it handed the render over, so what was read is
+-    * what non-threaded rendering would have read; from here it can run
+-    * while the frame is drawn. A render to a texture ends up back in the
+-    * game's memory, so that one keeps the emulation asleep until it is
+-    * finished. */
++   /* A render to a texture or a frame taken from the framebuffer: Process()
++    * has read what it takes from the game's memory with the emulation
++    * asleep. A render to a texture ends up back in the game's memory, so
++    * that one keeps the emulation asleep until it is drawn; the other is
++    * drawn later like the rest. */
+    const bool hold = proc && ctx->rend.isRTT;
+-   if (settings.rend.ThreadedRendering && !hold)
++   if (settings.rend.ThreadedRendering && !hold && !early_ack)
+       emu_baton.AckWork();
++   if (settings.rend.ThreadedRendering && proc && !hold)
++   {
++      rend_deferred = ctx;
++      rend_deferred_read = true;
++      return false;
++   }
+ #endif
+ 
+    bool do_swp = proc && renderer->Render();
+@@ -212,6 +293,11 @@ bool rend_single_frame(void)
+ 		bool do_swp = rend_frame(_pvrrc, true);
+ 
+ 		//clear up & free data ..
++#if !defined(TARGET_NO_THREADS)
++		if (_pvrrc == rend_deferred)
++			DetachRender(_pvrrc);
++		else
++#endif
+ 		FinishRender(_pvrrc);
+ 		_pvrrc=0;
+ 		rend_pvr_regs = pvr_regs;
+@@ -278,6 +364,8 @@ void rend_start_render(void)
+                 * as they are now, and sleep until it has read what it needs
+                 * of the game's memory. */
+                memcpy(ctx->regs, pvr_regs, pvr_RendRegSize);
++               if (!ctx->rend.isRenderFramebuffer)
++                  ta_save_regions(ctx);
+                emu_baton.HandOver(ctx);
+             }
+             else
+diff --git a/core/hw/pvr/pvr_regs.cpp b/core/hw/pvr/pvr_regs.cpp
+index 1338a0c..8f578f3 100644
+--- a/core/hw/pvr/pvr_regs.cpp
++++ b/core/hw/pvr/pvr_regs.cpp
+@@ -6,7 +6,7 @@
+ 
+ 
+ u8 pvr_regs[pvr_RegSize];
+-u8 *rend_pvr_regs = pvr_regs;
++__thread u8 *rend_pvr_regs = pvr_regs;
+ 
+ u32 pvr_ReadReg(u32 addr)
+ {
+diff --git a/core/hw/pvr/pvr_regs.h b/core/hw/pvr/pvr_regs.h
+index d06239e..bf41e46 100644
+--- a/core/hw/pvr/pvr_regs.h
++++ b/core/hw/pvr/pvr_regs.h
+@@ -13,8 +13,12 @@ extern u8 pvr_regs[pvr_RegSize];
+  * then and may have changed them.
+  *
+  * The files of the renderers define PVR_REGS_FOR_RENDERER before they
+- * include anything, which points every register they read at this. */
+-extern u8 *rend_pvr_regs;
++ * include anything, which points every register they read at this. It is
++ * per thread: the libretro thread points it at a render's copy while it
++ * reads or draws that render, the emulation thread always sees pvr_regs.
++ * ta_vtx.cpp is such a file too, and its background plane code runs on
++ * the emulation thread. */
++extern __thread u8 *rend_pvr_regs __attribute__((tls_model("initial-exec")));
+ 
+ /* The part of the register block that is copied for a render: the
+  * registers proper, the fog table and the palette. */
+diff --git a/core/hw/pvr/ta_ctx.cpp b/core/hw/pvr/ta_ctx.cpp
+index 66567ff..f52930d 100644
+--- a/core/hw/pvr/ta_ctx.cpp
++++ b/core/hw/pvr/ta_ctx.cpp
+@@ -132,6 +132,14 @@ void FinishRender(TA_context* ctx)
+ 	}
+ }
+ 
++/* The render queued is taken off the queue without being given back: its
++ * drawing is left for later (rend_frame). */
++void DetachRender(TA_context* ctx)
++{
++	verify(retro_atomic_load_relaxed_ptr(&rqueue) == ctx);
++	retro_atomic_store_release_ptr(&rqueue, NULL);
++}
++
+ /* Spare contexts. Both threads give them back; a slot hands each one to
+  * a single taker. */
+ static cSlotCache<TA_context, 3> ctx_pool;
+diff --git a/core/hw/pvr/ta_ctx.h b/core/hw/pvr/ta_ctx.h
+index 4a71ce3..5c913e8 100644
+--- a/core/hw/pvr/ta_ctx.h
++++ b/core/hw/pvr/ta_ctx.h
+@@ -170,6 +170,13 @@ struct TA_context
+ 	tad_context tad;
+ 	rend_context rend;
+ 
++	/* From the region array, when the render was started (ta_save_regions):
++	 * per render pass, then the tile clip as xmin, xmax, ymin, ymax. */
++	bool regions_saved = false;
++	bool pass_autosort[10];
++	bool pass_z_clear[10];
++	u32 tile_clip[4];
++
+ 	
+ 	/*
+ 		Dreamcast games use up to 20k vtx, 30k idx, 1k (in total) parameters.
+@@ -229,6 +236,7 @@ struct TA_context
+       tad.Clear();
+ 		rend.Clear();
+ 		rend.proc_end = rend.proc_start = tad.thd_root;
++		regions_saved = false;
+ 	}
+ 
+ 	void Free()
+@@ -271,6 +279,8 @@ void SetCurrentTARC(u32 addr);
+ bool QueueRender(TA_context* ctx);
+ TA_context* DequeueRender();
+ void FinishRender(TA_context* ctx);
++void DetachRender(TA_context* ctx);
++void ta_save_regions(TA_context* ctx);
+ 
+ //must be moved to proper header
+ void FillBGP(TA_context* ctx);
+diff --git a/core/hw/pvr/ta_vtx.cpp b/core/hw/pvr/ta_vtx.cpp
+index c9f9d7a..2678b62 100644
+--- a/core/hw/pvr/ta_vtx.cpp
++++ b/core/hw/pvr/ta_vtx.cpp
+@@ -3,6 +3,7 @@
+ 
+ 	Parsing of the TA stream and generation of vertex data !
+ */
++#define PVR_REGS_FOR_RENDERER	// see hw/pvr/pvr_regs.h
+ #include "ta.h"
+ #include "ta_ctx.h"
+ #include "pvr_mem.h"
+@@ -1625,8 +1626,16 @@ bool ta_parse_vdrc(TA_context* ctx)
+ 						render_pass->tr_count, false, &vd_rc);
+ 				tr_poly_count = render_pass->tr_count;
+ 				render_pass->mvo_tr_count = vd_rc.global_param_mvo_tr.used();
+-				render_pass->autosort = UsingAutoSort(pass);
+-				render_pass->z_clear = ClearZBeforePass(pass);
++				if (ctx->regions_saved)
++				{
++					render_pass->autosort = ctx->pass_autosort[pass];
++					render_pass->z_clear = ctx->pass_z_clear[pass];
++				}
++				else
++				{
++					render_pass->autosort = UsingAutoSort(pass);
++					render_pass->z_clear = ClearZBeforePass(pass);
++				}
+ 			}
+ 		}
+ 		rv = !empty_context;
+@@ -1643,7 +1652,15 @@ bool ta_parse_vdrc(TA_context* ctx)
+    if (rv && !overrun)
+    {
+       u32 xmin, xmax, ymin, ymax;
+-      getRegionTileClipping(xmin, xmax, ymin, ymax);
++      if (ctx->regions_saved)
++      {
++         xmin = ctx->tile_clip[0];
++         xmax = ctx->tile_clip[1];
++         ymin = ctx->tile_clip[2];
++         ymax = ctx->tile_clip[3];
++      }
++      else
++         getRegionTileClipping(xmin, xmax, ymin, ymax);
+       vd_rc.fb_X_CLIP.min = std::max(vd_rc.fb_X_CLIP.min, xmin);
+       vd_rc.fb_X_CLIP.max = std::min(vd_rc.fb_X_CLIP.max, xmax + 31);
+       vd_rc.fb_Y_CLIP.min = std::max(vd_rc.fb_Y_CLIP.min, ymin);
+@@ -1912,3 +1929,22 @@ static bool ClearZBeforePass(int pass_number)
+ 
+ 	return !tile.NoZClear;
+ }
++
++/* Emulation thread, as it hands a render over (threaded rendering): what
++ * the render takes from the region array, read now. The game may write a
++ * new region array into video memory while the render is still being read
++ * on the libretro thread. */
++void ta_save_regions(TA_context* ctx)
++{
++	u32 passes = std::min(ctx->tad.render_pass_count + 1,
++			(u32)(sizeof(ctx->pass_autosort) / sizeof(ctx->pass_autosort[0])));
++
++	for (u32 pass = 0; pass < passes; pass++)
++	{
++		ctx->pass_autosort[pass] = UsingAutoSort(pass);
++		ctx->pass_z_clear[pass] = ClearZBeforePass(pass);
++	}
++	getRegionTileClipping(ctx->tile_clip[0], ctx->tile_clip[1],
++			ctx->tile_clip[2], ctx->tile_clip[3]);
++	ctx->regions_saved = true;
++}
+diff --git a/core/libretro/libretro.cpp b/core/libretro/libretro.cpp
+index d5a19cd..e4af20c 100644
+--- a/core/libretro/libretro.cpp
++++ b/core/libretro/libretro.cpp
+@@ -188,6 +188,8 @@ void ResetAudioBuffer(void);
+ void FlushAudioFrame(void);	// emit one frame's accumulated audio (non-threaded)
+ void CaptureInput(void);	// sample input on the main thread, once per frame
+ bool rend_single_frame();
++bool rend_draw_deferred(void);
++extern bool rend_deferred_swapped;
+ 
+ static void refresh_devices(bool first_startup);
+ static void init_disk_control_interface(void);
+@@ -1176,6 +1178,11 @@ static void update_av_info_if_changed(void)
+    pending_av_fps_count = 0;
+ }
+ 
++/* Threaded rendering: the frame was handed to the frontend early in
++ * retro_run; a frame drawn after that is to be shown at the next call. */
++static bool video_sent;
++static bool shown_late;
++
+ void retro_run (void)
+ {
+    bool updated     = false;
+@@ -1212,17 +1219,36 @@ void retro_run (void)
+          glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
+ 
+       emu_baton.StartFrame();
++      /* The render of the frame before, while this one is emulated. */
++      rend_deferred_swapped = false;
++      rend_draw_deferred();
++
++      /* And shown at once, so that the frontend's part of the frame (the
++       * presentation, ~2 ms on the H700) runs while the machine does
++       * too. A frame drawn after this point, a second render of the
++       * machine's frame, is shown at the next call. */
++      if (settings.pvr.rend == 0 || settings.pvr.rend == 3)
++         glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
++      video_cb(rend_deferred_swapped || shown_late ? RETRO_HW_FRAME_BUFFER_VALID : 0,
++            screen_width, screen_height, 0);
++      video_sent = true;
++      shown_late = false;
++      rend_deferred_swapped = false;
++      if (settings.pvr.rend == 0 || settings.pvr.rend == 3)
++         glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
+       while (emu_baton.WaitWork() != NULL)
+       {
+          rend_single_frame();
+          emu_baton.WorkDone();
+       }
+-      /* The frame is made and the emulation thread is asleep again; is_dupe
+-       * was set at vblank (os_DoEvents). */
++      /* The frame is made and the emulation thread is asleep again. */
+ 
+       if (settings.pvr.rend == 0 || settings.pvr.rend == 3)
+          glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
+ 
++      if (rend_deferred_swapped)
++         shown_late = true;
++
+       /* This frame's audio, sent from this thread like its video. */
+       FlushAudioFrame();
+       /* The machine is asleep: what it saved this frame goes to disk now */
+@@ -1240,8 +1266,10 @@ void retro_run (void)
+ 	   maple_FlushSaves();
+    }
+ #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN)
+-   video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, screen_width, screen_height, 0);
++   if (!video_sent)
++      video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, screen_width, screen_height, 0);
+ #endif
++   video_sent = false;
+    is_dupe = true;
+ 
+    /* Keep timing.fps in step with the actual emulated refresh rate. */
+diff --git a/core/rend/TexCache.cpp b/core/rend/TexCache.cpp
+index c83f03a..1ab5a84 100644
+--- a/core/rend/TexCache.cpp
++++ b/core/rend/TexCache.cpp
+@@ -629,6 +629,24 @@ void BaseTextureCacheData::Update()
+ 			return;
+ 		}
+ 	}
++	//lock the texture to detect changes in it, unless it is frequently
++	//updated: each update of a protected texture costs a SIGSEGV (the write
++	//fault), the invalidation, a full re-upload, and a re-protect -- measured
++	//as 1-2 faults per frame sustained, with matching frame-time jitter, on
++	//titles that rewrite textures every frame (e.g. VF3tb). Past the update
++	//threshold, leave the pages writable and detect changes with a content
++	//hash at lookup time instead (see NeedsUpdate): a hash over the same range
++	//is cheaper than the fault path, and when the game rewrites identical
++	//content it avoids the re-upload entirely.
++	//Done before the texture is decoded: in threaded rendering the
++	//emulation runs while it is, and a write that comes in meanwhile must
++	//make the texture count as changed (a fault on the protected page, or
++	//a hash taken before it).
++	if (Updates < FREQUENT_UPDATE_COUNT)
++		libCore_vramlock_Lock(sa_tex, sa + size - 1, this);
++	else
++		vram_hash = ComputeVramHash();
++
+ 	if (settings.rend.CustomTextures)
+ 		custom_texture.LoadCustomTextureAsync(this);
+ 
+@@ -784,20 +802,6 @@ void BaseTextureCacheData::Update()
+ 	// Restore the original texture height if it was constrained to VRAM limits above
+ 	h = original_h;
+ 
+-	//lock the texture to detect changes in it, unless it is frequently
+-	//updated: each update of a protected texture costs a SIGSEGV (the write
+-	//fault), the invalidation, a full re-upload, and a re-protect -- measured
+-	//as 1-2 faults per frame sustained, with matching frame-time jitter, on
+-	//titles that rewrite textures every frame (e.g. VF3tb). Past the update
+-	//threshold, leave the pages writable and detect changes with a content
+-	//hash at lookup time instead (see NeedsUpdate): a hash over the same range
+-	//is cheaper than the fault path, and when the game rewrites identical
+-	//content it avoids the re-upload entirely.
+-	if (Updates < FREQUENT_UPDATE_COUNT)
+-		libCore_vramlock_Lock(sa_tex, sa + size - 1, this);
+-	else
+-		vram_hash = ComputeVramHash();
+-
+ 	UploadToGPU(upscaled_w, upscaled_h, (u8*)temp_tex_buffer, IsMipmapped(), mipmapped);
+ 	if (settings.rend.DumpTextures)
+ 	{
+-- 
+2.56.0
+

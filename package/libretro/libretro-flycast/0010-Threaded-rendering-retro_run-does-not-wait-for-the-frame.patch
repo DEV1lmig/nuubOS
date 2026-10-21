@@ -1,0 +1,207 @@
+From 7677eac45289ff7096c057816de63da20b227978 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 21:05:23 +0200
+Subject: [PATCH 10/11] Threaded rendering: retro_run does not wait for the
+ frame (nuubOS)
+
+retro_run started the machine's frame, drew and showed the one before,
+then waited for the frame to end before returning: the frontend's own
+part of the frame (input, audio resampling and output, ~1.6 ms on the
+H700) left the emulation thread idle. Now retro_run returns once the
+frame before is shown; the frame is finished (its renders read, its
+sound sent, its saves written) at the start of the next call or before
+anything else takes the machine (emu_hold: save states, reset, unload;
+cheats, disc control, controller ports, GL context loss). Input is still
+read right before the frame starts. Dead or Alive 2: 54.8 -> 58.7 fps.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/libretro/libretro.cpp | 79 ++++++++++++++++++++++++++++----------
+ 1 file changed, 58 insertions(+), 21 deletions(-)
+
+diff --git a/core/libretro/libretro.cpp b/core/libretro/libretro.cpp
+index 2491525..b132c13 100644
+--- a/core/libretro/libretro.cpp
++++ b/core/libretro/libretro.cpp
+@@ -256,15 +256,18 @@ static void *emu_thread_func(void *)
+    return NULL;
+ }
+ 
++static void finish_frame(void);
++
+ static void emu_hold(void)
+ {
++   finish_frame();
+    emu_baton.Hold();
+ }
+ 
+ /* Take the machine with the AICA thread caught up: save states, reset. */
+ static void emu_hold_synced(void)
+ {
+-   emu_baton.Hold();
++   emu_hold();
+    libAICA_Sync();
+ }
+ 
+@@ -1253,10 +1256,52 @@ static void update_av_info_if_changed(void)
+ static bool video_sent;
+ static bool shown_late;
+ 
++/*
++ * nuubOS: retro_run starts the machine's frame and returns once the frame
++ * before is shown, without waiting for this one: the frontend's own part
++ * (input, audio resampling and output, ~1.6 ms a frame on the H700) used
++ * to leave the emulation thread idle between frames; now it runs while the
++ * frame is emulated. The frame is finished (its renders read, its sound
++ * sent, its saves written) at the start of the next call, or before
++ * anything else takes the machine (save states, reset, unload). Input is
++ * still read right before the frame starts, so nothing is later.
++ */
++static bool frame_pending;   /* libretro thread only */
++
++static void finish_frame(void)
++{
++#if !defined(TARGET_NO_THREADS)
++   if (!frame_pending)
++      return;
++   frame_pending = false;
++   if (settings.pvr.rend == 0 || settings.pvr.rend == 3)
++      glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
++   while (emu_baton.WaitWork() != NULL)
++   {
++      rend_single_frame();
++      emu_baton.WorkDone();
++   }
++   /* The frame is made and the emulation thread is asleep again. */
++   if (settings.pvr.rend == 0 || settings.pvr.rend == 3)
++      glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
++
++   if (rend_deferred_swapped)
++      shown_late = true;
++
++   /* This frame's audio, sent from this thread like its video. */
++   FlushAudioFrame();
++   /* The machine is asleep: what it saved this frame goes to disk now */
++   maple_FlushSaves();
++   emu_baton.Release();
++#endif
++}
++
+ void retro_run (void)
+ {
+    bool updated     = false;
+ 
++   finish_frame();
++
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+       update_variables(false);
+ 
+@@ -1304,26 +1349,8 @@ void retro_run (void)
+       video_sent = true;
+       shown_late = false;
+       rend_deferred_swapped = false;
+-      if (settings.pvr.rend == 0 || settings.pvr.rend == 3)
+-         glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
+-      while (emu_baton.WaitWork() != NULL)
+-      {
+-         rend_single_frame();
+-         emu_baton.WorkDone();
+-      }
+-      /* The frame is made and the emulation thread is asleep again. */
+-
+-      if (settings.pvr.rend == 0 || settings.pvr.rend == 3)
+-         glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
+-
+-      if (rend_deferred_swapped)
+-         shown_late = true;
+-
+-      /* This frame's audio, sent from this thread like its video. */
+-      FlushAudioFrame();
+-      /* The machine is asleep: what it saved this frame goes to disk now */
+-      maple_FlushSaves();
+-      emu_release();
++      /* Finished by the next call (finish_frame). */
++      frame_pending = true;
+    }
+    else
+ #endif
+@@ -1365,6 +1392,7 @@ void retro_reset (void)
+ #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+ static void context_reset(void)
+ {
++   finish_frame();
+ 	INFO_LOG(RENDERER, "context_reset.");
+    gl_ctx_resetting = false;
+    glsm_ctl(GLSM_CTL_STATE_CONTEXT_RESET, NULL);
+@@ -1373,6 +1401,7 @@ static void context_reset(void)
+ 
+ static void context_destroy(void)
+ {
++   finish_frame();
+    gl_ctx_resetting = true;
+    renderer_changed = true;
+    glsm_ctl(GLSM_CTL_STATE_CONTEXT_DESTROY, NULL);
+@@ -2263,6 +2292,7 @@ size_t retro_get_memory_size(unsigned type)
+ 
+ size_t retro_serialize_size (void)
+ {
++   finish_frame();
+    unsigned int total_size = 0 ;
+    void *data = NULL ;
+ 
+@@ -2340,10 +2370,12 @@ bool retro_unserialize(const void * data, size_t size)
+ // Cheats
+ void retro_cheat_reset(void)
+ {
++   finish_frame();
+    // Nothing to do here
+ }
+ void retro_cheat_set(unsigned unused, bool unused1, const char* unused2)
+ {
++   finish_frame();
+    // Nothing to do here
+ }
+ 
+@@ -2425,6 +2457,7 @@ unsigned retro_get_region (void)
+ // Controller
+ void retro_set_controller_port_device(unsigned in_port, unsigned device)
+ {
++   finish_frame();
+ 	if (device_type[in_port] != device && in_port < MAPLE_PORTS)
+ 	{
+ 		devices_need_refresh = true;
+@@ -3431,6 +3464,7 @@ void os_DebugBreak(void)
+ 
+ static bool retro_set_eject_state(bool ejected)
+ {
++   finish_frame();
+    disc_tray_open = ejected;
+    if (ejected)
+    {
+@@ -3455,6 +3489,7 @@ static unsigned retro_get_image_index()
+ 
+ static bool retro_set_image_index(unsigned index)
+ {
++   finish_frame();
+    settings.imgread.LoadDefaultImage = true;
+    disk_index = index;
+    if (disk_index >= disk_paths.size())
+@@ -3479,6 +3514,7 @@ static unsigned retro_get_num_images()
+ 
+ static bool retro_add_image_index()
+ {
++   finish_frame();
+    disk_paths.push_back("");
+    disk_labels.push_back("");
+ 
+@@ -3487,6 +3523,7 @@ static bool retro_add_image_index()
+ 
+ static bool retro_replace_image_index(unsigned index, const struct retro_game_info *info)
+ {
++   finish_frame();
+    if ((index >= disk_paths.size()) ||
+        (index >= disk_labels.size()))
+       return false;
+-- 
+2.56.0
+

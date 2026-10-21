@@ -1,0 +1,132 @@
+From 22d163b179ade8f686d5fe4bebb30953d2b32a08 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 19:30:32 +0200
+Subject: [PATCH] ARM64 dynarec: cycle check slow path after the block end
+ (nuubOS)
+
+Every block started with the cycle check and its slow path (scheduler
+call, exit to the main loop) inline: a taken branch over six instructions
+on every run. Without the MMU the slow path now goes after the block end,
+so the block runs two instructions and a branch not taken. The SH4 thread
+spends ~9 % of its cycles refilling the Cortex-A53's 32 KB instruction
+cache with dynarec code (Shenmue II). The block keeps its whole size on
+relink (cold_offset) so the scheduler call still finds it from the return
+address. Emulation thread -0.3 to -0.45 ms a frame (Dead or Alive 2,
+Shenmue II, Test Drive Le Mans).
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/hw/sh4/dyna/blockmanager.h |  4 ++++
+ core/hw/sh4/dyna/driver.cpp     | 11 +++++++--
+ core/rec-ARM64/rec_arm64.cpp    | 40 ++++++++++++++++++++++++---------
+ 3 files changed, 43 insertions(+), 12 deletions(-)
+
+diff --git a/core/hw/sh4/dyna/blockmanager.h b/core/hw/sh4/dyna/blockmanager.h
+index 9fd83b7..52aea50 100644
+--- a/core/hw/sh4/dyna/blockmanager.h
++++ b/core/hw/sh4/dyna/blockmanager.h
+@@ -57,6 +57,10 @@ struct RuntimeBlockInfo: RuntimeBlockInfo_Core
+ 
+ 	u32 relink_offset;
+ 	u32 relink_data;
++	/* Offset of the code placed after the block end (ARM64: the cycle
++	 * check's slow path), 0 = none. A relink never reaches it and the
++	 * block keeps its whole size. */
++	u32 cold_offset;
+ 	u32 csc_RetCache; /* only for stats for now */
+ 
+ 	BlockEndType BlockType;
+diff --git a/core/hw/sh4/dyna/driver.cpp b/core/hw/sh4/dyna/driver.cpp
+index 697386c..e5b8cfa 100644
+--- a/core/hw/sh4/dyna/driver.cpp
++++ b/core/hw/sh4/dyna/driver.cpp
+@@ -405,8 +405,15 @@ void* DYNACALL rdv_LinkBlock(u8* code,u32 dpc)
+ 			nxt->AddRef(rbi);
+ 		}
+ 		u32 ncs = rbi->relink_offset + rbi->Relink();
+-		verify(rbi->host_code_size >= ncs);
+-		rbi->host_code_size = ncs;
++		if (rbi->cold_offset != 0)
++		{
++			verify(ncs <= rbi->cold_offset);
++		}
++		else
++		{
++			verify(rbi->host_code_size >= ncs);
++			rbi->host_code_size = ncs;
++		}
+ 	}
+ 	else
+ 	{
+diff --git a/core/rec-ARM64/rec_arm64.cpp b/core/rec-ARM64/rec_arm64.cpp
+index c3b99a3..1879af8 100644
+--- a/core/rec-ARM64/rec_arm64.cpp
++++ b/core/rec-ARM64/rec_arm64.cpp
+@@ -315,27 +315,36 @@ public:
+ 		regalloc.DoAlloc(block);
+ 
+ 		// scheduler
++		/* nuubOS: without the MMU the slow path (time slice over) goes
++		 * after the block end, so the code run every time is two
++		 * instructions and a branch not taken instead of a taken branch
++		 * over six: the SH4 thread spends ~9 % of its cycles refilling
++		 * the 32 KB instruction cache with dynarec code. */
++		Label cycles_exhausted, block_body;
++		block->cold_offset = 0;
+ 		if (mmu_enabled())
+ 		{
+ 			Mov(x1, reinterpret_cast<uintptr_t>(&cycle_counter));
+ 			Ldr(w0, MemOperand(x1));
+ 			Subs(w0, w0, block->guest_cycles);
+ 			Str(w0, MemOperand(x1));
++			Label cycles_remaining;
++			B(&cycles_remaining, pl);
++			GenCall(*arm64_intc_sched);
++			Label cpu_running;
++			Cbnz(w0, &cpu_running);
++			Mov(w29, block->vaddr);
++			Str(w29, sh4_context_mem_operand(&next_pc));
++			GenBranch(*arm64_no_update);
++			Bind(&cpu_running);
++			Bind(&cycles_remaining);
+ 		}
+ 		else
+ 		{
+ 			Subs(w27, w27, block->guest_cycles);
++			B(&cycles_exhausted, mi);
+ 		}
+-		Label cycles_remaining;
+-		B(&cycles_remaining, pl);
+-		GenCall(*arm64_intc_sched);
+-		Label cpu_running;
+-		Cbnz(w0, &cpu_running);
+-		Mov(w29, block->vaddr);
+-		Str(w29, sh4_context_mem_operand(&next_pc));
+-		GenBranch(*arm64_no_update);
+-		Bind(&cpu_running);
+-		Bind(&cycles_remaining);
++		Bind(&block_body);
+ 
+ 		for (size_t i = 0; i < block->oplist.size(); i++)
+ 		{
+@@ -998,6 +1007,17 @@ public:
+ 
+ 		RelinkBlock(block);
+ 
++		if (!mmu_enabled())
++		{
++			block->cold_offset = (u32)GetBuffer()->GetCursorOffset();
++			Bind(&cycles_exhausted);
++			GenCall(*arm64_intc_sched);
++			Cbnz(w0, &block_body);
++			Mov(w29, block->vaddr);
++			Str(w29, sh4_context_mem_operand(&next_pc));
++			GenBranch(*arm64_no_update);
++		}
++
+ 		Finalize();
+ 	}
+ 
+-- 
+2.56.0
+

@@ -43,7 +43,10 @@ MY, PEER, NEAR, OLD = %r, %r, %r, %r
 st = {"options": {}, "folders": {"nuubos-saves": {"id": "nuubos-saves"}}, "devices": {MY: {"deviceID": MY, "name": "nuubos"}},
       "pending": {PEER: {"name": "Laptop", "address": "192.168.1.20:22000", "time": time.strftime("%%Y-%%m-%%dT%%H:%%M:%%SZ", time.gmtime())},
                   OLD: {"name": "nuubos", "address": "127.0.0.1:22000", "time": "2026-01-01T10:00:00.123+02:00"}},
-      "ignored": []}
+      "ignored": [],
+      "offers": {"retro-saves": {"offeredBy": {PEER: {"label": "RetroArch Saves", "time": "2026-10-21T08:00:00Z", "receiveEncrypted": False}}},
+                 "zz-music": {"offeredBy": {PEER: {"label": "Music", "time": "2026-10-21T08:00:00Z"}}},
+                 "enc-x": {"offeredBy": {PEER: {"label": "Secret", "time": "2026-10-21T08:00:00Z", "receiveEncrypted": True}}}}}
 events, cond = [], threading.Condition()
 def emit(kind, data):
     with cond:
@@ -65,6 +68,10 @@ class H(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query); p = u.path
         if p == "/rest/system/status": self.out(200, {"myID": MY})
         elif p == "/rest/config/devices": self.out(200, list(st["devices"].values()))
+        elif p.startswith("/rest/config/devices/"):
+            dv = st["devices"].get(urllib.parse.unquote(p.rpartition("/")[2]))
+            self.out(200, dv) if dv else self.out(404)
+        elif p == "/rest/cluster/pending/folders": self.out(200, st["offers"])
         elif p == "/rest/config/folders": self.out(200, list(st["folders"].values()))
         elif p == "/rest/config": self.out(200, {"remoteIgnoredDevices": st["ignored"], "devices": list(st["devices"].values())})
         elif p == "/rest/system/connections":
@@ -82,8 +89,10 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
         if not self.auth(): return
         p = urllib.parse.urlparse(self.path).path; kind, _, ident = p.rpartition("/"); b = self.body()
+        ident = urllib.parse.unquote(ident)
         if kind == "/rest/config/folders":
             st["folders"][ident] = b
+            if st["offers"].pop(ident, None): emit("PendingFoldersChanged", {})
             if ident == "nuubos-covers":
                 emit("StateChanged", {"folder": "nuubos-covers", "from": "syncing", "to": "idle"})
         elif kind == "/rest/config/devices":
@@ -104,7 +113,9 @@ class H(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query); p = u.path
         if p == "/rest/cluster/pending/devices":
             st["pending"].pop(q.get("device", [""])[0], None); save(); emit("PendingDevicesChanged", {}); return self.out(200)
-        kind, _, ident = p.rpartition("/")
+        if p == "/rest/cluster/pending/folders":
+            st["offers"].pop(q.get("folder", [""])[0], None); save(); emit("PendingFoldersChanged", {}); return self.out(200)
+        kind, _, ident = p.rpartition("/"); ident = urllib.parse.unquote(ident)
         tbl = st["folders" if kind.endswith("folders") else "devices"]
         code = 200 if tbl.pop(ident, None) is not None else 404
         save(); emit("ConfigSaved", {}); self.out(code)
@@ -237,6 +248,31 @@ try:
     check('internet off also stops relays', ctl('internet', 'off').startswith('OK')
           and fstate()['options']['relaysEnabled'] is False and fstate()['options']['globalAnnounceEnabled'] is False)
     check('folder off removes it', ctl('folder', 'states', 'off').startswith('OK') and 'nuubos-mario-states' not in fstate()['folders'])
+    # Existing shares of the user's other devices (user report 2026-10-21).
+    check('offered folder in the snapshot, encrypted one not',
+          wait(lambda: 'offer=retro-saves\tRetroArch Saves\t%s\tLaptop' % PEER in last() and 'offer=enc-x' not in last()))
+    check('folderid default', 'folderid=saves\tnuubos-mario-saves\t0' in last())
+    check('use offered folder as saves', ctl('use', 'retro-saves', 'saves').startswith('OK') and 'ID_saves=retro-saves' in conf())
+    s = fstate()
+    check('existing id on the saves path, shared, own folder removed',
+          s['folders'].get('retro-saves', {}).get('path') == users + '/' + U1 + '/saves'
+          and any(x['deviceID'] == PEER for x in s['folders']['retro-saves']['devices'])
+          and 'nuubos-mario-saves' not in s['folders'])
+    check('snapshot: custom id, offer gone', wait(lambda: 'folderid=saves\tretro-saves\t1' in last()
+                                                  and 'offer=retro-saves' not in last()))
+    check('folder-id with spaces/slash (URL escaped)', ctl('folder', 'states', 'on').startswith('OK')
+          and ctl('folder-id', 'states', 'my states/x').startswith('OK')
+          and fstate()['folders'].get('my states/x', {}).get('path') == users + '/' + U1 + '/states'
+          and 'nuubos-mario-states' not in fstate()['folders'])
+    check('same id for two kinds refused', ctl('folder-id', 'screenshots', 'retro-saves').startswith('ERR value'))
+    check('history keeps nuubOS ids', ctl('folder-id', 'history', 'x').startswith('ERR value'))
+    check('back to own saves folder, the existing one removed', ctl('folder-id', 'saves', '-').startswith('OK')
+          and 'ID_saves' not in conf() and 'nuubos-mario-saves' in fstate()['folders']
+          and 'retro-saves' not in fstate()['folders'])
+    check('decline offer -> device ignoredFolders', ctl('decline', 'zz-music').startswith('OK')
+          and any(x['id'] == 'zz-music' for x in fstate()['devices'][PEER].get('ignoredFolders', []))
+          and wait(lambda: 'offer=zz-music' not in last()))
+    check('states back to own', ctl('folder-id', 'states', '-').startswith('OK') and ctl('folder', 'states', 'off').startswith('OK'))
     check('ignore', ctl('ignore', NEAR).startswith('OK') and any(x['deviceID'] == NEAR for x in fstate()['ignored']))
     check('remove', ctl('remove', PEER).startswith('OK') and PEER not in fstate()['devices'])
     check('bad device id', ctl('add', '../etc').startswith('ERR device'))

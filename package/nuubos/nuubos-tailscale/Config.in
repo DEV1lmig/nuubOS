@@ -1,0 +1,12 @@
+config BR2_PACKAGE_NUUBOS_TAILSCALE
+	bool "nuubos-tailscale"
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_CJSON
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_ZLIB
+	help
+	  Tailscale for the console: nuubos-tsd downloads Tailscale's
+	  daemon on request (never part of the image), runs it while the
+	  user keeps it on and publishes its state (socket
+	  /run/nuubos/tsd.sock); nuubos-tsctl is its command line.

@@ -859,7 +859,9 @@ page('connectivity', 'settings', () => C(5, 'Connectivity'), async (path) => {
   if (path[0] === 'bt') return btPage();
   if (path[0] === 'devices') return btDevicesPage();
   if (path[0] === 'keys') return sshKeysPage();
-  const [w, b, r, keys] = await Promise.all([get('wifi').catch(() => null), get('bluetooth').catch(() => null), get('remote'), get('ssh_keys').catch(() => ({}))]);
+  if (path[0] === 'tailscale') return tailscalePage();
+  const [w, b, r, keys, ts] = await Promise.all([get('wifi').catch(() => null), get('bluetooth').catch(() => null), get('remote'), get('ssh_keys').catch(() => ({})),
+    get('tailscale').catch(() => ({}))]);
   const addr = r.address || '';
   const nodes = [section(C(156, 'WI-FI'), 'device')];
   if (w) {
@@ -887,6 +889,9 @@ page('connectivity', 'settings', () => C(5, 'Connectivity'), async (path) => {
       set: (v) => act('remote.set', { svc: 'smb', v }, { topics: ['remote'] }) }),
     row({ key: 'web', title: C(603, 'Web Administration'), detail: addr ? 'https://' + addr : '', toggle: on01(r.web),
       arm: { prompt: T('web_off') }, on: () => act('remote.set', { svc: 'web', v: 0 }).then(() => showLogin(T('web_disabled'))) }),
+    row({ key: 'tailscale', title: C(1328, 'Tailscale'), chevron: true,
+      value: !on01(ts.installed) ? '' : on01(ts.enabled) ? C(222, 'On') : C(54, 'Off'),
+      detail: on01(ts.enabled) && ts.state === 'Running' && ts.ip ? ts.ip : tsStatus(ts), on: () => go('connectivity/tailscale') }),
     row({ key: 'pw', title: C(172, 'Password'), value: revealed || '••••-••••-••••',
       detail: revealed ? C(604, 'Only on networks you trust. Never exposed to the Internet.') : C(608, 'Press to show'), on: async () => {
         revealed = revealed ? '' : (await get('password', {}, true)).password;
@@ -894,8 +899,50 @@ page('connectivity', 'settings', () => C(5, 'Connectivity'), async (path) => {
       } }),
     row({ key: 'regen', title: C(606, 'Regenerate Password'), detail: C(607, 'The old password stops working') + ' • ' + T('signs_out'),
       arm: { prompt: C(191, 'Press again to confirm') }, on: async () => { await act('remote.regenerate'); showLogin(T('password_changed')); } })));
-  return { title: C(5, 'Connectivity'), nodes, topics: ['wifi', 'bluetooth', 'remote', 'ssh_keys'] };
+  return { title: C(5, 'Connectivity'), nodes, topics: ['wifi', 'bluetooth', 'remote', 'ssh_keys', 'tailscale'] };
 });
+
+/* Tailscale (nuubos-tsd): the same rows as the console page (tsui.rs); the
+ * sign-in address opens here in a new tab. */
+function tsStatus(ts) {
+  if (on01(ts.failed)) return C(93, 'Failed');
+  if (!on01(ts.installed) || !on01(ts.enabled)) return C(1329, 'Reach this console from anywhere through your tailnet');
+  if (!on01(ts.ready)) return C(1025, 'Starting…');
+  return { Running: C(198, 'Connected'), NeedsLogin: C(1331, 'Sign in to your tailnet'),
+    NeedsMachineAuth: C(1334, 'Waiting for approval in your tailnet'), Stopped: C(159, 'Not connected') }[ts.state] || C(1025, 'Starting…');
+}
+
+async function tailscalePage() {
+  const ts = await get('tailscale', {}, true);
+  const newer = (a, b) => { const p = (v) => (v || '').split('.').map(Number); const x = p(a), y = p(b);
+    for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
+  const ready = on01(ts.enabled) && on01(ts.ready);
+  const list = [];
+  if (ts.job === 'install') {
+    list.push(row({ key: 'dl', title: C(1221, 'Downloading {0}%', String(Math.max(0, +ts.progress))), detail: C(619, 'Cancel'), on: () => act('ts.cancel') }));
+  } else if (!on01(ts.installed)) {
+    list.push(row({ key: 'dl', title: C(653, 'Download'), detail: C(1330, "Tailscale's own app, about 25 MB, downloaded from tailscale.com"), icon: 'download',
+      on: () => act('ts.install') }));
+  } else {
+    list.push(row({ key: 'on', title: C(1328, 'Tailscale'), detail: tsStatus(ts), toggle: on01(ts.enabled), set: (v) => act(v ? 'ts.enable' : 'ts.disable') }));
+    if (ready && ts.state === 'Running') {
+      list.push(row({ key: 'me', title: ts.name || C(177, 'Address'), value: ts.ip || '',
+        detail: C(1336, 'SSH, File Sharing and Web Administration, when on, answer at this address too') }));
+      list.push(row({ key: 'out', title: C(567, 'Sign Out'), detail: ts.tailnet || '', arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('ts.logout') }));
+    } else if (ready && (ts.state === 'NeedsLogin' || ts.state === 'NeedsMachineAuth')) {
+      list.push(row({ key: 'in', title: C(587, 'Sign In'), detail: tsStatus(ts), chevron: true, on: () => act('ts.login') }));
+      if (ts.auth_url) list.push(h('div', { class: 'notice' }, h('a', { href: ts.auth_url, target: '_blank', rel: 'noopener noreferrer', text: ts.auth_url })));
+    }
+    list.push(row({ key: 'up', title: newer(ts.latest, ts.version) ? C(486, 'Update to {0}', ts.latest) : C(487, 'Check for Updates'),
+      value: C(485, 'Version') + ' ' + ts.version, detail: ts.latest && ts.latest === ts.version ? C(489, 'Up to date') : '',
+      on: () => act(newer(ts.latest, ts.version) ? 'ts.install' : 'ts.check') }));
+    list.push(row({ key: 'rm', title: C(644, 'Remove'), detail: C(1335, 'Removes Tailscale and takes this console out of your tailnet'),
+      arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('ts.remove') }));
+  }
+  const nodes = [section(C(1328, 'Tailscale').toUpperCase(), 'device'), group(list)];
+  if (ts.error) nodes.unshift(h('div', { class: 'notice err', text: { network: C(494, 'Check the network connection'), space: C(493, 'Not enough free space') }[ts.error] || C(1333, 'Tailscale could not be downloaded') }));
+  return { title: C(1328, 'Tailscale'), back: 'connectivity', nodes, topics: ['tailscale'] };
+}
 
 let revealed = '';
 
@@ -1039,7 +1086,11 @@ async function syncPage() {
   const s = await get('sync', {}, true);
   const enabled = on01(s.enabled), ready = on01(s.ready);
   const folders = Object.fromEntries(rows(s.folder).map((f) => [f[0], f]));
-  const pending = rows(s.pending), devices = rows(s.device), nearby = rows(s.nearby);
+  const pending = rows(s.pending), devices = rows(s.device), nearby = rows(s.nearby), offers = rows(s.offer);
+  /* Existing folders of the user's other devices (folderid: kind, id, custom). */
+  const custom = Object.fromEntries(rows(s.folderid).filter((f) => f[2] === '1').map((f) => [f[0], f[1]]));
+  const folderIds = Object.fromEntries(rows(s.folderid).map((f) => [f[0], f[1]]));
+  const KINDS3 = [['saves', C(673, 'Saves')], ['states', C(674, 'Save States')], ['screenshots', C(675, 'Screenshots')]];
   const code = (id) => (id || '').slice(0, 7);
   const label = (d) => d[1] || C(1059, 'Device {0}', code(d[0]));
   const syncing = (f) => ['syncing', 'sync-preparing', 'sync-waiting'].includes(f[2]);
@@ -1080,12 +1131,26 @@ async function syncPage() {
         ['library', C(1089, 'Covers & Metadata'), C(1090, 'Shared by every profile on this console')],
         ['history', C(1091, 'Play Activity'), C(1092, 'Time played and Recently Played, added up across your devices')]].map(([k, title, note]) => row({ key: 'f:' + k,
         title,
-        detail: folders[k] && folders[k][1] === '1' ? (syncing(folders[k]) ? C(323, 'Syncing…') : folders[k][2] === 'error' ? C(1084, 'Cannot sync') : note) : note,
+        detail: folders[k] && folders[k][1] === '1' ? (syncing(folders[k]) ? C(323, 'Syncing…') : folders[k][2] === 'error' ? C(1084, 'Cannot sync') : folderIds[k] ? C(1324, 'Folder ID {0}', folderIds[k]) : note) : note,
         toggle: !!folders[k] && folders[k][1] === '1', set: (v) => act('sync.folder', { kind: k, v }) })),
+      /* Linked to another device's folder: back to nuubOS's own. */
+      KINDS3.filter(([k]) => custom[k]).map(([k, title]) => row({ key: 'own:' + k, title: C(1346, 'Use the nuubOS Folder'), detail: title + ' · ' + custom[k],
+        icon: 'folder', arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('sync.folder_id', { kind: k, id: '' }) })),
       row({ key: 'internet', title: C(1035, 'Sync Away from Home'), detail: C(1036, 'Finds your devices over the Internet; your data still goes straight between them'),
         toggle: on01(s.internet), set: (v) => act('sync.internet', { v }) }),
       row({ key: 'relays', title: C(1087, 'Allow Relays'), detail: C(1088, 'If a direct connection is impossible, the encrypted data may pass through public Syncthing servers'),
         toggle: on01(s.internet) && on01(s.relays), disabled: !on01(s.internet), set: (v) => act('sync.relays', { v }) })));
+    /* Folders the other devices share and this console does not sync yet
+     * (the same section as the console's page 66). */
+    if (offers.length) {
+      nodes.push(section(C(1343, 'AVAILABLE FOLDERS'), 'user'), group(offers.map((o) => row({ key: 'o:' + o[0] + ':' + o[2], title: o[1] || o[0],
+        value: o[0], icon: 'folder', detail: C(1325, 'Shared by {0}', o[3] || C(1059, 'Device {0}', code(o[2]))),
+        on: async () => {
+          const kinds = KINDS3.filter(([k]) => !custom[k]).map(([value, label]) => ({ value, label }));
+          const v = await choose(C(1344, 'Sync {0} as', o[1] || o[0]), [...kinds, { value: 'decline', label: C(1034, 'Ignore') }], kinds.length ? kinds[0].value : 'decline');
+          if (v) await act(v === 'decline' ? 'sync.decline' : 'sync.use', v === 'decline' ? { folder: o[0] } : { folder: o[0], kind: v });
+        } }))));
+    }
   }
   return { title: C(669, 'Syncthing'), back: 'gaming', nodes, topics: ['sync', 'users'] };
 }

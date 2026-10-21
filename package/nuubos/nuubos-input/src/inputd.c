@@ -157,6 +157,13 @@ struct input_dev {
 	int right_deadzone_percent;
 	unsigned long abs_bits[NBITS(ABS_MAX + 1)];
 	struct input_absinfo absinfo[ABS_MAX + 1];
+	/* Key state as last read (EV_KEY 0/1), and true from a SYN_DROPPED
+	 * until its SYN_REPORT: the kernel discarded events (this client fell
+	 * behind), so the state is read back and the differences replayed
+	 * (a lost release used to leave a button or direction held: the game
+	 * kept moving, menus kept scrolling; user report 2026-10-21). */
+	unsigned long keys[NBITS(KEY_MAX + 1)];
+	bool dropping;
 
 	/*
 	 * Navigation is described exclusively through Linux input semantics,
@@ -1060,23 +1067,54 @@ static void close_inputs(void)
 	input_count = 0;
 }
 
+/* An input of the last scan that is still the device at @path: the kernel
+ * answers on its fd (a removed device gives ENODEV) and the node is the
+ * same one. */
+static bool input_still_there(const struct input_dev *input, const char *path)
+{
+	struct stat by_fd, by_path;
+	char name[128];
+
+	if (strcmp(input->path, path) != 0)
+		return false;
+	memset(name, 0, sizeof(name));
+	if (ioctl(input->fd, EVIOCGNAME(sizeof(name)), name) < 0 ||
+	    strcmp(name, input->name) != 0)
+		return false;
+	return fstat(input->fd, &by_fd) == 0 && stat(path, &by_path) == 0 &&
+	       by_fd.st_rdev == by_path.st_rdev;
+}
+
+/*
+ * Any node created or removed in /dev/input. Inputs still there stay open
+ * with their state: closing and reopening them all lost the events of the
+ * gap (a release then left a button or direction held in the game; a
+ * Bluetooth device connecting or going to sleep is enough).
+ */
 static void rescan_inputs(void)
 {
+	static struct input_dev previous[MAX_INPUTS];
+	size_t previous_count = input_count;
 	DIR *dir;
 	struct dirent *entry;
 	bool restore_grab = capture_active() || gamepads_forwarding();
+	size_t i;
 
-	close_inputs();
+	memcpy(previous, inputs, previous_count * sizeof(inputs[0]));
+	input_count = 0;
 
 	dir = opendir(INPUT_DIR);
 	if (!dir) {
 		log_message("rescan opendir failed errno=%d", errno);
+		memcpy(inputs, previous, previous_count * sizeof(inputs[0]));
+		input_count = previous_count;
 		return;
 	}
 
 	while ((entry = readdir(dir)) != NULL && input_count < MAX_INPUTS) {
 		char path[512];
 		char name[128];
+		bool kept = false;
 		int fd;
 
 		if (strncmp(entry->d_name, "event", 5) != 0)
@@ -1084,6 +1122,18 @@ static void rescan_inputs(void)
 
 		snprintf(path, sizeof(path), "%s/%s",
 			 INPUT_DIR, entry->d_name);
+
+		for (i = 0; i < previous_count; i++) {
+			if (previous[i].fd < 0 ||
+			    !input_still_there(&previous[i], path))
+				continue;
+			inputs[input_count++] = previous[i];
+			previous[i].fd = -1;
+			kept = true;
+			break;
+		}
+		if (kept)
+			continue;
 
 		/* Write access plays rumble effects (EV_FF). */
 		fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -1123,6 +1173,9 @@ static void rescan_inputs(void)
 		load_absinfo(&inputs[input_count]);
 		configure_input_mapping(&inputs[input_count]);
 		probe_rumble(&inputs[input_count]);
+		/* Keys already held when it opens are not presses seen here. */
+		if (ioctl(fd, EVIOCGKEY(sizeof(inputs[input_count].keys)), inputs[input_count].keys) < 0)
+			memset(inputs[input_count].keys, 0, sizeof(inputs[input_count].keys));
 
 		log_message(
 			 "input-open index=%zu path=%s name=%s id=%s key-capability=%d stick-x=%d stick-y=%d abs-bindings=%d accelerometer=%d",
@@ -1138,6 +1191,16 @@ static void rescan_inputs(void)
 	}
 
 	closedir(dir);
+
+	for (i = 0; i < previous_count; i++) {
+		if (previous[i].fd < 0)
+			continue;
+		log_message("input-close path=%s name=%s", previous[i].path,
+			    previous[i].name);
+		if (previous[i].grabbed)
+			(void)ioctl(previous[i].fd, EVIOCGRAB, 0);
+		close(previous[i].fd);
+	}
 
 	log_message("rescan complete inputs=%zu", input_count);
 	apply_stick_poll();
@@ -1350,6 +1413,54 @@ static int navigation_repeat_timeout_ms(void)
 	return (int)remaining;
 }
 
+/*
+ * Whether a navigation action is still held on some controller right now:
+ * its key in the device's live key state, its axis binding, or the stick's
+ * navigation direction. A repeat whose release never arrived (it took
+ * another route: game, Quick Menu, remapping...) stops by itself instead of
+ * scrolling forever.
+ */
+static bool navigation_action_held(const char *action)
+{
+	size_t b, i;
+
+	for (b = 0; b < sizeof(bindings) / sizeof(bindings[0]); b++)
+		if (strcmp(bindings[b].name, action) == 0)
+			break;
+	for (i = 0; i < input_count; i++) {
+		const struct input_dev *input = &inputs[i];
+		const struct nav_axis *axes[2] = { &input->abs_x, &input->abs_y };
+
+		if (b < sizeof(bindings) / sizeof(bindings[0])) {
+			int code = input->mapped_codes[b];
+
+			if (code >= 0 && code <= KEY_MAX) {
+				unsigned long keys[NBITS(KEY_MAX + 1)];
+
+				if (ioctl(input->fd, EVIOCGKEY(sizeof(keys)), keys) < 0 ||
+				    bit_is_set(keys, (unsigned int)code))
+					return true;
+			}
+			if (input->abs_bindings[b].present && input->abs_bindings[b].pressed)
+				return true;
+		}
+		for (size_t a = 0; a < 2; a++) {
+			const struct nav_axis *axis = axes[a];
+			const char *held;
+
+			if (!axis->present || axis->direction == 0)
+				continue;
+			if (axis->horizontal)
+				held = axis->direction < 0 ? "menu_left" : "menu_right";
+			else
+				held = axis->direction < 0 ? "menu_up" : "menu_down";
+			if (strcmp(held, action) == 0)
+				return true;
+		}
+	}
+	return false;
+}
+
 static void navigation_repeat_tick(void)
 {
 	long long now;
@@ -1360,6 +1471,14 @@ static void navigation_repeat_tick(void)
 	now = monotonic_ms();
 	if (now < repeat_next_ms)
 		return;
+
+	if (!navigation_action_held(repeat_action)) {
+		log_message("navigation-repeat stop action=%s reason=not-held", repeat_action);
+		broadcast_action_state(repeat_action, "released");
+		repeat_action[0] = '\0';
+		repeat_next_ms = 0;
+		return;
+	}
 
 	mapped_press_count++;
 	log_message("navigation-repeat action=%s", repeat_action);
@@ -2687,16 +2806,69 @@ static bool parse_padmap(const char *line, struct padmap *map)
 	return map->id[0] != '\0' && map->player >= 1 && map->player <= MAX_VPADS;
 }
 
+/*
+ * After the game gamepads were released for a mapping change: what the
+ * players still hold goes back on them through the new mapping. A held
+ * direction used to stay released until pressed again (on the hat D-pad
+ * the opposite one then looked dead; Reddit report 2026-10-21).
+ */
+static void replay_held_controls(void)
+{
+	size_t i;
+	unsigned int code;
+
+	if (!gamepads_on || web_on || menu_open || hotkey_held)
+		return;
+	for (i = 0; i < input_count; i++) {
+		struct input_dev *input = &inputs[i];
+		struct input_event ev;
+
+		if (input->accelerometer || !input_is_pad(input))
+			continue;
+		memset(&ev, 0, sizeof(ev));
+		ev.type = EV_KEY;
+		ev.value = 1;
+		for (code = 0; code <= KEY_MAX; code++) {
+			if (!bit_is_set(input->keys, code))
+				continue;
+			ev.code = (unsigned short)code;
+			(void)forward_game_event(input, &ev);
+		}
+		ev.type = EV_ABS;
+		for (code = 0; code <= ABS_MAX; code++) {
+			struct input_absinfo info;
+
+			if (!bit_is_set(input->abs_bits, code) ||
+			    ioctl(input->fd, EVIOCGABS(code), &info) < 0)
+				continue;
+			ev.code = (unsigned short)code;
+			ev.value = info.value;
+			(void)forward_game_event(input, &ev);
+		}
+	}
+	flush_vpads();
+}
+
 static void commit_padmaps(void)
 {
+	/* controllersd sends the whole table on every device or assignment
+	 * change, often twice in a row: an identical one changes nothing. */
+	bool changed = padmap_next_count != padmap_count ||
+		       memcmp(padmaps, padmaps_next,
+			      padmap_count * sizeof(padmaps[0])) != 0;
+
 	memcpy(padmaps, padmaps_next, sizeof(padmaps));
 	padmap_count = padmap_next_count;
-	log_message("padmaps updated count=%zu", padmap_count);
+	log_message("padmaps updated count=%zu changed=%d", padmap_count,
+		    changed ? 1 : 0);
 	if (gamepads_on || web_on) {
 		/* A remapped or reassigned control must not stay held. */
-		release_all_vpads();
+		if (changed)
+			release_all_vpads();
 		sync_vpads();
 		sync_input_grab();
+		if (changed)
+			replay_held_controls();
 	}
 }
 
@@ -3296,18 +3468,10 @@ static void process_navigation_abs(struct input_dev *input,
 	}
 }
 
-static void process_input(struct input_dev *input)
+static void process_events(struct input_dev *input,
+			   const struct input_event *events, size_t count)
 {
-	struct input_event events[16];
-	ssize_t n;
-	size_t count;
 	size_t i;
-
-	n = read(input->fd, events, sizeof(events));
-	if (n <= 0)
-		return;
-
-	count = (size_t)n / sizeof(events[0]);
 
 	for (i = 0; i < count; i++) {
 		const char *action;
@@ -3469,6 +3633,95 @@ static void process_input(struct input_dev *input)
 	}
 
 	flush_vpads();
+}
+
+/*
+ * After a SYN_DROPPED: the device's real state, replayed as the events
+ * that differ from what was last seen (keys), and the current value of
+ * every axis (axis handling only reacts to threshold crossings).
+ */
+static void resync_input(struct input_dev *input)
+{
+	unsigned long now[NBITS(KEY_MAX + 1)];
+	struct input_event events[64];
+	size_t count = 0;
+	unsigned int code;
+
+	memset(now, 0, sizeof(now));
+	if (ioctl(input->fd, EVIOCGKEY(sizeof(now)), now) < 0)
+		memcpy(now, input->keys, sizeof(now));
+	for (code = 0; code <= KEY_MAX; code++) {
+		bool was = bit_is_set(input->keys, code), is = bit_is_set(now, code);
+
+		if (was == is)
+			continue;
+		if (count == sizeof(events) / sizeof(events[0])) {
+			process_events(input, events, count);
+			count = 0;
+		}
+		memset(&events[count], 0, sizeof(events[count]));
+		events[count].type = EV_KEY;
+		events[count].code = (unsigned short)code;
+		events[count].value = is ? 1 : 0;
+		count++;
+	}
+	memcpy(input->keys, now, sizeof(now));
+	for (code = 0; code <= ABS_MAX; code++) {
+		struct input_absinfo info;
+
+		if (!bit_is_set(input->abs_bits, code) ||
+		    ioctl(input->fd, EVIOCGABS(code), &info) < 0)
+			continue;
+		if (count == sizeof(events) / sizeof(events[0])) {
+			process_events(input, events, count);
+			count = 0;
+		}
+		memset(&events[count], 0, sizeof(events[count]));
+		events[count].type = EV_ABS;
+		events[count].code = (unsigned short)code;
+		events[count].value = info.value;
+		count++;
+	}
+	log_message("input-resync path=%s name=%s replayed=%zu", input->path, input->name, count);
+	process_events(input, events, count);
+}
+
+static void process_input(struct input_dev *input)
+{
+	struct input_event events[16];
+	ssize_t n;
+	size_t count, first = 0, i;
+
+	n = read(input->fd, events, sizeof(events));
+	if (n <= 0)
+		return;
+
+	count = (size_t)n / sizeof(events[0]);
+	for (i = 0; i < count; i++) {
+		const struct input_event *ev = &events[i];
+
+		if (ev->type == EV_SYN && ev->code == SYN_DROPPED) {
+			/* What came before the drop is still valid. */
+			process_events(input, events + first, i - first);
+			if (!input->dropping)
+				log_message("input-dropped path=%s name=%s", input->path, input->name);
+			input->dropping = true;
+			first = i + 1;
+		} else if (input->dropping) {
+			/* Everything up to the next report is incomplete. */
+			if (ev->type == EV_SYN && ev->code == SYN_REPORT) {
+				input->dropping = false;
+				resync_input(input);
+			}
+			first = i + 1;
+		} else if (ev->type == EV_KEY && (ev->value == 0 || ev->value == 1) && ev->code <= KEY_MAX) {
+			if (ev->value)
+				input->keys[ev->code / BITS_PER_LONG] |= 1UL << (ev->code % BITS_PER_LONG);
+			else
+				input->keys[ev->code / BITS_PER_LONG] &= ~(1UL << (ev->code % BITS_PER_LONG));
+		}
+	}
+	process_events(input, events + first, count - first);
 }
 
 static void cleanup_runtime(int server_fd,

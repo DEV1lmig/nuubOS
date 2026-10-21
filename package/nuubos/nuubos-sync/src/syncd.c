@@ -9,6 +9,8 @@
  * Per user, in /userdata/users/<id>/appdata/syncthing: Syncthing's own home
  * (identity, devices, folders, database) and nuubos.conf:
  *   ENABLED=0|1  APIKEY=<uuid>  INTERNET=0|1  RELAYS=0|1  FOLDERS=saves,...
+ *   ID_saves=<folder id>  ID_states=  ID_screenshots=  (optional: an existing
+ *   share of the user's other devices used instead of nuubOS's own folder)
  * Switching users never exposes another user's configuration.
  *
  * Syncthing is reached only through a root-only unix socket
@@ -27,6 +29,9 @@
  *     name, folder_ids(): the same person on two consoles meets in the same
  *     folder, two people never do, even through a PC or NAS they share),
  *     the console's library store "nuubos-covers" / "nuubos-metadata";
+ *     saves, states and screenshots may use an existing folder id instead
+ *     (ID_<kind>, user report 2026-10-21: other devices already share
+ *     them); any other folder on one of these paths is removed;
  *     ignorePerms (exFAT); saves keep replaced versions in
  *     .stversions for 30 days (trash can). ROMs are never synchronized and
  *     conflicts stay as Syncthing ".sync-conflict" copies.
@@ -42,6 +47,11 @@
  *   ADD <device> [<name>]        accept a request or add a nearby device
  *   IGNORE <device>              refuse a request (it does not come back)
  *   REMOVE <device>
+ *   FOLDER_ID <kind> <id>|-      saves | states | screenshots: use that
+ *                                existing folder id (- = nuubOS's own)
+ *   USE <folder> <kind>          take a folder another device offers as
+ *                                that kind (FOLDER_ID + FOLDER on)
+ *   DECLINE <folder>             refuse an offered folder (does not come back)
  * Replies: OK | ERR <reason> (no-user, not-running, device, syncthing,
  * storage, value, unknown).
  *
@@ -53,6 +63,9 @@
  *   device=<id>\t<name>\t<connected>\t<completion 0..100, -1 unknown>\t<address>
  *   pending=<id>\t<name>\t<address>   asked to connect
  *   nearby=<id>\t<address>            Syncthing seen on the local network
+ *   folderid=<kind>\t<id>\t<custom 0|1>  saves, states, screenshots
+ *   offer=<folder>\t<label>\t<device>\t<device name>  a configured device
+ *                                     shares a folder this console does not use
  *
  * Live Notification "sync.request" (name=) when a device asks to connect;
  * dismissed once it is accepted, ignored or gone.
@@ -146,9 +159,19 @@ static const struct {
 	{ 4, "history", "nuubOS Play Activity", "library/consoles", true, false },
 };
 
+/* Kinds that may use an existing folder id (ID_<kind>): plain files any
+ * RetroArch writes. Covers/metadata and play activity are nuubOS's own. */
+static bool custom_kind(int kind)
+{
+	return kind >= 0 && kind <= 2;
+}
+
+#define FOLDER_ID_MAX 200
+
 struct conf {
 	bool enabled, internet, relays, folder[KINDS];
 	char key[64];
+	char custom[KINDS][FOLDER_ID_MAX];
 };
 
 struct client {
@@ -175,7 +198,7 @@ static pthread_cond_t ev_cond = PTHREAD_COND_INITIALIZER;
 static unsigned ev_gen;
 static bool ev_active;
 /* Syncthing ids and labels of FOLDER for the running user (folder_ids). */
-static char folder_id[FOLDERS][200], folder_label[FOLDERS][200];
+static char folder_id[FOLDERS][FOLDER_ID_MAX], folder_label[FOLDERS][FOLDER_ID_MAX];
 static char ev_key[64];
 static char folder_state[FOLDERS][24];
 /* Covers or metadata arrived: libraryd rescans (its metadata index). */
@@ -223,7 +246,7 @@ static bool read_line(const char *path, char *out, size_t size)
 /* key=value of a small config file. */
 static bool file_value(const char *path, const char *key, char *out, size_t size)
 {
-	char line[256];
+	char line[512];
 	size_t klen = strlen(key);
 	FILE *fp = fopen(path, "r");
 	bool found = false;
@@ -289,6 +312,13 @@ static void conf_load(const char *user, struct conf *c)
 		 * a new configuration starts with the saves. */
 		c->folder[0] = true;
 	}
+	for (int i = 0; i < KINDS; i++) {
+		char k[32];
+
+		snprintf(k, sizeof(k), "ID_%s", KIND[i]);
+		if (custom_kind(i) && file_value(path, k, v, sizeof(v)))
+			snprintf(c->custom[i], sizeof(c->custom[i]), "%s", v);
+	}
 }
 
 static int conf_save(const char *user, const struct conf *c)
@@ -311,6 +341,9 @@ static int conf_save(const char *user, const struct conf *c)
 		return -1;
 	fprintf(fp, "ENABLED=%d\nAPIKEY=%s\nINTERNET=%d\nRELAYS=%d\nFOLDERS=%s\n", c->enabled, c->key, c->internet,
 		c->relays, folders);
+	for (int i = 0; i < KINDS; i++)
+		if (c->custom[i][0])
+			fprintf(fp, "ID_%s=%s\n", KIND[i], c->custom[i]);
 	if (fflush(fp) || fsync(fileno(fp))) {
 		fclose(fp);
 		unlink(tmp);
@@ -535,8 +568,10 @@ static bool apply_options(void)
  * letters and digits lowercased, other ASCII runs as one "-", each
  * non-ASCII byte as two hex digits ("José" -> "josc3a9"), at most 64
  * bytes of name: URL-safe and the same on every console. A renamed profile
- * gets new folders (the other devices accept them again). */
-static void folder_ids(const char *user)
+ * gets new folders (the other devices accept them again). An existing
+ * folder id chosen for saves, states or screenshots replaces nuubOS's. */
+static void compute_ids(const char *user, const struct conf *c, char ids[FOLDERS][FOLDER_ID_MAX],
+			char labels[FOLDERS][FOLDER_ID_MAX])
 {
 	char path[PATH_MAX], name[96] = "", key[160] = "";
 	size_t n = 0;
@@ -558,14 +593,55 @@ static void folder_ids(const char *user)
 		snprintf(key, sizeof(key), "%.36s", user);
 	for (int i = 0; i < FOLDERS; i++) {
 		if (FOLDER[i].per_user) {
-			snprintf(folder_id[i], sizeof(folder_id[i]), "nuubos-%s-%s", key, FOLDER[i].id);
-			snprintf(folder_label[i], sizeof(folder_label[i]), "%s · %s", FOLDER[i].label,
-				 name[0] ? name : key);
+			if (c->custom[FOLDER[i].kind][0])
+				snprintf(ids[i], FOLDER_ID_MAX, "%s", c->custom[FOLDER[i].kind]);
+			else
+				snprintf(ids[i], FOLDER_ID_MAX, "nuubos-%s-%s", key, FOLDER[i].id);
+			snprintf(labels[i], FOLDER_ID_MAX, "%s · %s", FOLDER[i].label, name[0] ? name : key);
 		} else {
-			snprintf(folder_id[i], sizeof(folder_id[i]), "%s", FOLDER[i].id);
-			snprintf(folder_label[i], sizeof(folder_label[i]), "%s", FOLDER[i].label);
+			snprintf(ids[i], FOLDER_ID_MAX, "%s", FOLDER[i].id);
+			snprintf(labels[i], FOLDER_ID_MAX, "%s", FOLDER[i].label);
 		}
 	}
+}
+
+/* Syncthing ids and labels of the running user. Caller holds ev_lock. */
+static void folder_ids(const char *user)
+{
+	compute_ids(user, &cur, folder_id, folder_label);
+}
+
+/* "<prefix><id escaped for a URL>": folder ids chosen elsewhere may hold
+ * any character. */
+static void folder_url(char *out, size_t size, const char *prefix, const char *id)
+{
+	char *e = curl_easy_escape(NULL, id, 0);
+
+	snprintf(out, size, "%s%s", prefix, e ? e : "");
+	curl_free(e);
+}
+
+/* Where FOLDER[i] lives for the running user. */
+static void folder_dir(int i, char *dir, size_t size)
+{
+	if (FOLDER[i].per_user)
+		snprintf(dir, size, USERDATA_USERS "/%s/%s", child_user, FOLDER[i].path);
+	else
+		snprintf(dir, size, USERDATA_ROOT "/%s", FOLDER[i].path);
+}
+
+/* An id another device may have chosen: printable, no separators of the
+ * socket protocol or the snapshot. */
+static bool valid_folder_id(const char *id)
+{
+	size_t len = strlen(id);
+
+	if (!len || len >= FOLDER_ID_MAX)
+		return false;
+	for (; *id; id++)
+		if ((unsigned char)*id < 0x20 || *id == 0x7f)
+			return false;
+	return true;
 }
 
 /* Every nuubOS folder exactly as the user's FOLDERS says, shared with all
@@ -580,25 +656,30 @@ static bool apply_folders(void)
 	cJSON *listed = status == 200 ? folders : NULL;
 
 	/* nuubOS folders that are not the user's current ones stop syncing
-	 * (files stay): the shared ids of before 2026-10-16 and those of an
-	 * earlier profile name, which would overlap the new ones' paths. */
+	 * (files stay): the shared ids of before 2026-10-16, those of an
+	 * earlier profile name and an existing folder used before, which
+	 * would overlap the current ones' paths. */
 	cJSON_ArrayForEach(x, listed) {
-		const char *id = jstr(x, "id");
-		bool current = false;
-		char path[256];
+		const char *id = jstr(x, "id"), *where = jstr(x, "path");
+		bool current = false, ours = !strncmp(id, "nuubos-", 7);
+		char path[FOLDER_ID_MAX * 3 + 32], dir[PATH_MAX];
 
-		for (int i = 0; i < FOLDERS; i++)
+		for (int i = 0; i < FOLDERS; i++) {
 			current = current || !strcmp(id, folder_id[i]);
-		if (current || strncmp(id, "nuubos-", 7) || strlen(id) > 200)
+			folder_dir(i, dir, sizeof(dir));
+			ours = ours || !strcmp(where, dir);
+		}
+		if (current || !ours || !id[0])
 			continue;
-		snprintf(path, sizeof(path), "/rest/config/folders/%s", id);
+		folder_url(path, sizeof(path), "/rest/config/folders/", id);
 		cJSON_Delete(rest("DELETE", path, NULL, &status));
+		fprintf(stderr, "syncd: folder %s removed (replaced)\n", id);
 	}
 	cJSON_Delete(folders);
 	for (int i = 0; ok && i < FOLDERS; i++) {
-		char path[256], dir[PATH_MAX];
+		char path[FOLDER_ID_MAX * 3 + 32], dir[PATH_MAX];
 
-		snprintf(path, sizeof(path), "/rest/config/folders/%s", folder_id[i]);
+		folder_url(path, sizeof(path), "/rest/config/folders/", folder_id[i]);
 		if (!cur.folder[FOLDER[i].kind]) {
 			/* The folder stops syncing; its files stay on the console. */
 			cJSON_Delete(rest("DELETE", path, NULL, &status));
@@ -607,10 +688,7 @@ static bool apply_folders(void)
 		}
 		cJSON *f = cJSON_CreateObject(), *list = cJSON_AddArrayToObject(f, "devices");
 
-		if (FOLDER[i].per_user)
-			snprintf(dir, sizeof(dir), USERDATA_USERS "/%s/%s", child_user, FOLDER[i].path);
-		else
-			snprintf(dir, sizeof(dir), USERDATA_ROOT "/%s", FOLDER[i].path);
+		folder_dir(i, dir, sizeof(dir));
 		mkdir_parents(dir);
 		cJSON_AddStringToObject(f, "id", folder_id[i]);
 		cJSON_AddStringToObject(f, "label", folder_label[i]);
@@ -676,12 +754,12 @@ static void on_ready(void)
 		fprintf(stderr, "syncd: policy not fully applied\n");
 	/* Where each folder stands now; StateChanged events follow it. */
 	for (int i = 0; i < FOLDERS; i++) {
-		char q[256];
+		char q[FOLDER_ID_MAX * 3 + 32];
 		cJSON *st;
 
 		if (!cur.folder[FOLDER[i].kind])
 			continue;
-		snprintf(q, sizeof(q), "/rest/db/status?folder=%s", folder_id[i]);
+		folder_url(q, sizeof(q), "/rest/db/status?folder=", folder_id[i]);
 		st = rest("GET", q, NULL, &status);
 		pthread_mutex_lock(&ev_lock);
 		if (status == 200 && !folder_state[i][0])
@@ -739,7 +817,7 @@ static void *event_thread(void *arg)
 {
 	(void)arg;
 	for (;;) {
-		char key[64], path[256];
+		char key[64], path[384];
 		unsigned gen;
 		long since = 0;
 		int failures = 0;
@@ -761,7 +839,7 @@ static void *event_thread(void *arg)
 			snprintf(path, sizeof(path),
 				 "/rest/events?since=%ld&timeout=300&events=DeviceConnected,DeviceDisconnected,"
 				 "DeviceDiscovered,DevicePaused,DeviceResumed,PendingDevicesChanged,ConfigSaved,"
-				 "StateChanged,FolderCompletion,FolderErrors", since);
+				 "PendingFoldersChanged,StateChanged,FolderCompletion,FolderErrors", since);
 			list = rest_with(key, "GET", path, NULL, &status, 330L);
 			pthread_mutex_lock(&ev_lock);
 			current = ev_active && ev_gen == gen;
@@ -925,6 +1003,62 @@ static const char *kind_state(int kind)
 	return "";
 }
 
+/* The folder ids of saves, states and screenshots: nuubOS's own or the
+ * existing one chosen (custom 1). */
+static void print_folder_ids(FILE *out, const char *user, const struct conf *c)
+{
+	char ids[FOLDERS][FOLDER_ID_MAX], labels[FOLDERS][FOLDER_ID_MAX];
+
+	compute_ids(user, c, ids, labels);
+	for (int i = 0; i < FOLDERS; i++) {
+		int k = FOLDER[i].kind;
+		char id[FOLDER_ID_MAX];
+
+		if (!custom_kind(k))
+			continue;
+		snprintf(id, sizeof(id), "%s", ids[i]);
+		clean(id);
+		fprintf(out, "folderid=%s\t%s\t%d\n", KIND[k], id, c->custom[k][0] != '\0');
+	}
+}
+
+/* Folders configured devices share and this console does not use yet
+ * (Syncthing's pending folders), one line per offering device. Folders
+ * meant to arrive encrypted (untrusted device) are not offered. */
+static void print_offers(FILE *out, const cJSON *offers, const cJSON *devices)
+{
+	const cJSON *f, *by, *d;
+
+	for (f = offers ? offers->child : NULL; f; f = f->next) {
+		bool used = false;
+
+		if (!f->string || !valid_folder_id(f->string))
+			continue;
+		for (int i = 0; i < FOLDERS; i++)
+			used = used || !strcmp(f->string, folder_id[i]);
+		if (used)
+			continue;
+		by = cJSON_GetObjectItemCaseSensitive(f, "offeredBy");
+		cJSON_ArrayForEach(d, by) {
+			char id[FOLDER_ID_MAX], label[FOLDER_ID_MAX], name[160] = "";
+			const cJSON *x;
+
+			if (!d->string || !valid_device(d->string) ||
+			    cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(d, "receiveEncrypted")))
+				continue;
+			cJSON_ArrayForEach(x, devices)
+				if (!strcmp(jstr(x, "deviceID"), d->string))
+					snprintf(name, sizeof(name), "%s", jstr(x, "name"));
+			snprintf(id, sizeof(id), "%s", f->string);
+			snprintf(label, sizeof(label), "%s", jstr(d, "label"));
+			clean(id);
+			clean(label);
+			clean(name);
+			fprintf(out, "offer=%s\t%s\t%s\t%s\n", id, label, d->string, name);
+		}
+	}
+}
+
 static char *build_snapshot(void)
 {
 	char *text = NULL, user[64];
@@ -947,6 +1081,7 @@ static char *build_snapshot(void)
 		cJSON *conns = rest("GET", "/rest/system/connections", NULL, &status);
 		cJSON *pending = rest("GET", "/rest/cluster/pending/devices", NULL, &status);
 		cJSON *nearby = rest("GET", "/rest/system/discovery", NULL, &status);
+		cJSON *offers = rest("GET", "/rest/cluster/pending/folders", NULL, &status);
 		const cJSON *d, *map = cJSON_GetObjectItemCaseSensitive(conns, "connections");
 
 		prune_requests(pending);
@@ -962,6 +1097,7 @@ static char *build_snapshot(void)
 		pthread_mutex_lock(&ev_lock);
 		for (int i = 0; i < KINDS; i++)
 			fprintf(out, "folder=%s\t%d\t%s\n", KIND[i], c.folder[i], c.folder[i] ? kind_state(i) : "");
+		print_folder_ids(out, user, &c);
 		cJSON_ArrayForEach(d, devices) {
 			const char *id = jstr(d, "deviceID");
 			const cJSON *conn = cJSON_GetObjectItemCaseSensitive(map, id);
@@ -1002,14 +1138,18 @@ static char *build_snapshot(void)
 			host_of(cJSON_GetObjectItemCaseSensitive(d, "addresses"), host, sizeof(host));
 			fprintf(out, "nearby=%s\t%s\n", d->string, host);
 		}
+		print_offers(out, offers, devices);
 		notify_requests(pending);
 		cJSON_Delete(devices);
 		cJSON_Delete(conns);
 		cJSON_Delete(pending);
 		cJSON_Delete(nearby);
+		cJSON_Delete(offers);
 	} else {
 		for (int i = 0; i < KINDS; i++)
 			fprintf(out, "folder=%s\t%d\t\n", KIND[i], c.folder[i]);
+		if (user[0] && valid_user(user))
+			print_folder_ids(out, user, &c);
 		if (!running)
 			notify_requests(NULL);
 	}
@@ -1244,6 +1384,96 @@ static const char *cmd_conf(const char *what, const char *arg, const char *value
 	return NULL;
 }
 
+/* FOLDER_ID / USE: saves, states or screenshots on an existing folder id
+ * ("-" = back to nuubOS's own); USE also turns the kind on. The folder
+ * that had that path before stops syncing (apply_folders), files stay. */
+static const char *cmd_folder_id(const char *kind, const char *id, bool use)
+{
+	char user[64], ids[FOLDERS][FOLDER_ID_MAX], labels[FOLDERS][FOLDER_ID_MAX];
+	struct conf c;
+	int k = -1;
+	bool reset = !strcmp(id, "-");
+
+	for (int i = 0; i < KINDS; i++)
+		if (!strcmp(kind, KIND[i]))
+			k = i;
+	if (!custom_kind(k) || (!reset && !valid_folder_id(id)) || (use && reset))
+		return "value";
+	if (!active_user(user, sizeof(user)))
+		return "no-user";
+	conf_load(user, &c);
+	snprintf(c.custom[k], sizeof(c.custom[k]), "%s", reset ? "" : id);
+	/* One folder per kind: never the id of another kind. */
+	compute_ids(user, &c, ids, labels);
+	for (int i = 0; i < FOLDERS; i++)
+		for (int j = i + 1; j < FOLDERS; j++)
+			if (!strcmp(ids[i], ids[j]))
+				return "value";
+	if (use)
+		c.folder[k] = true;
+	if (conf_save(user, &c))
+		return "storage";
+	if (child > 0 && !strcmp(child_user, user)) {
+		cur = c;
+		pthread_mutex_lock(&ev_lock);
+		folder_ids(user);
+		for (int i = 0; i < FOLDERS; i++)
+			if (FOLDER[i].kind == k)
+				folder_state[i][0] = '\0';
+		pthread_mutex_unlock(&ev_lock);
+		if (ready && !apply_folders())
+			return "syncthing";
+	}
+	return NULL;
+}
+
+/* DECLINE: into the offering devices' ignoredFolders, so the offer does not
+ * come back, then the pending entry is dropped. */
+static const char *cmd_decline(const char *folder)
+{
+	char q[FOLDER_ID_MAX * 3 + 48];
+	long status;
+	cJSON *offers, *by, *d;
+	bool ok = true;
+
+	if (!valid_folder_id(folder))
+		return "value";
+	if (child <= 0 || !ready)
+		return "not-running";
+	offers = rest("GET", "/rest/cluster/pending/folders", NULL, &status);
+	by = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(offers, folder), "offeredBy");
+	cJSON_ArrayForEach(d, by) {
+		char path[ID_MAX + 32];
+		cJSON *dev, *list, *e;
+
+		if (!d->string || !valid_device(d->string))
+			continue;
+		snprintf(path, sizeof(path), "/rest/config/devices/%s", d->string);
+		dev = rest("GET", path, NULL, &status);
+		if (status != 200 || !cJSON_IsObject(dev)) {
+			cJSON_Delete(dev);
+			ok = false;
+			continue;
+		}
+		list = cJSON_GetObjectItemCaseSensitive(dev, "ignoredFolders");
+		if (!cJSON_IsArray(list)) {
+			cJSON_DeleteItemFromObject(dev, "ignoredFolders");
+			list = cJSON_AddArrayToObject(dev, "ignoredFolders");
+		}
+		e = cJSON_CreateObject();
+		cJSON_AddStringToObject(e, "id", folder);
+		cJSON_AddStringToObject(e, "label", jstr(d, "label"));
+		cJSON_AddStringToObject(e, "time", jstr(d, "time"));
+		cJSON_AddItemToArray(list, e);
+		ok = rest_ok("PUT", path, dev) && ok;
+		cJSON_Delete(dev);
+	}
+	cJSON_Delete(offers);
+	folder_url(q, sizeof(q), "/rest/cluster/pending/folders?folder=", folder);
+	cJSON_Delete(rest("DELETE", q, NULL, &status));
+	return ok ? NULL : "syncthing";
+}
+
 static const char *cmd_device(const char *verb, const char *id, const char *name)
 {
 	char path[ID_MAX + 32];
@@ -1336,6 +1566,12 @@ static void command(struct client *c, char *line)
 		err = cmd_device(f[0], f[1], n == 3 ? f[2] : NULL);
 	else if (n == 2 && (!strcmp(f[0], "REMOVE") || !strcmp(f[0], "IGNORE")))
 		err = cmd_device(f[0], f[1], NULL);
+	else if (n == 3 && !strcmp(f[0], "FOLDER_ID"))
+		err = cmd_folder_id(f[1], f[2], false);
+	else if (n == 3 && !strcmp(f[0], "USE"))
+		err = cmd_folder_id(f[2], f[1], true);
+	else if (n == 2 && !strcmp(f[0], "DECLINE"))
+		err = cmd_decline(f[1]);
 	if (err) {
 		char reply[64];
 

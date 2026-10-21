@@ -542,6 +542,8 @@ fn main() {
             ui.set_keyboard_title(format!("{} • MyHome-5G", s(ui, 172)).into());
             ui.set_keyboard_value("nuubos handheld".into());
             ui.set_keyboard_index(14);
+            ui.set_keyboard_input_kind("password".into()); ui.set_keyboard_page(0);
+            ui.set_launch_open(false); ui.set_settings_open(true); ui.set_settings_selected_index(1);
             ui.set_settings_view(6);
         })),
         ("keyboard_caps", Box::new(|ui| {
@@ -1433,15 +1435,31 @@ fn main() {
             ("Player 2 · RG40XX-V", "", &s(ui, 1032), false, -1),
             ("DESKTOP-NAS", &s(ui, 1039).replace("{0}", "42"), "192.168.1.20", false, -1),
             ("Pixel 8", &s(ui, 159), "", false, -1),
-            (&s(ui, 673), "", &s(ui, 323), false, 1),
+            (&s(ui, 673), "", &s(ui, 1324).replace("{0}", "retro-saves"), false, 1),
             (&s(ui, 674), "", "", false, 0),
             (&s(ui, 675), "", "", false, 0),
             (&s(ui, 1089), "", &s(ui, 1090), false, 1),
             (&s(ui, 1091), "", &s(ui, 1092), false, 1),
             (&s(ui, 1035), "", &s(ui, 1036), false, 1),
-            (&s(ui, 1087), "", &s(ui, 1088), false, 0)]));
+            (&s(ui, 1087), "", &s(ui, 1088), false, 0),
+            ("RetroArch Saves", "retro-saves", &s(ui, 1325).replace("{0}", "DESKTOP-NAS"), false, -1),
+            ("Screenshots", "x7k2p-shots", &s(ui, 1325).replace("{0}", "Pixel 8"), false, -1)]));
+        ui.set_gen_split3(13);
+        ui.set_gen_split3_label(s(ui, 1343).into());
     })));
-    scenes.push(("sync_page_bottom", Box::new(|ui| { ui.set_gen_index(12); ui.set_gen_scroll(8);
+    scenes.push(("sync_page_bottom", Box::new(|ui| { ui.set_gen_index(6); ui.set_gen_scroll(3);
+    })));
+    /* AVAILABLE FOLDERS (2026-10-21) and what one syncs as. */
+    scenes.push(("sync_page_offers", Box::new(|ui| { ui.set_gen_index(13); ui.set_gen_scroll(9);
+    })));
+    scenes.push(("sync_page_offer_choice", Box::new(|ui| {
+        let o: Vec<SettingsChoiceEntry> = [(674, "states"), (675, "screenshots"), (1034, "decline")].iter()
+            .map(|(i, v)| SettingsChoiceEntry { value: (*v).into(), label: s(ui, *i).into() }).collect();
+        ui.set_settings_choice_title(s(ui, 1344).replace("{0}", "RetroArch Saves").into());
+        ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o)))); ui.set_settings_choice_index(0);
+        ui.set_settings_choice_open(true);
+    })));
+    scenes.push(("sync_page_choice_closed", Box::new(|ui| { ui.set_settings_choice_open(false);
     })));
     scenes.push(("sync_guide_intro", Box::new(|ui| {
         ui.set_sync_guide_title(s(ui, 1040).into());
@@ -1507,6 +1525,42 @@ fn main() {
         ui.set_sync_guide_index(0); ui.set_sync_guide_step(5);
     })));
     scenes.push(("sync_closed", Box::new(|ui| { ui.set_sync_guide_open(false); ui.set_settings_open(false); })));
+    /* Tailscale (2026-10-21): page 73 and the sign-in screen. */
+    scenes.push(("ts_page_download", Box::new(|ui| {
+        ui.set_launch_open(false);
+        ui.set_settings_open(true); ui.set_details_active(false);
+        ui.set_settings_selected_index(1); ui.set_settings_view(73); ui.set_gen_index(0); ui.set_gen_scroll(0);
+        ui.set_gen_section(s(ui, 1328).to_uppercase().into()); ui.set_gen_select(true);
+        ui.set_gen_split(0); ui.set_gen_split2(0);
+        ui.set_gen_rows(gen(&[(&s(ui, 653), "", &s(ui, 1330), true, -1)]));
+    })));
+    scenes.push(("ts_page_running", Box::new(|ui| {
+        let version = format!("{} 1.104.2", s(ui, 485));
+        ui.set_gen_rows(gen(&[
+            (&s(ui, 1328), "", &s(ui, 198), false, 1),
+            ("nuubos-rg-cubexx.tail1234.ts.net", "100.101.102.103", &s(ui, 1336), false, -1),
+            (&s(ui, 567), "", "mario@example.com", false, -1),
+            (&s(ui, 487), &version, &s(ui, 489), false, -1),
+            (&s(ui, 644), "", &s(ui, 1335), false, -1)]));
+    })));
+    scenes.push(("ts_signin", Box::new(|ui| {
+        let (size, dark) = qr::encode("https://login.tailscale.com/a/1b2a93e301d978").unwrap();
+        let side = size + 8;
+        let mut px = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(side as u32, side as u32);
+        for (i, p) in px.make_mut_slice().iter_mut().enumerate() {
+            let (x, y) = (i % side, i / side);
+            let on = x >= 4 && y >= 4 && x < size + 4 && y < size + 4 && dark[(y - 4) * size + (x - 4)];
+            let v = if on { 0 } else { 255 };
+            *p = slint::Rgba8Pixel { r: v, g: v, b: v, a: 255 };
+        }
+        ui.set_sync_guide_qr(slint::Image::from_rgba8(px));
+        ui.set_sync_guide_title(s(ui, 587).into()); ui.set_sync_guide_body(s(ui, 1332).into());
+        ui.set_sync_guide_id("https://login.tailscale.com/a/1b2a93e301d978".into()); ui.set_sync_guide_code("".into());
+        ui.set_sync_guide_show_qr(true); ui.set_sync_guide_waiting("".into()); ui.set_sync_guide_error("".into());
+        ui.set_sync_guide_items(gen(&[]));
+        ui.set_sync_guide_index(-1); ui.set_sync_guide_step(-1); ui.set_sync_guide_open(true);
+    })));
+    scenes.push(("ts_closed", Box::new(|ui| { ui.set_sync_guide_open(false); ui.set_settings_open(false); })));
     /* Media (2026-10-12): shelves, grid, album, Now Playing. */
     fn mtile(title: &str, sub: &str, kind: i32, art: Option<slint::Image>, progress: f32, badge: &str, tint: (u8, u8, u8)) -> MediaTile {
         MediaTile { title: title.into(), subtitle: sub.into(), has_art: art.is_some(), art: art.unwrap_or_default(), kind, progress,

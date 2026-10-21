@@ -1,0 +1,320 @@
+From 46e9cf38fe0a3f5a8451d4824f32479ee5203b0c Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 15:54:36 +0200
+Subject: [PATCH 6/6] Cheaper TA parsing and drawing (nuubOS)
+
+On the libretro thread, which reads and draws each frame:
+
+- Translucent strips are merged like opaque ones, each into the one
+  before when they share every setting (~85 % of them in Dead or Alive 2,
+  Test Drive Le Mans and Shenmue II): every draw call costs several
+  microseconds in Panfrost on a Cortex-A53. The order is kept; with
+  per-strip auto-sort a merged strip is sorted as one.
+- make_index() no longer reads every vertex back to leave out the
+  invalid ones: they are noted as they are made (inf_vertices), and only
+  a polygon with one is checked. Reading ~1.5 MB of vertices back, gone
+  from the cache by then, was most of its time (11.5 -> 3 % of the
+  thread). It also writes the indices through a local pointer.
+- Vertex colours are put together and stored as one word: stored a byte
+  at a time (chars, which may alias anything) they made the compiler
+  reload the face colour and the vertex list after each byte.
+- The vertex and index buffers are filled through an unsynchronised
+  mapping (the fence of the ring says they are idle), not
+  glBufferSubData.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/hw/pvr/ta_vtx.cpp  | 120 ++++++++++++++++++++++++++++------------
+ core/rend/gles/gles.cpp |  19 ++++++-
+ core/rend/gles/gles.h   |   3 +
+ 3 files changed, 105 insertions(+), 37 deletions(-)
+
+diff --git a/core/hw/pvr/ta_vtx.cpp b/core/hw/pvr/ta_vtx.cpp
+index 2678b62..7d4a041 100644
+--- a/core/hw/pvr/ta_vtx.cpp
++++ b/core/hw/pvr/ta_vtx.cpp
+@@ -30,6 +30,27 @@ extern int screen_height;
+ //cache state vars
+ static u32 tileclip_val = 0;
+ 
++/* Vertices with huge x, y or z, a negative z or not numbers: make_index()
++ * leaves them out. Which ones they are (their index in the frame's vertex
++ * list, ascending) is noted as they are made, so that make_index() reads
++ * the vertices of a polygon only if it has one: reading back all of them
++ * (~1.5 MB a frame in Dead or Alive 2, gone from the cache by then) was
++ * most of its time. There are usually none. */
++static std::vector<u32> inf_vertices;
++
++static bool is_vertex_inf(const Vertex& vtx)
++{
++	return std::isnan(vtx.x) || fabsf(vtx.x) > 3.4e37f
++			|| std::isnan(vtx.y) || fabsf(vtx.y) > 3.4e37f
++			|| std::isnan(vtx.z) || vtx.z < 0.f || vtx.z > 3.4e37f;
++}
++
++static inline void note_inf_vertex(const Vertex *base, const Vertex *v)
++{
++	if (is_vertex_inf(*v))
++		inf_vertices.push_back((u32)(v - base));
++}
++
+ /* A colour component given as a float, as the hardware takes it: clamped to
+  * 0..1 (anything negative is 0; anything above 1, infinity and NaN are 1). */
+ static inline float saturate01(float val)
+@@ -839,6 +860,7 @@ private:
+ 		cv->y=vtx->xyz[1];
+ 		cv->z=invW;
+ 		update_fz(invW);
++		note_inf_vertex(vdrc.verts.head(), cv);
+ 		return cv;
+ 	}
+ 
+@@ -913,19 +935,27 @@ private:
+ 		//levels on the way and could not reach 255: full intensity on a white
+ 		//face came out 254.
+ 
++	/* The four bytes are put together and stored at once: stored one by one
++	 * (as chars, which may alias anything) they made the compiler load the
++	 * face colour and the vertex list again after each, in the hottest loop
++	 * of the TA parser. */
++	static inline u32 intensity_color(const float *face, u8 alpha, float intensity)
++	{
++		return (u32)(u8)(face[0] * intensity)
++				| ((u32)(u8)(face[1] * intensity) << 8)
++				| ((u32)(u8)(face[2] * intensity) << 16)
++				| ((u32)alpha << 24);
++	}
++
+ 	#define vert_face_base_color(baseint) \
+-		{ const float intensity = saturate01(vtx->baseint) * 255.f; \
+-		cv->col[0] = (u8)(FaceBaseColorF[0] * intensity);  \
+-		cv->col[1] = (u8)(FaceBaseColorF[1] * intensity);  \
+-		cv->col[2] = (u8)(FaceBaseColorF[2] * intensity);  \
+-		cv->col[3] = FaceBaseColor[3]; }
++		{ const u32 c = intensity_color(FaceBaseColorF, FaceBaseColor[3], \
++				saturate01(vtx->baseint) * 255.f); \
++		memcpy(cv->col, &c, 4); }
+ 
+ 	#define vert_face_offs_color(offsint) \
+-		{ const float intensity = saturate01(vtx->offsint) * 255.f; \
+-		cv->vtx_spc[0] = (u8)(FaceOffsColorF[0] * intensity);  \
+-		cv->vtx_spc[1] = (u8)(FaceOffsColorF[1] * intensity);  \
+-		cv->vtx_spc[2] = (u8)(FaceOffsColorF[2] * intensity);  \
+-		cv->vtx_spc[3] = FaceOffsColor[3]; }
++		{ const u32 c = intensity_color(FaceOffsColorF, FaceOffsColor[3], \
++				saturate01(vtx->offsint) * 255.f); \
++		memcpy(cv->vtx_spc, &c, 4); }
+ 
+ 	//vert_float_color_(cv->vtx_spc,FaceOffsColor[3],FaceOffsColor[0]*satint/256,FaceOffsColor[1]*satint/256,FaceOffsColor[2]*satint/256); }
+ 
+@@ -1292,6 +1322,8 @@ private:
+ 		//sprite_uv(0, u0,v2);//or sprite_uv(u2,v0); ?
+ 
+ 		CaclulateSpritePlane(cv);
++		for (int k = 0; k < 4; k++)
++			note_inf_vertex(vdrc.verts.head(), &cv[k]);
+ 
+ 		update_fz(cv[0].z);
+ 
+@@ -1408,28 +1440,33 @@ FifoSplitter TAFifo0;
+ 
+ int ta_parse_cnt = 0;
+ 
+-//
+-// Check if a vertex has huge x,y,z values or negative z
+-//
+-static bool is_vertex_inf(const Vertex& vtx)
+-{
+-	return std::isnan(vtx.x) || fabsf(vtx.x) > 3.4e37f
+-			|| std::isnan(vtx.y) || fabsf(vtx.y) > 3.4e37f
+-			|| std::isnan(vtx.z) || vtx.z < 0.f || vtx.z > 3.4e37f;
+-}
+ 
+ //
+ // Create the vertex index, eliminating invalid vertices and merging strips when possible.
+ //
+ static void make_index(const List<PolyParam> *polys, int first, int end, bool merge, rend_context* ctx)
+ {
+-	const u32 *indices = ctx->idx.head();
++	/* The index list is written through a local pointer and given its new
++	 * length at the end: appending through ctx->idx made the compiler
++	 * load and store the list's fields around every index (the indices are
++	 * u32 and the list's length an int, which may alias). Room is checked
++	 * once a polygon, for the most it can add. */
++	u32 *const idx_base = ctx->idx.head();
++	u32 *out = ctx->idx.LastPtr(0);
++	u32 *const out_end = out + ctx->idx.avail;
+ 	const Vertex *vertices = ctx->verts.head();
+ 
+ 	PolyParam *last_poly = nullptr;
+ 	const PolyParam *end_poly = &polys->head()[end];
+ 	for (PolyParam *poly = &polys->head()[first]; poly != end_poly; poly++)
+ 	{
++		if (out_end - out < (ptrdiff_t)poly->count * 3 + 2)
++		{
++			ctx->idx.avail -= out - ctx->idx.LastPtr(0);
++			ctx->idx.daty = out;
++			ctx->idx.Append(poly->count * 3 + 2);	/* overrun */
++			return;
++		}
+ 		int first_index;
+ 		bool dupe_next_vtx = false;
+ 		if (merge
+@@ -1441,32 +1478,33 @@ static void make_index(const List<PolyParam> *polys, int first, int end, bool me
+ 				// FIXME tcw1, tsp1, tileclip?
+ 				)
+ 		{
+-			const u32 last_vtx = indices[last_poly->first + last_poly->count - 1];
+-			*ctx->idx.Append() = last_vtx;
++			const u32 last_vtx = idx_base[last_poly->first + last_poly->count - 1];
++			*out++ = last_vtx;
+ 			dupe_next_vtx = true;
+ 			first_index = last_poly->first;
+ 		}
+ 		else
+ 		{
+ 			last_poly = poly;
+-			first_index = ctx->idx.used();
++			first_index = out - idx_base;
+ 		}
+ 		int last_good_vtx = -1;
++		const Vertex *pv = &vertices[poly->first];
++		auto inf = std::lower_bound(inf_vertices.begin(), inf_vertices.end(), poly->first);
++		const bool check_inf = inf != inf_vertices.end() && *inf < poly->first + poly->count;
+ 		for (u32 i = 0; i < poly->count; i++)
+ 		{
+-			const Vertex& vtx = vertices[poly->first + i];
+-			if (is_vertex_inf(vtx))
++			if (check_inf && is_vertex_inf(pv[i]))
+ 			{
+ 				while (i < poly->count - 1)
+ 				{
+-					const Vertex& next_vtx = vertices[poly->first + i + 1];
+-					if (!is_vertex_inf(next_vtx))
++					if (!is_vertex_inf(pv[i + 1]))
+ 					{
+ 						// repeat last and next vertices to link strips
+ 						if (last_good_vtx >= 0)
+ 						{
+ 							verify(!dupe_next_vtx);
+-							*ctx->idx.Append() = last_good_vtx;
++							*out++ = last_good_vtx;
+ 							dupe_next_vtx = true;
+ 						}
+ 						break;
+@@ -1479,26 +1517,28 @@ static void make_index(const List<PolyParam> *polys, int first, int end, bool me
+ 				last_good_vtx = poly->first + i;
+ 				if (dupe_next_vtx)
+ 				{
+-					*ctx->idx.Append() = last_good_vtx;
++					*out++ = last_good_vtx;
+ 					dupe_next_vtx = false;
+ 				}
+-				const u32 count = ctx->idx.used() - first_index;
++				const u32 count = (out - idx_base) - first_index;
+ 				if ((i ^ count) & 1)
+-					*ctx->idx.Append() = last_good_vtx;
+-				*ctx->idx.Append() = last_good_vtx;
++					*out++ = last_good_vtx;
++				*out++ = last_good_vtx;
+ 			}
+ 		}
+ 		if (last_poly == poly)
+ 		{
+ 			poly->first = first_index;
+-			poly->count = ctx->idx.used() - first_index;
++			poly->count = (out - idx_base) - first_index;
+ 		}
+ 		else
+ 		{
+-			last_poly->count = ctx->idx.used() - last_poly->first;
++			last_poly->count = (out - idx_base) - last_poly->first;
+ 			poly->count = 0;
+ 		}
+ 	}
++	ctx->idx.avail -= out - ctx->idx.LastPtr(0);
++	ctx->idx.daty = out;
+ }
+ 
+ static void fix_texture_bleeding(const List<PolyParam> *list)
+@@ -1554,6 +1594,10 @@ bool ta_parse_vdrc(TA_context* ctx)
+ 	bool rv=false;
+ 	vd_ctx = ctx;
+ 	vd_rc = vd_ctx->rend;
++	inf_vertices.clear();
++	/* The background plane, made by FillBGP() */
++	for (int k = 0; k < 4 && k < vd_rc.verts.used(); k++)
++		note_inf_vertex(vd_rc.verts.head(), &vd_rc.verts.head()[k]);
+ 
+ 	ta_parse_cnt++;
+ 
+@@ -1622,8 +1666,14 @@ bool ta_parse_vdrc(TA_context* ctx)
+ 						render_pass->pt_count, true, &vd_rc);
+ 				pt_poly_count = render_pass->pt_count;
+ 				render_pass->tr_count = vd_rc.global_param_tr.used();
++				/* Translucent strips are merged too, each into the one
++				 * before when they share every setting: ~85 % of them in
++				 * Dead or Alive 2, Test Drive Le Mans and Shenmue II, and
++				 * every draw call costs the H700 several microseconds in
++				 * the GL driver. The order is kept; with per-strip auto-sort
++				 * a merged strip is sorted as one. */
+ 				make_index(&vd_rc.global_param_tr, tr_poly_count,
+-						render_pass->tr_count, false, &vd_rc);
++						render_pass->tr_count, true, &vd_rc);
+ 				tr_poly_count = render_pass->tr_count;
+ 				render_pass->mvo_tr_count = vd_rc.global_param_mvo_tr.used();
+ 				if (ctx->regions_saved)
+diff --git a/core/rend/gles/gles.cpp b/core/rend/gles/gles.cpp
+index c816dae..8e6898c 100644
+--- a/core/rend/gles/gles.cpp
++++ b/core/rend/gles/gles.cpp
+@@ -483,7 +483,11 @@ void findGLVersion()
+ 			gl.client_wait_sync = (GLenum (*)(void *, GLbitfield, uint64_t))
+ 					dlsym(RTLD_DEFAULT, "glClientWaitSync");
+ 			gl.delete_sync = (void (*)(void *))dlsym(RTLD_DEFAULT, "glDeleteSync");
+-			if (gl.fence_sync == NULL || gl.client_wait_sync == NULL || gl.delete_sync == NULL)
++			gl.map_buffer_range = (void *(*)(GLenum, GLintptr, GLsizeiptr, GLbitfield))
++					dlsym(RTLD_DEFAULT, "glMapBufferRange");
++			gl.unmap_buffer = (GLboolean (*)(GLenum))dlsym(RTLD_DEFAULT, "glUnmapBuffer");
++			if (gl.fence_sync == NULL || gl.client_wait_sync == NULL || gl.delete_sync == NULL
++					|| gl.map_buffer_range == NULL || gl.unmap_buffer == NULL)
+ 				gl.fence_sync = NULL;
+ 		}
+ 		else
+@@ -891,7 +895,18 @@ static void upload_buffer(GLenum target, size_t bytes, const void *data)
+ 	if ((size_t)size < bytes)
+ 		glBufferData(target, bytes + bytes / 4, NULL, GL_DYNAMIC_DRAW);
+ 	if (bytes > 0)
+-		glBufferSubData(target, 0, bytes, data);
++	{
++		/* GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT |
++		 * GL_MAP_UNSYNCHRONIZED_BIT: the fence has been waited for. */
++		void *p = gl.map_buffer_range(target, 0, bytes, 0x0002 | 0x0004 | 0x0020);
++		if (p != NULL)
++		{
++			memcpy(p, data, bytes);
++			gl.unmap_buffer(target);
++		}
++		else
++			glBufferSubData(target, 0, bytes, data);
++	}
+ }
+ 
+ static void upload_vertex_indices()
+diff --git a/core/rend/gles/gles.h b/core/rend/gles/gles.h
+index 7fdcbf6..2891528 100644
+--- a/core/rend/gles/gles.h
++++ b/core/rend/gles/gles.h
+@@ -124,6 +124,9 @@ struct gl_ctx
+ 	void *(*fence_sync)(GLenum condition, GLbitfield flags);
+ 	GLenum (*client_wait_sync)(void *sync, GLbitfield flags, uint64_t timeout);
+ 	void (*delete_sync)(void *sync);
++	/* glMapBufferRange, glUnmapBuffer (GLES 3) */
++	void *(*map_buffer_range)(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access);
++	GLboolean (*unmap_buffer)(GLenum target);
+ 
+ 	size_t get_index_size() { return index_type == GL_UNSIGNED_INT ? sizeof(u32) : sizeof(u16); }
+ };
+-- 
+2.56.0
+

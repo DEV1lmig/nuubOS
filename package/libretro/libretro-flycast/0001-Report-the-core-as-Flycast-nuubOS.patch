@@ -1,0 +1,32 @@
+From 7c091b2976a064b5946c3190d76c5f06a3db82cc Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 14:39:34 +0200
+Subject: [PATCH 1/6] Report the core as Flycast-nuubOS (nuubOS)
+
+nuubOS bundles this patched build as flycast_nuubos and lets users
+download upstream Flycast next to it; RetroArch keeps per-core settings
+by library name, so the two must not share it.
+
+Upstream: not applicable (nuubOS naming).
+---
+ core/libretro/libretro.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/core/libretro/libretro.cpp b/core/libretro/libretro.cpp
+index f877ea4..d5a19cd 100644
+--- a/core/libretro/libretro.cpp
++++ b/core/libretro/libretro.cpp
+@@ -2258,7 +2258,9 @@ const char* retro_get_system_directory(void)
+ 
+ void retro_get_system_info(struct retro_system_info *info)
+ {
+-   info->library_name = "Flycast";
++   /* nuubOS build (H700 performance patches): told apart from upstream
++    * Flycast, which users may download next to it */
++   info->library_name = "Flycast-nuubOS";
+ #ifndef GIT_VERSION
+ #define GIT_VERSION ""
+ #endif
+-- 
+2.56.0
+

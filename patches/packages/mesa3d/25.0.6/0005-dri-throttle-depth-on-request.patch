@@ -1,0 +1,88 @@
+From: nuubOS <nuubos@localhost>
+Subject: [PATCH] dri: a swap may wait 2 or 3 frames back (NUUBOS_THROTTLE_DEPTH)
+
+dri_flush() throttles each swap on the fence of the swap before, so at
+most one frame is queued on the GPU. An emulator whose frame reaches the
+GPU late in its frame (Flycast with threaded rendering draws the frame
+before at the start of retro_run) then waits in eglSwapBuffers for each
+frame's GPU work before it can start the next one, and the GPU idles in
+between: Crazy Taxi on Mali-G31 sat ~12 ms a frame in drmSyncobjWait from
+dri_flush with the GPU 65-75 % busy, 53-56 fps while driving; with a depth
+of 2, 59.6. NUUBOS_THROTTLE_DEPTH=2 or 3 in the environment makes a swap
+wait for the fence 2 or 3 swaps back. Without it nothing changes.
+
+Signed-off-by: nuubOS
+---
+--- a/src/gallium/frontends/dri/dri_drawable.c
++++ b/src/gallium/frontends/dri/dri_drawable.c
+@@ -208,6 +208,10 @@
+ 
+    screen->base.screen->fence_reference(screen->base.screen,
+          &drawable->throttle_fence, NULL);
++   screen->base.screen->fence_reference(screen->base.screen,
++         &drawable->throttle_fence_old[0], NULL);
++   screen->base.screen->fence_reference(screen->base.screen,
++         &drawable->throttle_fence_old[1], NULL);
+ 
+    /* Notify the st manager that this drawable is no longer valid */
+    st_api_destroy_drawable(&drawable->base);
+@@ -531,11 +535,21 @@
+ 
+       st_context_flush(st, flush_flags, &new_fence, args.ctx ? notify_before_flush_cb : NULL, &args);
+ 
+-      /* throttle on the previous fence */
+-      if (drawable->throttle_fence) {
+-         screen->fence_finish(screen, NULL, drawable->throttle_fence, OS_TIMEOUT_INFINITE);
+-         screen->fence_reference(screen, &drawable->throttle_fence, NULL);
++      /* throttle on the previous fence, or (nuubOS, NUUBOS_THROTTLE_DEPTH
++       * 2 or 3) on the one 2 or 3 swaps back: an emulator whose frame
++       * reaches the GPU late in the frame otherwise waits for each frame's
++       * GPU work before it can start the next, and the GPU idles. */
++      unsigned depth = ctx->screen->throttle_depth;
++      struct pipe_fence_handle **oldest = depth >= 2 ?
++         &drawable->throttle_fence_old[depth - 2] : &drawable->throttle_fence;
++      if (*oldest) {
++         screen->fence_finish(screen, NULL, *oldest, OS_TIMEOUT_INFINITE);
++         screen->fence_reference(screen, oldest, NULL);
+       }
++      if (depth >= 3)
++         drawable->throttle_fence_old[1] = drawable->throttle_fence_old[0];
++      if (depth >= 2)
++         drawable->throttle_fence_old[0] = drawable->throttle_fence;
+       drawable->throttle_fence = new_fence;
+    }
+    else if (flags & (__DRI2_FLUSH_DRAWABLE | __DRI2_FLUSH_CONTEXT)) {
+--- a/src/gallium/frontends/dri/dri_drawable.h
++++ b/src/gallium/frontends/dri/dri_drawable.h
+@@ -57,6 +57,9 @@
+    int swap_interval;
+ 
+    struct pipe_fence_handle *throttle_fence;
++   /* the swaps before throttle_fence, newest first (screen->throttle_depth
++    * 2 or 3, nuubOS) */
++   struct pipe_fence_handle *throttle_fence_old[2];
+    bool flushing; /* prevents recursion in dri_flush */
+ 
+    /**
+--- a/src/gallium/frontends/dri/dri_screen.c
++++ b/src/gallium/frontends/dri/dri_screen.c
+@@ -643,6 +643,7 @@
+                          &screen->max_gl_es2_version);
+ 
+    screen->throttle = pscreen->caps.throttle;
++   screen->throttle_depth = CLAMP(debug_get_num_option("NUUBOS_THROTTLE_DEPTH", 1), 1, 3);
+    if (pscreen->caps.device_protected_context)
+       screen->has_protected_context = true;
+    screen->has_reset_status_query = pscreen->caps.device_reset_status_query;
+--- a/src/gallium/frontends/dri/dri_screen.h
++++ b/src/gallium/frontends/dri/dri_screen.h
+@@ -91,6 +91,9 @@
+    unsigned int api_mask;
+ 
+    bool throttle;
++   /* Swaps that may be in flight before a swap waits for the GPU: 1, or up
++    * to 3 with NUUBOS_THROTTLE_DEPTH (nuubOS). */
++   unsigned throttle_depth;
+    bool dmabuf_import;
+ 
+    struct st_config_options options;

@@ -28,7 +28,7 @@ the game does not start.
 | SG-1000, Master System, Game Gear, Mega Drive, Mega-CD | Genesis Plus GX | **non-commercial** | Mega-CD: BIOS |
 | 32X | PicoDrive | **non-commercial** | |
 | Saturn | YabaSanshiro (A53/GLES3 profile) | GPL-2.0 | partial; BIOS `saturn_bios.bin` (the core refuses to start without one, even with HLE forced) |
-| Dreamcast, NAOMI, Atomiswave | Flycast (A53/GLES profile) | GPL-2.0 | partial; NAOMI/Atomiswave: BIOS |
+| Dreamcast, NAOMI, Atomiswave | Flycast-nuubOS (`flycast_nuubos`: Flycast A53/GLES profile + nuubOS Panfrost and threaded-rendering patches; no upstream alternative: the aarch64 buildbot Flycast wants desktop OpenGL and libgomp) | GPL-2.0 | partial; NAOMI/Atomiswave: BIOS |
 | PlayStation | PCSX ReARMed | GPL-2.0 | HLE BIOS |
 | PSP | PPSSPP-nuubOS (`ppsspp_nuubos`: PPSSPP + nuubOS Panfrost patches; upstream PPSSPP downloadable) | GPL-2.0+ | partial; assets shipped; patched to avoid GPU waits on Panfrost (docs/dev/emulation.md) |
 | PC Engine / CD | Beetle PCE Fast | GPL-2.0 | CD: BIOS `syscard3.pce` |

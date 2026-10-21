@@ -1,0 +1,338 @@
+From fd059cc61742a8d83b033c8c1113f9383fb45e25 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 21:05:23 +0200
+Subject: [PATCH 08/11] ARM64 dynarec: wait loops, direct memory access
+ (nuubOS)
+
+Wait loops: when a short backward conditional branch that writes no
+memory is taken and the SH4 registers (r0-r15, pr, T, gbr, mac, fpul) are
+the same as the time before, the loop only waits for memory something
+else changes (an interrupt handler, DMA, the AICA), so the rest of the
+time slice is spent at once. Shenmue II spent 27 % of its emulation
+thread in one that the single-block idle detector misses (a counter
+compared with a target around an empty callback). Loops whose state
+seldom repeats (fewer than 1 in 16 of 4096 checks) stop being checked;
+a wrong guess only costs emulated time, events still come in order.
+
+Direct memory access: without the MMU and with the 4 GB mapping, reads
+and writes go straight from the address register to the destination (or
+from the source) register, 3 instructions instead of 5 (no copies
+through w0/w1); ngen_Rewrite reads the registers back from the add and
+the load/store it replaces (the plain accesses are rn 0, rt 0 or 1). The
+SH4 thread is bound by the Cortex-A53's instruction cache.
+
+Conditional block ends compare w29 (jcond/jdyn leave the condition
+there) instead of reloading jdyn from the context.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/hw/sh4/dyna/blockmanager.h |   4 +
+ core/hw/sh4/dyna/decoder.cpp    |  11 ++
+ core/rec-ARM64/rec_arm64.cpp    | 207 +++++++++++++++++++++++++++++++-
+ 3 files changed, 218 insertions(+), 4 deletions(-)
+
+diff --git a/core/hw/sh4/dyna/blockmanager.h b/core/hw/sh4/dyna/blockmanager.h
+index 52aea50..dab88f7 100644
+--- a/core/hw/sh4/dyna/blockmanager.h
++++ b/core/hw/sh4/dyna/blockmanager.h
+@@ -47,6 +47,10 @@ struct RuntimeBlockInfo: RuntimeBlockInfo_Core
+ 	bool has_fpu_op;
+ 	u32 blockcheck_failures;
+ 	bool temp_block;
++	/* Short backward conditional branch that writes no memory: checked
++	 * for a wait loop when taken (ARM64 dynarec, spin_check). */
++	bool spin_candidate;
++	u32 spin_slot;
+ 
+ 	u32 BranchBlock; /* if not 0xFFFFFFFF then jump target */
+ 	u32 NextBlock;   /* if not 0xFFFFFFFF then next block (by position) */
+diff --git a/core/hw/sh4/dyna/decoder.cpp b/core/hw/sh4/dyna/decoder.cpp
+index e19a339..8da40e5 100644
+--- a/core/hw/sh4/dyna/decoder.cpp
++++ b/core/hw/sh4/dyna/decoder.cpp
+@@ -1120,6 +1120,17 @@ _end:
+ 
+ 		//blk->guest_cycles=5;
+ 	}
++	/* nuubOS: wait loops that span several blocks (a call, a stack push)
++	 * escape the detector above; the dynarec checks these at run time. */
++	{
++		static u32 next_spin_slot;
++		blk->spin_candidate = !mmu_enabled()
++				&& (blk->BlockType == BET_Cond_0 || blk->BlockType == BET_Cond_1)
++				&& blk->BranchBlock <= blk->vaddr
++				&& blk->vaddr - blk->BranchBlock <= 0x400
++				&& !state.info.has_writem;
++		blk->spin_slot = blk->spin_candidate ? next_spin_slot++ : 0;
++	}
+ 	// Win CE boost
+ 	if (mmu_enabled())
+ 		blk->guest_cycles *= 1.5f;
+diff --git a/core/rec-ARM64/rec_arm64.cpp b/core/rec-ARM64/rec_arm64.cpp
+index 1879af8..8165756 100644
+--- a/core/rec-ARM64/rec_arm64.cpp
++++ b/core/rec-ARM64/rec_arm64.cpp
+@@ -68,6 +68,55 @@ static void (*mainloop)(void *context);
+ static int (*arm64_intc_sched)();
+ static void (*arm64_no_update)();
+ 
++/*
++ * Wait loops (nuubOS). When a short backward conditional branch is taken
++ * and the SH4 registers are the same as the time before, the loop only
++ * waits for memory that something else changes (an interrupt handler, DMA,
++ * the AICA): the rest of the time slice is spent at once instead of
++ * running the loop again and again until it ends. Shenmue II spent 27 % of
++ * its emulation thread in one (a counter compared with a target around an
++ * empty callback). A loop that does work changes a register; one whose
++ * state seldom repeats stops being checked. A wrong guess only costs
++ * emulated time, the events still come in order.
++ */
++#define SPIN_SLOTS 4096
++#define SPIN_GIVE_UP 4096
++struct SpinSlot
++{
++	u32 off;
++	u32 valid;
++	u32 misses;
++	u32 hits;
++	u32 regs[22];
++};
++static SpinSlot spin_slots[SPIN_SLOTS];
++
++extern "C" u32 spin_check(SpinSlot *s)
++{
++	u32 now[22];
++
++	/* r, pr, sr... are the Sh4cntx field macros of sh4_core.h. */
++	memcpy(now, r, 16 * sizeof(u32));
++	now[16] = pr;
++	now[17] = sr.T;
++	now[18] = gbr;
++	now[19] = mac.l;
++	now[20] = mac.h;
++	now[21] = fpul;
++	if (s->valid && memcmp(now, s->regs, sizeof(now)) == 0)
++	{
++		s->hits++;
++		return 1;
++	}
++	memcpy(s->regs, now, sizeof(now));
++	s->valid = 1;
++	/* A loop that seldom repeats its state is not a wait loop: checking
++	 * it every time costs more than the odd time slice saved. */
++	if (++s->misses >= SPIN_GIVE_UP && s->hits * 16 < s->misses)
++		s->off = 1;
++	return 0;
++}
++
+ static bool restarting;
+ 
+ void ngen_mainloop(void* v_cntx)
+@@ -1109,6 +1158,75 @@ public:
+ 		return MemOperand(x28, offset);
+ 	}
+ 
++	/* The slow path in place of a fast access whose address was in w<rn>
++	 * and whose value goes to (read) or comes from (write) register rt. */
++	void GenReadMemorySlowRegs(u32 size, u32 rn, u32 rt)
++	{
++		Instruction *start_instruction = GetCursorAddress<Instruction *>();
++
++		if (rn != 0)
++			Mov(w0, Register::GetWRegFromCode(rn));
++		switch (size)
++		{
++		case 1:
++			GenCallRuntime(ReadMem8);
++			Sxtb(Register::GetWRegFromCode(rt), w0);
++			break;
++		case 2:
++			GenCallRuntime(ReadMem16);
++			Sxth(Register::GetWRegFromCode(rt), w0);
++			break;
++		case 4:
++			GenCallRuntime(ReadMem32);
++			if (rt != 0)
++				Mov(Register::GetWRegFromCode(rt), w0);
++			break;
++		case 8:
++			GenCallRuntime(ReadMem64);
++			if (rt != 0)
++				Mov(Register::GetXRegFromCode(rt), x0);
++			break;
++		default:
++			die("1..8 bytes");
++			break;
++		}
++		EnsureCodeSize(start_instruction, read_memory_rewrite_size);
++	}
++
++	void GenWriteMemorySlowRegs(u32 size, u32 rn, u32 rt)
++	{
++		Instruction *start_instruction = GetCursorAddress<Instruction *>();
++
++		if (rn != 0)
++			Mov(w0, Register::GetWRegFromCode(rn));
++		if (rt != 1)
++		{
++			if (size == 8)
++				Mov(x1, Register::GetXRegFromCode(rt));
++			else
++				Mov(w1, Register::GetWRegFromCode(rt));
++		}
++		switch (size)
++		{
++		case 1:
++			GenCallRuntime(WriteMem8);
++			break;
++		case 2:
++			GenCallRuntime(WriteMem16);
++			break;
++		case 4:
++			GenCallRuntime(WriteMem32);
++			break;
++		case 8:
++			GenCallRuntime(WriteMem64);
++			break;
++		default:
++			die("1..8 bytes");
++			break;
++		}
++		EnsureCodeSize(start_instruction, write_memory_rewrite_size);
++	}
++
+ 	void GenReadMemorySlow(u32 size)
+ 	{
+ 		Instruction *start_instruction = GetCursorAddress<Instruction *>();
+@@ -1225,16 +1343,29 @@ public:
+ 				// if (*jdyn == 0)
+ 				//   next_pc = branch_pc_value;
+ 
++				/* jcond/jdyn leave the condition in w29 too (no reload) */
+ 				if (block->has_jcond)
+-					Ldr(w11, sh4_context_mem_operand(&Sh4cntx.jdyn));
++					Cmp(w29, block->BlockType & 1);
+ 				else
++				{
+ 					Ldr(w11, sh4_context_mem_operand(&sr.T));
+-
+-				Cmp(w11, block->BlockType & 1);
++					Cmp(w11, block->BlockType & 1);
++				}
+ 
+ 				Label branch_not_taken;
+ 
+ 				B(ne, &branch_not_taken);
++				if (block->spin_candidate && !mmu_enabled())
++				{
++					Label not_waiting;
++					Mov(x0, reinterpret_cast<uintptr_t>(&spin_slots[block->spin_slot % SPIN_SLOTS]));
++					Ldr(w1, MemOperand(x0, offsetof(SpinSlot, off)));
++					Cbnz(w1, &not_waiting);
++					GenCallRuntime(spin_check);
++					Cbz(w0, &not_waiting);
++					Mov(w27, 0);
++					Bind(&not_waiting);
++				}
+ 				if (block->pBranchBlock != NULL)
+ 					GenBranch(block->pBranchBlock->code);
+ 				else
+@@ -1541,11 +1672,45 @@ private:
+ 			B(&code_label, cond);
+ 	}
+ 
++	/* nuubOS: direct memory access straight from the address register into
++	 * the destination register (no copies through w0): 3 instructions
++	 * instead of 5, the same 3 that ngen_Rewrite turns into the slow path
++	 * (it reads the registers back from the instructions). The SH4 thread
++	 * is bound by the instruction cache (docs: emulation.md). */
++	bool DirectMemoryAccess(bool optimise)
++	{
++		return optimise && !mmu_enabled() && _nvmem_enabled() && _nvmem_4gb_space();
++	}
++
+ 	void GenReadMemory(const shil_opcode& op, size_t opid, bool optimise)
+ 	{
+ 		if (GenReadMemoryImmediate(op))
+ 			return;
+ 
++		u32 rsize = op.flags & 0x7f;
++		if (DirectMemoryAccess(optimise))
++		{
++			const Register& raddr = GenMemAddr(op);
++			const bool to_reg = rsize <= 4 && regalloc.IsAllocg(op.rd);
++			const Register& rd = to_reg ? regalloc.MapRegister(op.rd) : (rsize == 8 ? (const Register&)x0 : (const Register&)w0);
++			Instruction *start_instruction = GetCursorAddress<Instruction *>();
++			Add(x1, Register::GetXRegFromCode(raddr.GetCode()), sizeof(Sh4Context), LeaveFlags);
++			if (rsize == 1)
++				Ldrsb(rd, MemOperand(x28, x1));
++			else if (rsize == 2)
++				Ldrsh(rd, MemOperand(x28, x1));
++			else
++				Ldr(rd, MemOperand(x28, x1));
++			EnsureCodeSize(start_instruction, read_memory_rewrite_size);
++			if (to_reg)
++				return;
++			if (rsize < 8)
++				host_reg_to_shil_param(op.rd, w0);
++			else
++				Str(x0, sh4_context_mem_operand(op.rd.reg_ptr()));
++			return;
++		}
++
+ 		GenMemAddr(op, call_regs[0]);
+ 		if (mmu_enabled())
+ 			Mov(*call_regs[2], block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
+@@ -1767,6 +1932,29 @@ private:
+ 		if (GenWriteMemoryImmediate(op))
+ 			return;
+ 
++		u32 wsize = op.flags & 0x7f;
++		if (DirectMemoryAccess(optimise))
++		{
++			const Register& raddr = GenMemAddr(op);
++			const Register* rval = wsize == 8 ? (const Register*)&x1 : (const Register*)&w1;
++			if (wsize <= 4 && regalloc.IsAllocg(op.rs2))
++				rval = &regalloc.MapRegister(op.rs2);
++			else if (wsize <= 4)
++				shil_param_to_host_reg(op.rs2, w1);
++			else
++				shil_param_to_host_reg(op.rs2, x1);
++			Instruction *start_instruction = GetCursorAddress<Instruction *>();
++			Add(x7, Register::GetXRegFromCode(raddr.GetCode()), sizeof(Sh4Context), LeaveFlags);
++			if (wsize == 1)
++				Strb(*rval, MemOperand(x28, x7));
++			else if (wsize == 2)
++				Strh(*rval, MemOperand(x28, x7));
++			else
++				Str(*rval, MemOperand(x28, x7));	/* w or x */
++			EnsureCodeSize(start_instruction, write_memory_rewrite_size);
++			return;
++		}
++
+ 		GenMemAddr(op, call_regs[0]);
+ 		if (mmu_enabled())
+ 			Mov(*call_regs[2], block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
+@@ -2217,7 +2405,18 @@ bool ngen_Rewrite(unat& host_pc, unat, unat)
+ 	// Skip the preceding ops (add, ubfx)
+ 	u32 *code_rewrite = code_ptr - 1 - (!_nvmem_4gb_space() ? 1 : 0);
+ 	Arm64Assembler *assembler = new Arm64Assembler(code_rewrite);
+-	if (is_read)
++	if (!mmu_enabled() && _nvmem_4gb_space())
++	{
++		/* add x1|x7, x<rn>, #sizeof(Sh4Context); ldr|str <rt>, [x28, x1|x7]:
++		 * the plain accesses have rn 0 (w0) and rt 0 (read) or 1 (write). */
++		u32 rn = (code_ptr[-1] >> 5) & 31;
++		u32 rt = armv8_op & 31;
++		if (is_read)
++			assembler->GenReadMemorySlowRegs(size, rn, rt);
++		else
++			assembler->GenWriteMemorySlowRegs(size, rn, rt);
++	}
++	else if (is_read)
+ 		assembler->GenReadMemorySlow(size);
+ 	else
+ 		assembler->GenWriteMemorySlow(size);
+-- 
+2.56.0
+
