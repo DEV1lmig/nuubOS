@@ -1,0 +1,169 @@
+From edcd202e945de13e65a7ebccf2c62d085ceb0a19 Mon Sep 17 00:00:00 2001
+From: nuubOS <nuubos@localhost>
+Date: Wed, 21 Oct 2026 23:04:28 +0200
+Subject: [PATCH] GLES: no texture or uniform state set again for each strip
+ (nuubOS)
+
+SetGPState set, for every strip, the minification filter twice with
+anisotropic filtering on (LINEAR_MIPMAP_NEAREST, then LINEAR_MIPMAP_LINEAR:
+the per-texture cache passed both on every time), the anisotropy without
+any cache, and trilinear_alpha and the clip rectangle even when they had
+not changed. Each such call makes Mesa validate the texture and sampler
+or build the draw's constants again; on a Cortex-A53 that per-draw cost
+was the largest part of the rendering thread in Crazy Taxi's heavy frames
+(1000+ draws). The filter is now set once as it ends up, the anisotropy
+goes through glcache per texture, the two uniforms are set only when
+their value changes for the program. Same GL state.
+
+Upstream: not submitted (nuubOS H700 tuning).
+---
+ core/rend/gles/glcache.h  | 18 +++++++++++++++++-
+ core/rend/gles/gldraw.cpp | 38 +++++++++++++++++++++++---------------
+ core/rend/gles/gles.cpp   |  3 +++
+ core/rend/gles/gles.h     |  5 +++++
+ 4 files changed, 48 insertions(+), 16 deletions(-)
+
+diff --git a/core/rend/gles/glcache.h b/core/rend/gles/glcache.h
+index ae19b0c..857eaef 100644
+--- a/core/rend/gles/glcache.h
++++ b/core/rend/gles/glcache.h
+@@ -214,6 +214,21 @@ public:
+ 		glTexParameteri(target, pname, param);
+ 	}
+ 
++	/* GL_TEXTURE_MAX_ANISOTROPY_EXT of the bound texture (nuubOS): it was set
++	 * for every strip, and a texture parameter that changes nothing still
++	 * makes the driver validate the texture and its sampler again. */
++	void TexParameterf(GLenum target, GLenum pname, GLfloat param)
++	{
++		if (target == GL_TEXTURE_2D && pname == GL_TEXTURE_MAX_ANISOTROPY_EXT && !_disable_cache)
++		{
++			TextureParameters &cur_params = _texture_params[_texture];
++			if (cur_params._max_anisotropy == param)
++				return;
++			cur_params._max_anisotropy = param;
++		}
++		glTexParameterf(target, pname, param);
++	}
++
+ 	GLuint GenTexture() {
+ 		if (_texture_cache_size == 0) {
+ 			_texture_cache_size = TEXTURE_ID_CACHE_SIZE;
+@@ -273,12 +288,13 @@ public:
+ private:
+ 	class TextureParameters {
+ 	public:
+-		TextureParameters() : _min_filter(0xFFFFFFFFu), _mag_filter(0xFFFFFFFFu), _wrap_s(0xFFFFFFFFu), _wrap_t(0xFFFFFFFFu) {}
++		TextureParameters() : _min_filter(0xFFFFFFFFu), _mag_filter(0xFFFFFFFFu), _wrap_s(0xFFFFFFFFu), _wrap_t(0xFFFFFFFFu), _max_anisotropy(-1.f) {}
+ 
+ 		GLenum _min_filter;
+ 		GLenum _mag_filter;
+ 		GLenum _wrap_s;
+ 		GLenum _wrap_t;
++		GLfloat _max_anisotropy;
+ 	};
+ 	GLuint _array_buffer;
+ 	GLuint _element_array_buffer;
+diff --git a/core/rend/gles/gldraw.cpp b/core/rend/gles/gldraw.cpp
+index 3beffc9..437de69 100644
+--- a/core/rend/gles/gldraw.cpp
++++ b/core/rend/gles/gldraw.cpp
+@@ -138,8 +138,12 @@ __forceinline
+ 								  shadowed);
+ 
+ 	glcache.UseProgram(CurrentShader->program);
+-	if (CurrentShader->trilinear_alpha != -1)
++	if (CurrentShader->trilinear_alpha != -1
++			&& CurrentShader->trilinear_alpha_value != ShaderUniforms.trilinear_alpha)
++	{
+ 		glUniform1f(CurrentShader->trilinear_alpha, ShaderUniforms.trilinear_alpha);
++		CurrentShader->trilinear_alpha_value = ShaderUniforms.trilinear_alpha;
++	}
+ 	if (palette)
+ 	{
+ 		if (gp->tcw.PixelFmt == PixelPal4)
+@@ -150,7 +154,15 @@ __forceinline
+ 	}
+ 
+ 	if (clipmode == TileClipping::Inside)
+-		glUniform4f(CurrentShader->pp_ClipTest, clip_rect[0], clip_rect[1], clip_rect[0] + clip_rect[2], clip_rect[1] + clip_rect[3]);
++	{
++		const float clip_test[4] = { (float)clip_rect[0], (float)clip_rect[1],
++				(float)(clip_rect[0] + clip_rect[2]), (float)(clip_rect[1] + clip_rect[3]) };
++		if (memcmp(clip_test, CurrentShader->clip_test_value, sizeof(clip_test)) != 0)
++		{
++			glUniform4f(CurrentShader->pp_ClipTest, clip_test[0], clip_test[1], clip_test[2], clip_test[3]);
++			memcpy(CurrentShader->clip_test_value, clip_test, sizeof(clip_test));
++		}
++	}
+ 	if (clipmode == TileClipping::Outside)
+ 	{
+ 		glcache.Enable(GL_SCISSOR_TEST);
+@@ -182,25 +194,21 @@ __forceinline
+ 		//bilinear filtering
+ 		//PowerVR supports also trilinear via two passes, but we ignore that for now
+ 		bool mipmapped = gp->tcw.MipMapped != 0 && gp->tcw.ScanOrder == 0 && settings.rend.UseMipmaps;
+-		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mipmapped ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR);
++		/* The minification filter set once, as it ends up (nuubOS): with
++		 * anisotropic filtering it was set to LINEAR_MIPMAP_NEAREST and then
++		 * to LINEAR_MIPMAP_LINEAR for every strip, so the per-texture cache
++		 * passed both to the driver every time. */
++		const bool anisotropic = gl.max_anisotropy > 1.f && settings.rend.AnisotropicFiltering > 1;
++		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, !mipmapped ? GL_LINEAR
++				: anisotropic ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST);
+ 		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+ #ifdef GL_TEXTURE_LOD_BIAS
+ 		if (!gl.is_gles && gl.gl_major >= 3 && mipmapped)
+ 			glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, D_Adjust_LoD_Bias[gp->tsp.MipMapD]);
+ #endif
+ 		if (gl.max_anisotropy > 1.f)
+-		{
+-			if (settings.rend.AnisotropicFiltering > 1)
+-			{
+-				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT,
+-						std::min((f32)settings.rend.AnisotropicFiltering, gl.max_anisotropy));
+-				// Set the recommended minification filter for best results
+-				if (mipmapped)
+-					glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+-			}
+-			else
+-				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 1.f);
+-		}
++			glcache.TexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropic
++					? std::min((f32)settings.rend.AnisotropicFiltering, gl.max_anisotropy) : 1.f);
+ 	}
+ 
+ 	// Apparently punch-through polys support blending, or at least some combinations
+diff --git a/core/rend/gles/gles.cpp b/core/rend/gles/gles.cpp
+index 8e6898c..4d5538f 100644
+--- a/core/rend/gles/gles.cpp
++++ b/core/rend/gles/gles.cpp
+@@ -679,6 +679,9 @@ bool CompilePipelineShader(	PipelineShader* s)
+ 	s->palette_index = glGetUniformLocation(s->program, "palette_index");
+ 
+ 	s->trilinear_alpha = glGetUniformLocation(s->program, "trilinear_alpha");
++	s->trilinear_alpha_value = -1.f;
++	for (int i = 0; i < 4; i++)
++		s->clip_test_value[i] = -1.f;
+ 	
+ 	if (s->fog_clamping)
+ 	{
+diff --git a/core/rend/gles/gles.h b/core/rend/gles/gles.h
+index 2891528..5bd666f 100644
+--- a/core/rend/gles/gles.h
++++ b/core/rend/gles/gles.h
+@@ -56,6 +56,11 @@ struct PipelineShader
+ 	GLint normal_matrix;
+ 	GLint palette_index;
+ 	GLint shade_scale_factor;
++	/* Values last given to the uniforms SetGPState sets for each strip
++	 * (nuubOS): a glUniform that changes nothing still makes the driver
++	 * build the draw's constants again. */
++	float trilinear_alpha_value;
++	float clip_test_value[4];
+ 
+ 	//
+ 	bool cp_AlphaTest;
+-- 
+2.56.0
+
