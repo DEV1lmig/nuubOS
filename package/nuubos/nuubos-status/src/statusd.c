@@ -633,10 +633,13 @@ static void spawn_detached(const char *path)
 }
 
 /* Once an hour while Wi-Fi is connected: the network time sync and the
- * daily update check (each helper decides whether it is due). */
+ * daily update check (each helper decides whether it is due). The first
+ * run comes ~2 minutes after the start, as soon as Wi-Fi is connected:
+ * counting a full hour from boot, a console played in shorter sessions
+ * never checked for updates (2026-10-22). */
 static void maybe_time_sync(const struct topbar_state *state)
 {
-    static int minutes;
+    static int minutes = TIME_SYNC_EVERY_MINUTES - 2;
 
     if (++minutes < TIME_SYNC_EVERY_MINUTES || strcmp(state->wifi_state, "connected") != 0)
         return;
