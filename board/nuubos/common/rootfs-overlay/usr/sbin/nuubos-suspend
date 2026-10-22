@@ -10,6 +10,13 @@ INTERRUPTS=/proc/interrupts
 # The hardware watchdog keeps counting while the SoC sleeps (sunxi_wdt has
 # no suspend handling): it is stopped for the sleep and started again.
 WATCHDOG=/etc/init.d/S12nuubos-watchdog
+# Sleep mode from nuubos-systemd: "hypersleep" (the SoC is powered off,
+# only the power key wakes it) or "quick" (the SoC stays powered: START and
+# a lid wake it too, more drain). The firmware (BL31) reads it from RTC
+# general purpose register 5 at every suspend (platform.md "Hypersleep").
+SLEEP_MODE="${1:-hypersleep}"
+RESUME_MODE_REG=0x07000114
+RESUME_MODE_QUICK=0x5170c0de
 
 suspend_log()
 {
@@ -81,6 +88,17 @@ resume_wifi()
 	command -v wpa_cli >/dev/null 2>&1 || return 0
 	[ -d /sys/class/net/wlan0 ] || return 0
 
+	# statusd's wpa_cli event listener survives the sleep, but
+	# wpa_supplicant may have detached it (its event sends failed while
+	# everything was frozen; the listener's pings still work, so it never
+	# notices): the top bar then kept "connecting" after a resume (user
+	# report 2026-10-22). Start it again before any reconnect, and have
+	# statusd read the state once now.
+	/etc/init.d/S48nuubos-status start >/dev/null 2>&1 || true
+	if [ -r /run/nuubos/statusd.pid ]; then
+		kill -USR1 "$(cat /run/nuubos/statusd.pid)" 2>/dev/null || true
+	fi
+
 	WPA_STATE="$(wpa_cli -i wlan0 status 2>/dev/null | awk -F= '/^wpa_state=/ { print $2; exit }')"
 
 	if [ "$WPA_STATE" != "COMPLETED" ]; then
@@ -126,6 +144,15 @@ SLEEP_NAME=s2idle
 if grep -qw deep "$MEM_SLEEP" 2>/dev/null; then
 	SLEEP_STATE=mem
 	SLEEP_NAME=deep
+fi
+
+if [ "$SLEEP_STATE" = mem ] && command -v devmem >/dev/null 2>&1; then
+	if [ "$SLEEP_MODE" = quick ]; then
+		devmem "$RESUME_MODE_REG" 32 "$RESUME_MODE_QUICK"
+	else
+		devmem "$RESUME_MODE_REG" 32 0
+	fi
+	suspend_log "sleep mode $SLEEP_MODE"
 fi
 
 if ! echo "$SLEEP_STATE" > "$POWER_STATE"; then

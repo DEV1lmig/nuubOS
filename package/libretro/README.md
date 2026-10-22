@@ -27,7 +27,7 @@ the game does not start.
 | Pokémon Mini | PokeMini | GPL-3.0 | free BIOS built in |
 | SG-1000, Master System, Game Gear, Mega Drive, Mega-CD | Genesis Plus GX | **non-commercial** | Mega-CD: BIOS |
 | 32X | PicoDrive | **non-commercial** | |
-| Saturn | YabaSanshiro (A53/GLES3 profile) | GPL-2.0 | partial; BIOS `saturn_bios.bin` (the core refuses to start without one, even with HLE forced) |
+| Saturn | YabaSanshiro-nuubOS (`yabasanshiro_nuubos`: YabaSanshiro A53/GLES3 profile + nuubOS Panfrost patches; upstream YabaSanshiro downloadable) | GPL-2.0 | partial; BIOS `saturn_bios.bin` (the core refuses to start without one, even with HLE forced) |
 | Dreamcast, NAOMI, Atomiswave | Flycast-nuubOS (`flycast_nuubos`: Flycast A53/GLES profile + nuubOS Panfrost and threaded-rendering patches; no upstream alternative: the aarch64 buildbot Flycast wants desktop OpenGL and libgomp) | GPL-2.0 | partial; NAOMI/Atomiswave: BIOS |
 | PlayStation | PCSX ReARMed | GPL-2.0 | HLE BIOS |
 | PSP | PPSSPP-nuubOS (`ppsspp_nuubos`: PPSSPP + nuubOS Panfrost patches; upstream PPSSPP downloadable) | GPL-2.0+ | partial; assets shipped; patched to avoid GPU waits on Panfrost (docs/dev/emulation.md) |
@@ -65,7 +65,8 @@ the game does not start.
 | Palm OS | Mu | **CC BY-NC 3.0** | BIOS `palmos41-en-m515.rom` |
 | MS-DOS | DOSBox Pure | GPL-2.0 | |
 | ScummVM | ScummVM (lite engine set) | GPL-3.0+ | engine data and themes shipped |
-| PICO-8 | FAKE-08 | MIT | |
+| PICO-8 | FAKE-08-nuubOS (`fake08_nuubos`: FAKE-08 with its Lua interpreter optimized; upstream FAKE-08 downloadable) | MIT | |
+| PICO-8 (alternative, per game) | Retro8 | GPL-3.0 | no savestates; some Lua quirks and fixed-point arithmetic missing |
 | TIC-80 | TIC-80 | MIT | |
 | Lutro | Lutro | MIT | |
 

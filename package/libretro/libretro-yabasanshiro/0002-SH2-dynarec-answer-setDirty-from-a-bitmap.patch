@@ -1,0 +1,101 @@
+From 07fbd20f1edf5107072279d75d98661e4d748eb5 Mon Sep 17 00:00:00 2001
+From: nuubOS Project <noreply@nuubos.invalid>
+Date: Thu, 22 Oct 2026 19:05:21 +0200
+Subject: [PATCH 2/3] SH2 dynarec: answer setDirty from a bitmap
+
+Every SH2 write to high work RAM calls setDirty, which looked at the
+std::list of compiled blocks for that halfword in a 12 MB table: a cache
+miss per write (5 % of the emulation thread in Virtua Fighter 2). A 64 KB
+bitmap, one bit per halfword with compiled code, is checked inline first;
+only a set bit takes the list path. getInstance is inlined too (the
+memory handlers are built at -O1).
+
+Upstream-Status: Pending
+---
+ .../src/sh2_dynarec_devmiyax/DynarecSh2.cpp   |  2 ++
+ yabause/src/sh2_dynarec_devmiyax/DynarecSh2.h | 20 +++++++++++++++++--
+ 2 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.cpp b/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.cpp
+index e96078e..9f3ec15 100755
+--- a/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.cpp
++++ b/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.cpp
+@@ -948,6 +948,7 @@ int CompileBlocks::EmmitCode(Block *page, addrs * ParentT )
+       u32 keepaddr = adress_mask(addr);
+       ParentT[keepaddr].push_back(adress_mask(start_addr));
+       ParentT[keepaddr].unique();
++      noteParent(keepaddr);
+     }
+ #endif
+ 
+@@ -1126,6 +1127,7 @@ int CompileBlocks::EmmitCode(Block *page, addrs * ParentT )
+         u32 keepaddr = adress_mask(addr);
+         ParentT[keepaddr].push_back(adress_mask(start_addr));
+         ParentT[keepaddr].unique();
++        noteParent(keepaddr);
+       }
+ #endif
+       addr += 2;
+diff --git a/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.h b/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.h
+index 2f48955..4efcf85 100755
+--- a/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.h
++++ b/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.h
+@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
+ #ifndef _DYNAREC_SH2_H_
+ #define _DYNAREC_SH2_H_
+ 
++#include <cstring>
+ #include <list>
+ #include <map>
+ #include <string>
+@@ -197,6 +198,7 @@ private:
+     Init();
+ #ifdef SET_DIRTY
+     LookupParentTable = new addrs[0x100000 >> 1];
++    memset(parent_bits_, 0, sizeof(parent_bits_));
+ #else
+     LookupParentTable = NULL;
+ #endif
+@@ -211,7 +213,7 @@ private:
+   bool show_code_ = false;
+ public:
+   void setShowCode( bool b ){ show_code_ = b; }
+-  static CompileBlocks * getInstance(){
++  static inline __attribute__((always_inline)) CompileBlocks * getInstance(){
+     if( instance_ == NULL ){
+       instance_ = new CompileBlocks();
+     }
+@@ -234,8 +236,21 @@ public:
+   
+   std::unordered_map<u32, int> self_modify_block;
+ 
+-  inline void setDirty(u32 addr) {
++  /* nuubOS: one bit per halfword of high work RAM, set while code
++   * compiled from it exists. Every SH2 write to high RAM asks setDirty;
++   * the bit answers from 64 KB instead of the std::list of a 12 MB table
++   * (a cache miss per write: 5 % of the emulation thread in Virtua
++   * Fighter 2). A bit left set only costs the slow path below. */
++  u8 parent_bits_[(0x100000 >> 1) / 8];
++  inline void noteParent(u32 keepaddr) {
++    parent_bits_[keepaddr >> 3] |= (u8)(1 << (keepaddr & 7));
++  }
++  inline __attribute__((always_inline)) void setDirty(u32 addr) {
+     addr = adress_mask(addr);
++    if (!(parent_bits_[addr >> 3] & (1 << (addr & 7)))) return;
++    setDirtySlow(addr);
++  }
++  __attribute__((noinline)) void setDirtySlow(u32 addr) {
+     if (LookupParentTable[addr].size() == 0) return;
+     for (auto it = LookupParentTable[addr].begin(); it != LookupParentTable[addr].end(); it++) {
+       if (LookupTable[*it] != NULL) {
+@@ -251,6 +266,7 @@ public:
+       }
+     }
+     LookupParentTable[addr].clear();
++    parent_bits_[addr >> 3] &= (u8)~(1 << (addr & 7));
+   }
+ 
+   void Init();
+-- 
+2.56.0
+

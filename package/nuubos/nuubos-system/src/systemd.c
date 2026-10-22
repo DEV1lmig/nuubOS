@@ -40,6 +40,7 @@
 #define UI_CONTROL "/run/nuubos/ui-control"
 #define LIFECYCLE_LIGHTING "/usr/lib/nuubos/lifecycle-lighting"
 #define LIFECYCLE_PRE_POWER "/usr/lib/nuubos/lifecycle-pre-power"
+#define LIFECYCLE_POST_WAKE "/usr/lib/nuubos/lifecycle-post-wake"
 #define INPUT_DIR "/dev/input"
 #define HDMI_ENABLED "/sys/class/drm/card0-HDMI-A-1/enabled"
 /* Back-to-back sleeps while the lid stays closed (a key pressed in a bag
@@ -73,6 +74,7 @@ struct config_state {
     int auto_battery_threshold; /* 0=off */
     int sleep_after_min;        /* 0=off */
     int charge_limit;           /* 80..100 %, 100=off */
+    bool hypersleep;            /* sleep with the SoC off (default) */
 };
 
 struct runtime_state {
@@ -184,6 +186,74 @@ static int read_text_file(const char *path, char *buf, size_t size)
     return 0;
 }
 
+/*
+ * Diagnostic mode (user request 2026-10-22, docs/dev/system.md): off by
+ * default. DIAG_BOOTS holds how many more boots collect logs;
+ * S04nuubos-diagnostics spends one at each boot and marks that boot with
+ * DIAG_ACTIVE (RAM), which the boot collectors, rcS timing, emud, inputd
+ * and the pre-power bundle hook look for. Turning it on also marks the
+ * running boot; turning it off ends the running one too.
+ */
+#define DIAG_BOOTS "/state/diagnostics/boots"
+#define DIAG_ACTIVE "/run/nuubos/diagnostics/active"
+#define DIAG_MAX_BOOTS 20
+
+static int diag_boots(void)
+{
+    char buf[32];
+    int n;
+    if (read_text_file(DIAG_BOOTS, buf, sizeof(buf)) != 0) return 0;
+    n = atoi(buf);
+    return n < 0 ? 0 : n > DIAG_MAX_BOOTS ? DIAG_MAX_BOOTS : n;
+}
+
+static int set_diagnostics(int boots)
+{
+    char tmp[128];
+    FILE *f;
+
+    if (boots == 0) {
+        if (unlink(DIAG_BOOTS) != 0 && errno != ENOENT) return -1;
+        if (unlink(DIAG_ACTIVE) != 0 && errno != ENOENT) return -1;
+        return 0;
+    }
+    mkdir("/state/diagnostics", 0700);
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", DIAG_BOOTS, (long)getpid());
+    f = fopen(tmp, "w");
+    if (!f) return -1;
+    fprintf(f, "%d\n", boots);
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
+        fclose(f); unlink(tmp); return -1;
+    }
+    fclose(f);
+    if (rename(tmp, DIAG_BOOTS) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    mkdir("/run/nuubos/diagnostics", 0700);
+    f = fopen(DIAG_ACTIVE, "w");
+    if (!f) return -1;
+    fclose(f);
+    /* With the mode off the service logs are links to /dev/null
+     * (S04nuubos-diagnostics): gone, a log a service opens from now on is
+     * real; complete from the next boot. */
+    {
+        DIR *d = opendir("/run/nuubos");
+        struct dirent *e;
+        char path[300];
+        struct stat lst;
+
+        while (d && (e = readdir(d)) != NULL) {
+            size_t n = strlen(e->d_name);
+            if (n < 5 || strcmp(e->d_name + n - 4, ".log") != 0) continue;
+            snprintf(path, sizeof(path), "/run/nuubos/%s", e->d_name);
+            if (lstat(path, &lst) == 0 && S_ISLNK(lst.st_mode)) unlink(path);
+        }
+        if (d) closedir(d);
+    }
+    return 0;
+}
+
 static int atomic_save_config(const struct config_state *cfg)
 {
     char tmp[256];
@@ -196,6 +266,7 @@ static int atomic_save_config(const struct config_state *cfg)
     fprintf(f, "AUTO_BATTERY_SAVER_THRESHOLD=%d\n", cfg->auto_battery_threshold);
     fprintf(f, "SLEEP_AFTER_MIN=%d\n", cfg->sleep_after_min);
     fprintf(f, "CHARGE_LIMIT=%d\n", cfg->charge_limit);
+    fprintf(f, "HYPERSLEEP=%d\n", cfg->hypersleep ? 1 : 0);
     if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
         fclose(f); unlink(tmp); return -1;
     }
@@ -222,6 +293,7 @@ static void config_defaults(struct config_state *cfg)
     cfg->auto_battery_threshold = DEFAULT_AUTO_BATTERY_THRESHOLD;
     cfg->sleep_after_min = DEFAULT_SLEEP_AFTER_MIN;
     cfg->charge_limit = DEFAULT_CHARGE_LIMIT;
+    cfg->hypersleep = true;
 }
 
 /* Charge limit: 80..100 in steps of 5 (100 = charge to full). */
@@ -258,6 +330,8 @@ static void load_config(struct config_state *cfg)
         } else if (!strcmp(key, "CHARGE_LIMIT")) {
             int x = atoi(val);
             if (valid_charge_limit(x)) cfg->charge_limit = x;
+        } else if (!strcmp(key, "HYPERSLEEP")) {
+            cfg->hypersleep = strcmp(val, "0") != 0;
         }
     }
     fclose(f);
@@ -394,9 +468,16 @@ static int connect_unix(const char *path)
     return fd;
 }
 
-static int run_suspend(void)
+/*
+ * Hypersleep (user decision 2026-10-22, on by default): the SoC is powered
+ * off during sleep, ~0.x %/h, only the power key wakes it. Off: the SoC
+ * stays powered, START and a lid wake it too, ~3-4 %/h. nuubos-suspend
+ * tells the firmware which one (platform.md).
+ */
+static int run_suspend(const struct runtime_state *st)
 {
-    char *argv[]={"/usr/sbin/nuubos-suspend",NULL};
+    char *argv[]={"/usr/sbin/nuubos-suspend",
+                  st->cfg.hypersleep ? "hypersleep" : "quick",NULL};
     return run_argv(argv);
 }
 
@@ -459,13 +540,30 @@ static void lighting_shutdown(const char *action)
         fprintf(stderr, "systemd: lighting shutdown hook failed\n");
 }
 
+/* Restart/Power Off under way: audiod turns the speaker amplifier off when
+ * init stops it (after the shutdown sound), so the codec powers down
+ * without a pop. */
+static void mark_shutting_down(void)
+{
+    int fd = open("/run/nuubos/shutting-down", O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+
+    if (fd >= 0)
+        close(fd);
+}
+
+/* Restart / Power Off: the LEDs and the UI's splash first, then the
+ * pre-power hooks (game saved and closed, update installed, diagnostic
+ * report) under it. The hooks used to run first: the screen stayed black
+ * while they did, before the splash and the power off (user report
+ * 2026-10-22, long with a diagnostic report). */
 static void run_poweroff(struct runtime_state *st)
 {
     char *argv[]={"/sbin/poweroff",NULL};
-    run_pre_power_hook("poweroff");
     lighting_shutdown("poweroff");
     notify_ui_lifecycle("poweroff");
+    run_pre_power_hook("poweroff");
     usleep(500000); /* Intentional presentation interval for the shutdown curtain. */
+    mark_shutting_down();
     if (run_argv(argv) != 0)
         lighting_wake(); /* Power off failed: lights back on. */
     mark_activity(st);
@@ -474,10 +572,11 @@ static void run_poweroff(struct runtime_state *st)
 static void run_restart(struct runtime_state *st)
 {
     char *argv[]={"/sbin/reboot",NULL};
-    run_pre_power_hook("restart");
     lighting_shutdown("restart");
     notify_ui_lifecycle("reboot");
+    run_pre_power_hook("restart");
     usleep(500000); /* Intentional presentation interval for the reboot curtain. */
+    mark_shutting_down();
     (void)run_argv(argv);
     mark_activity(st);
 }
@@ -494,8 +593,10 @@ static void enter_sleep(struct runtime_state *st)
     snprintf(st->last_wake_reason,sizeof(st->last_wake_reason),"sleeping");
     notify_subscribers();
 
-    suspend_rc = run_suspend();
+    suspend_rc = run_suspend(st);
     st->last_sleep_elapsed_ms = boottime_ms() - st->stage_enter_ms;
+    if (run_lifecycle_helper(LIFECYCLE_POST_WAKE, "wake") != 0)
+        fprintf(stderr, "systemd: post-wake hook failed\n");
 
     snprintf(st->last_wake_reason,sizeof(st->last_wake_reason),
              suspend_rc != 0 ? "suspend-failed" : "user");
@@ -938,6 +1039,7 @@ static void reply_status(int fd, const struct runtime_state *st)
         "sleep_after_min=%d\n"
         "charge_limit=%d\n"
         "charge_limit.supported=%d\n"
+        "hypersleep=%d\n"
         "battery.percent=%d\n"
         "battery.state=%s\n"
         "cpu.freq_khz=%lld\n"
@@ -973,7 +1075,9 @@ static void reply_status(int fd, const struct runtime_state *st)
         "lifecycle.stage=%s\n"
         "lifecycle.last_wake=%s\n"
         "lifecycle.last_sleep_ms=%lld\n"
-        "lifecycle.lid=%s\n",
+        "lifecycle.lid=%s\n"
+        "diagnostics.boots=%d\n"
+        "diagnostics.active=%d\n",
         NUUBOS_PRODUCT_VERSION,NUUBOS_BUILD_ID,
         profile_name(st->cfg.requested_profile),
         profile_name(st->effective_profile),
@@ -981,6 +1085,7 @@ static void reply_status(int fd, const struct runtime_state *st)
         st->cfg.sleep_after_min,
         st->cfg.charge_limit,
         charge_limit_path() ? 1 : 0,
+        st->cfg.hypersleep ? 1 : 0,
         st->battery_percent,st->battery_state,
         cpu,gpu,tcpu,tgpu,mem_total_kib,mem_available_kib,uptime,model,kernel,ip,
         sv.sd1_health,sv.sd1_action,sv.userdata_total,sv.userdata_free,
@@ -991,7 +1096,8 @@ static void reply_status(int fd, const struct runtime_state *st)
         idle_stage_name(st->idle_stage),
         st->last_wake_reason,
         st->last_sleep_elapsed_ms,
-        st->lid_fd < 0 ? "none" : st->lid_closed ? "closed" : "open");
+        st->lid_fd < 0 ? "none" : st->lid_closed ? "closed" : "open",
+        diag_boots(), access(DIAG_ACTIVE, F_OK) == 0 ? 1 : 0);
     (void)write_all(fd,buf);
 }
 
@@ -1026,6 +1132,7 @@ static int reset_system_settings(struct runtime_state *st)
     if(run_argv(input_argv)!=0){fprintf(stderr,"systemd: reset: input bindings\n");rc=-1;}
     if(run_argv(controllers_argv)!=0){fprintf(stderr,"systemd: reset: controller mappings\n");rc=-1;}
     if(run_argv(backup_argv)!=0){fprintf(stderr,"systemd: reset: SD2 backup settings\n");rc=-1;}
+    if(set_diagnostics(0)!=0){fprintf(stderr,"systemd: reset: diagnostic mode\n");rc=-1;}
     return rc;
 }
 
@@ -1078,6 +1185,17 @@ static void handle_command(struct client *c, struct runtime_state *st, const cha
         st->cfg.charge_limit=x;
         if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
         if(apply_charge_limit(x)!=0){(void)write_all(c->fd,"ERR apply failed\n");return;}
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
+    }
+    if(sscanf(line,"SET HYPERSLEEP %d",&x)==1){
+        if(x!=0 && x!=1){(void)write_all(c->fd,"ERR invalid value\n");return;}
+        st->cfg.hypersleep=x==1;
+        if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
+    }
+    if(sscanf(line,"SET DIAGNOSTICS %d",&x)==1){
+        if(x<0||x>DIAG_MAX_BOOTS){(void)write_all(c->fd,"ERR invalid boots\n");return;}
+        if(set_diagnostics(x)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
     if(sscanf(line,"SET SLEEP %d",&x)==1){

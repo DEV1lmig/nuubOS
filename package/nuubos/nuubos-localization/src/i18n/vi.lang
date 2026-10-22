@@ -1345,3 +1345,9 @@
 1344=Đồng bộ {0} làm
 1345=Tắt
 1346=Dùng thư mục nuubOS
+1347=HyperSleep
+1348=Gần như không tốn pin. Đánh thức bằng nút nguồn.
+1349=START và nắp cũng đánh thức máy. Tốn pin hơn.
+1350=Chế độ chẩn đoán
+1351={0} lần khởi động tới
+1352=Ghi lại mọi thứ trong 10 lần khởi động tới và lưu một báo cáo mỗi khi khởi động lại hoặc tắt máy. Tắt theo mặc định: ghi nhật ký tốn hiệu năng và lượt ghi thẻ nhớ.

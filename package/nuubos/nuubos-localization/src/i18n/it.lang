@@ -1345,3 +1345,9 @@
 1344=Sincronizza {0} come
 1345=Disattiva
 1346=Usa la cartella di nuubOS
+1347=HyperSleep
+1348=Consumo quasi nullo. Si riattiva con il tasto di accensione.
+1349=Si riattiva anche con START e aprendo lo schermo. Consuma di più.
+1350=Modalità diagnostica
+1351=Prossimi {0} avvii
+1352=Registra tutto per i prossimi 10 avvii e salva un report a ogni riavvio o spegnimento. Spenta di default: i log costano prestazioni e scritture sulla scheda.

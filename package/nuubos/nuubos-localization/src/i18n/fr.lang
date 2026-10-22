@@ -1345,3 +1345,9 @@
 1344=Synchroniser {0} comme
 1345=Désactiver
 1346=Utiliser le dossier nuubOS
+1347=HyperSleep
+1348=Presque aucune consommation. Réveil avec le bouton d'alimentation.
+1349=START et le clapet le réveillent aussi. Consomme plus de batterie.
+1350=Mode diagnostic
+1351={0} prochains démarrages
+1352=Enregistre tout pendant les 10 prochains démarrages et sauvegarde un rapport à chaque redémarrage ou extinction. Désactivé par défaut : les journaux coûtent en performances et en écritures sur la carte.

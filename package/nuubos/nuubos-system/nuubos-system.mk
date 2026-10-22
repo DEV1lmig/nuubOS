@@ -25,6 +25,7 @@ define NUUBOS_SYSTEM_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-systemd $(TARGET_DIR)/usr/sbin/nuubos-systemd
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-systemctl $(TARGET_DIR)/usr/bin/nuubos-systemctl
 	$(INSTALL) -D -m 0755 $(@D)/lifecycle-pre-power $(TARGET_DIR)/usr/lib/nuubos/lifecycle-pre-power
+	$(INSTALL) -D -m 0755 $(@D)/lifecycle-post-wake $(TARGET_DIR)/usr/lib/nuubos/lifecycle-post-wake
 	$(INSTALL) -D -m 0755 $(@D)/lifecycle-lighting $(TARGET_DIR)/usr/lib/nuubos/lifecycle-lighting
 	$(INSTALL) -d -m 0755 $(TARGET_DIR)/usr/lib/nuubos/lifecycle-hooks/pre-power.d
 	$(INSTALL) -D -m 0755 $(@D)/S49nuubos-system $(TARGET_DIR)/etc/init.d/S49nuubos-system

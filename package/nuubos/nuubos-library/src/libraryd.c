@@ -78,6 +78,9 @@
 #define LIBRARY_CONFIG STATE_ROOT "/config/nuubos-library.conf"
 #define ACTIVE_DIR RUN_ROOT "/user"
 #define ACTIVE_FILE ACTIVE_DIR "/active"
+#define UI_READY RUN_ROOT "/ui-ready"
+/* Longest wait of the boot scan for nuubUI (main()). */
+#define BOOT_SCAN_WAIT_MS 30000
 #define SYSTEM_ICONS_DIR SHARE_ROOT "/systems"
 #define COVERS_ROOT CATALOG_DIR "/covers"
 #define METADATA_ROOT CATALOG_DIR "/metadata"
@@ -255,6 +258,11 @@ static int scan_pipe[2] = { -1, -1 };
 static pthread_t scan_thread;
 static bool scanning;
 static bool rescan_pending;
+/* The boot scan waits for UI_READY (watch ui_wd on RUN_ROOT, at the latest
+ * at boot_scan_deadline_ms): main(). */
+static bool boot_scan_pending;
+static int ui_wd = -1;
+static long long boot_scan_deadline_ms;
 /* Unavailable games in the lists (off by default, user request 2026-10-20:
  * they cluttered the library). Search, counts and previews never had them. */
 static bool show_unavailable;
@@ -726,6 +734,26 @@ static bool system_accepts(int sys, const char *name)
 	return false;
 }
 
+/* Length of the registry extension of sys that name ends with (the longest,
+ * without its dot), 0 if none. */
+static size_t system_extension_len(int sys, const char *name)
+{
+	const char *p = systems[sys].exts + 1;
+	size_t best = 0;
+
+	while (*p) {
+		const char *end = strchr(p, ',');
+		size_t len = end ? (size_t)(end - p) : strlen(p);
+
+		if (len > best && has_suffix(name, p, len))
+			best = len;
+		if (!end)
+			break;
+		p = end + 1;
+	}
+	return best;
+}
+
 /* The only system accepting this file name, -1 if none, -2 if several. */
 static int system_by_extension(const char *name)
 {
@@ -746,19 +774,27 @@ static int system_by_extension(const char *name)
 /* ------------------------------------------------------------------ */
 
 /* "Super Mario World (USA) [!].sfc" -> "Super Mario World". Locally
- * derived identity only; metadata providers enrich it later (EPIC-015). */
-static char *title_from_rel(const char *rel)
+ * derived identity only; metadata providers enrich it later (EPIC-015).
+ * The whole registry extension goes, also one with several dots
+ * ("Celeste.p8.png" -> "Celeste", not "Celeste.p8"). */
+static char *title_from_rel(int sys, const char *rel)
 {
 	char stem[512];
 	char out[512];
 	size_t o = 0;
 	int depth = 0;
+	size_t ext_len;
 	char *dot;
 
 	copy_text(stem, sizeof(stem), rel_name(rel));
-	dot = strrchr(stem, '.');
-	if (dot && dot != stem)
-		*dot = '\0';
+	ext_len = system_extension_len(sys, stem);
+	if (ext_len) {
+		stem[strlen(stem) - ext_len - 1] = '\0';
+	} else {
+		dot = strrchr(stem, '.');
+		if (dot && dot != stem)
+			*dot = '\0';
+	}
 	for (const char *p = stem; *p && o + 1 < sizeof(out); p++) {
 		if (*p == '(' || *p == '[') {
 			depth++;
@@ -1302,7 +1338,9 @@ static void load_catalog(void)
 		copy_text(g->id, sizeof(g->id), f[0]);
 		g->sys = sys;
 		g->rel = xstrdup(f[2]);
-		g->title = xstrdup(f[3]);
+		/* Derived from the file name only, so a rule change also
+		 * reaches games catalogued before it. */
+		g->title = title_from_rel(sys, g->rel);
 		g->cover = f[4][0] ? xstrdup(f[4]) : NULL;
 		g->size = atoll(f[5]);
 		g->mtime = atoll(f[6]);
@@ -1337,7 +1375,7 @@ static bool reconcile(struct scan_result *scan)
 			copy_text(g->id, sizeof(g->id), id);
 			g->sys = it->sys;
 			g->rel = it->rel;
-			g->title = title_from_rel(it->rel);
+			g->title = title_from_rel(it->sys, it->rel);
 			g->cover = it->cover;
 			g->size = it->size;
 			g->mtime = it->mtime;
@@ -1415,6 +1453,7 @@ static void free_scan(struct scan_result *scan)
 
 static void start_scan(void)
 {
+	boot_scan_pending = false;
 	if (scanning) {
 		rescan_pending = true;
 		return;
@@ -1426,6 +1465,24 @@ static void start_scan(void)
 	}
 	scanning = true;
 	log_msg("scan started");
+}
+
+static long long monotonic_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* nuubUI is ready (or the wait timed out): the boot scan may run. */
+static void end_boot_wait(void)
+{
+	if (ui_wd >= 0)
+		inotify_rm_watch(inotify_fd, ui_wd);
+	ui_wd = -1;
+	if (boot_scan_pending)
+		start_scan();
 }
 
 /* ------------------------------------------------------------------ */
@@ -3158,8 +3215,21 @@ int main(void)
 	}
 
 	/* Existing catalog is served immediately; discovery reconciles it in
-	 * the background (EPIC-012 non-blocking startup). */
-	start_scan();
+	 * the background (EPIC-012 non-blocking startup). At boot it waits for
+	 * nuubUI to be ready: its directory reads on USERDATA and the games
+	 * card compete with the UI's own start on the card (docs/dev/
+	 * platform.md "Boot time"). Not without a catalog (first boot): there
+	 * is nothing to show without the scan. */
+	if (game_count > 0 && inotify_fd >= 0 && access(UI_READY, F_OK) != 0)
+		ui_wd = inotify_add_watch(inotify_fd, RUN_ROOT, IN_CREATE | IN_MOVED_TO);
+	if (ui_wd >= 0) {
+		/* Games on the games card launch before the scan too. */
+		refresh_sd2_root();
+		boot_scan_pending = true;
+		boot_scan_deadline_ms = monotonic_ms() + BOOT_SCAN_WAIT_MS;
+	} else {
+		start_scan();
+	}
 
 	while (running) {
 		struct pollfd fds[3 + MAX_CLIENTS];
@@ -3180,7 +3250,18 @@ int main(void)
 			fds[n] = (struct pollfd){ clients[i].fd, POLLIN, 0 };
 			map[n++] = i;
 		}
-		if (poll(fds, (nfds_t)n, -1) < 0) {
+		int timeout = -1;
+
+		if (ui_wd >= 0) {
+			long long left = boot_scan_deadline_ms - monotonic_ms();
+
+			timeout = left > 0 ? (int)left : 0;
+		}
+		int ready = poll(fds, (nfds_t)n, timeout);
+
+		if (ready == 0 && ui_wd >= 0)
+			end_boot_wait();
+		if (ready < 0) {
 			if (errno == EINTR)
 				continue;
 			log_msg("poll: %s", strerror(errno));
@@ -3196,21 +3277,26 @@ int main(void)
 			} else if (map[j] == -3) {
 				char events[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
 				char before[40];
-				bool consoles = false, user = false;
+				bool consoles = false, user = false, ui_ready = false;
 				ssize_t len;
 
 				while ((len = read(inotify_fd, events, sizeof(events))) > 0)
 					for (char *q = events; q < events + len;) {
 						const struct inotify_event *ev = (const struct inotify_event *)q;
 
-						/* Our own export is no news. */
-						if (ev->wd == consoles_wd)
+						if (ev->wd == ui_wd) {
+							if (ev->len && !strcmp(ev->name, "ui-ready"))
+								ui_ready = true;
+						} else if (ev->wd == consoles_wd)
+							/* Our own export is no news. */
 							consoles = consoles || !ev->len ||
 								   strncmp(ev->name, console_id, strlen(console_id));
 						else
 							user = true;
 						q += sizeof(*ev) + ev->len;
 					}
+				if (ui_ready)
+					end_boot_wait();
 				copy_text(before, sizeof(before), active_user);
 				if (user)
 					refresh_active_user();

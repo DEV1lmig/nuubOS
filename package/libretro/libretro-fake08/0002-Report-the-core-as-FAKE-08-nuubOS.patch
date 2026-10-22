@@ -1,0 +1,29 @@
+From 0af2d3a2ebf272b447d5959cab88abe60c0e680b Mon Sep 17 00:00:00 2001
+From: nuubOS Project <noreply@nuubos.invalid>
+Date: Thu, 22 Oct 2026 19:05:31 +0200
+Subject: [PATCH 2/3] Report the core as FAKE-08-nuubOS
+
+nuubOS build (H700 performance patch), told apart from upstream FAKE-08,
+which users may download next to it.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+ platform/libretro/libretro.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/platform/libretro/libretro.cpp b/platform/libretro/libretro.cpp
+index 589d4f2..f0f84e9 100644
+--- a/platform/libretro/libretro.cpp
++++ b/platform/libretro/libretro.cpp
+@@ -253,7 +253,7 @@ EXPORT unsigned retro_api_version()
+ EXPORT void retro_get_system_info(struct retro_system_info *info)
+ {
+     memset(info, 0, sizeof(*info));
+-    info->library_name = "fake-08";
++    info->library_name = "FAKE-08-nuubOS";
+     info->library_version = "0.0.2.20a"; //todo: get from build flags
+     info->valid_extensions = "p8|png";
+     #ifdef _NEED_FULL_PATH_
+-- 
+2.56.0
+

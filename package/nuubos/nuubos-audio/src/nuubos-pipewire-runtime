@@ -38,6 +38,14 @@ start_runtime()
     stop_pidfile "$WP_PID"
     stop_pidfile "$PW_PID"
 
+    # Boot (audiod not running yet): the speaker amplifier stays off while
+    # PipeWire opens the analog PCM and the codec powers up; audiod turns it
+    # on when it starts, with the codec settled (no power-up pop). A later
+    # runtime restart leaves the pin to audiod.
+    if ! pidof nuubos-audiod >/dev/null 2>&1; then
+        amixer -q -c 0 cset name='Speaker Switch' off >/dev/null 2>&1 || true
+    fi
+
     start_daemon "$PW_PID" "$PW_LOG" \
         XDG_RUNTIME_DIR="$RUNTIME" \
         PIPEWIRE_RUNTIME_DIR="$RUNTIME" \

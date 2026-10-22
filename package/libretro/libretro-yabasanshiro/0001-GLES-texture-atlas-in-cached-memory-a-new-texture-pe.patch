@@ -1,0 +1,278 @@
+From f5fce0c265c4d24df7b11620a2e03d2218a189c7 Mon Sep 17 00:00:00 2001
+From: nuubOS Project <noreply@nuubos.invalid>
+Date: Thu, 22 Oct 2026 16:03:22 +0200
+Subject: [PATCH 1/3] GLES: texture atlas in cached memory, a new texture per
+ upload
+
+YabaSanshiro decoded every texture of a frame into a mapped pixel unpack
+buffer and uploaded the atlas from it twice a frame (after the VDP1 and
+the VDP2 commands) into the same texture. On the H700 GPU buffers are
+mapped write-combined and Panfrost copies a PBO upload with the CPU, so
+each upload read the whole atlas back from uncached memory, and it had
+to wait for the GPU to finish drawing with the texture first
+(DRM_PANFROST_WAIT_BO).
+
+The atlas is now ordinary memory uploaded with glTexSubImage2D, and each
+upload goes to the next of four textures (two uploads a frame, two frames
+in flight). Virtua Fighter 2 fight (RG CubeXX): 18.5 -> 27.5 fps; the
+memcpy went from 28 % to 5 % of the emulation thread, the wait from 7 %
+to under 1 %.
+
+Upstream-Status: Pending
+---
+ yabause/src/ygl.h   |   6 +-
+ yabause/src/ygles.c | 149 +++++++++++++-------------------------------
+ 2 files changed, 48 insertions(+), 107 deletions(-)
+
+diff --git a/yabause/src/ygl.h b/yabause/src/ygl.h
+index fc28530..d1f9e1f 100644
+--- a/yabause/src/ygl.h
++++ b/yabause/src/ygl.h
+@@ -277,7 +277,11 @@ typedef struct {
+ 	//GLuint pixelBufferID;
+ 
+   int current;
+-  GLuint textureID_in[2];
++  /* nuubOS: one CPU copy of the atlas (texture_in[0]) and YGL_TM_TEXTURES
++   * GL textures, a different one for each upload, so an upload never has
++   * to wait for the GPU to finish drawing with the one before. */
++#define YGL_TM_TEXTURES 4
++  GLuint textureID_in[YGL_TM_TEXTURES];
+   GLuint pixelBufferID_in[2];
+   unsigned int * texture_in[2];
+ 
+diff --git a/yabause/src/ygles.c b/yabause/src/ygles.c
+index 77a3633..1a9f9a7 100644
+--- a/yabause/src/ygles.c
++++ b/yabause/src/ygles.c
+@@ -487,6 +487,12 @@ int YglCalcTextureQ(
+ 
+ //////////////////////////////////////////////////////////////////////////////
+ 
++/* nuubOS: the texture atlas is decoded into ordinary (cached) memory and
++ * uploaded with glTexSubImage2D from it. It used to be a mapped pixel
++ * unpack buffer: on the H700 GPU buffers are mapped write-combined, and
++ * Panfrost uploads from a PBO with the CPU, so every upload read the whole
++ * atlas back from uncached memory (Virtua Fighter 2: 28 % of the
++ * emulation thread in that memcpy). */
+ YglTextureManager * YglTMInit(unsigned int w, unsigned int h) {
+ 
+   GLuint error;
+@@ -499,16 +505,12 @@ YglTextureManager * YglTMInit(unsigned int w, unsigned int h) {
+ 
+   YglTMReset(tm);
+ 
+-  for (int i = 0; i < NUM_TEXTURE_BUFFER; i++) {
+-
+-    glGenBuffers(1, &tm->pixelBufferID_in[i]);
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, tm->pixelBufferID_in[i]);
+-    glBufferData(GL_PIXEL_UNPACK_BUFFER, tm->width * tm->height * 4, NULL, GL_DYNAMIC_DRAW);
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++  for (int i = 0; i < YGL_TM_TEXTURES; i++) {
+ 
+     glGetError();
+     glGenTextures(1, &tm->textureID_in[i]);
+     glBindTexture(GL_TEXTURE_2D, tm->textureID_in[i]);
++    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tm->width, tm->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+     if ((error = glGetError()) != GL_NO_ERROR)
+     {
+@@ -519,19 +521,11 @@ YglTextureManager * YglTMInit(unsigned int w, unsigned int h) {
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+-  
+-    glBindTexture(GL_TEXTURE_2D, tm->textureID_in[i]);
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, tm->pixelBufferID_in[i]);
+-    tm->texture_in[i] = (unsigned int *)glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, tm->width * tm->height * 4, GL_MAP_WRITE_BIT );
+-    if ((error = glGetError()) != GL_NO_ERROR)
+-    {
+-      YGLDEBUG("Fail to init YglTM->texture %04X", error);
+-      abort();
+-    }
+-   
+   }
+-  tm->texture = tm->texture_in[tm->current];
+-  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++  tm->texture_in[0] = (unsigned int *)calloc(tm->width * tm->height, 4);
++  if (tm->texture_in[0] == NULL)
++    abort();
++  tm->texture = tm->texture_in[0];
+   YglGetColorRamPointer();
+ 
+   return tm;
+@@ -541,7 +535,7 @@ YglTextureManager * YglTMInit(unsigned int w, unsigned int h) {
+ 
+ void YglTMDeInit(YglTextureManager * tm) {
+ 
+-  for (int i = 0; i < NUM_TEXTURE_BUFFER; i++) {
++  for (int i = 0; i < YGL_TM_TEXTURES; i++) {
+     glBindTexture(GL_TEXTURE_2D, tm->textureID_in[i]);
+     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+     glBindTexture(GL_TEXTURE_2D, 0);
+@@ -549,9 +543,9 @@ void YglTMDeInit(YglTextureManager * tm) {
+ 
+     glDeleteTextures(1, &tm->textureID_in[i]);
+     tm->textureID_in[i] = 0;
+-    glDeleteBuffers(1, &tm->pixelBufferID_in[i]);
+-    tm->pixelBufferID_in[i] = 0;
+   }
++  free(tm->texture_in[0]);
++  tm->texture_in[0] = NULL;
+ 
+   free(tm);
+ }
+@@ -581,70 +575,42 @@ void YglTMReserve(YglTextureManager * tm, unsigned int w, unsigned int h){
+ 
+ void YglTmPush(YglTextureManager * tm){
+   glActiveTexture(GL_TEXTURE0);
+-  glBindTexture(GL_TEXTURE_2D, tm->textureID_in[tm->current] );
+   if (tm->texture != NULL ) {
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, tm->pixelBufferID_in[tm->current] );
+-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tm->width, tm->yMax, GL_RGBA, GL_UNSIGNED_BYTE, 0);
++    tm->current = (tm->current + 1) % YGL_TM_TEXTURES;
++    glBindTexture(GL_TEXTURE_2D, tm->textureID_in[tm->current] );
+     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tm->width, tm->yMax, GL_RGBA, GL_UNSIGNED_BYTE, tm->texture_in[0]);
+     tm->texture = NULL;
++  } else {
++    glBindTexture(GL_TEXTURE_2D, tm->textureID_in[tm->current] );
+   }
+ }
+ 
+ void YglTmPull(YglTextureManager * tm, u32 flg){
+-  if (tm->texture == NULL) {
+-
+-    glActiveTexture(GL_TEXTURE0);
+-    glBindTexture(GL_TEXTURE_2D, tm->textureID_in[tm->current]);
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, tm->pixelBufferID_in[tm->current]);
+-
+-    if (flg) {
+-      tm->texture_in[tm->current] = (int*)glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, tm->width * tm->height * 4, GL_MAP_WRITE_BIT /*| GL_MAP_INVALIDATE_BUFFER_BIT*/ );
+-    }
+-    else {
+-      tm->texture_in[tm->current] = (int*)glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, tm->width * tm->height * 4, GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+-    }
+-    if (tm->texture_in[tm->current] == NULL) {
+-      abort();
+-    }
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+-/*    
+-    if (flg == 0) {
+-      if (tm->current == 0) {
+-        tm->current = 1;
+-      }
+-      else {
+-        tm->current = 0;
+-      }
+-    }
+-*/    
+-    tm->texture = tm->texture_in[tm->current];
+-  }
++  /* The atlas memory keeps its contents between uploads (flg asked for
++   * that from the mapping), so there is nothing to map. */
++  (void)flg;
++  if (tm->texture == NULL)
++    tm->texture = tm->texture_in[0];
+ }
+ 
+ 
+ void YglTMRealloc(YglTextureManager * tm, unsigned int width, unsigned int height ){
+ 
+-  GLuint new_textureID[2];
+-  GLuint new_pixelBufferID[2];
+-  unsigned int * new_texture[2];
+   GLuint error;
++  unsigned int dh = tm->height < height ? tm->height : height;
++  unsigned int dw = tm->width < width ? tm->width : width;
++  unsigned int * new_texture;
+ 
+   Vdp2RgbTextureSync();
+ 
+-  if (tm->texture_in[tm->current] != NULL) {
+-    glActiveTexture(GL_TEXTURE0);
+-    glBindTexture(GL_TEXTURE_2D, tm->textureID_in[tm->current] );
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, tm->pixelBufferID_in[tm->current]);
+-    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+-    tm->texture_in[tm->current] = NULL;
+-  }
+-
+   glGetError();
+ 
+-  for (int i = 0; i < NUM_TEXTURE_BUFFER; i++) {
+-    glGenTextures(1, &new_textureID[i]);
+-    glBindTexture(GL_TEXTURE_2D, new_textureID[i]);
++  for (int i = 0; i < YGL_TM_TEXTURES; i++) {
++    GLuint new_textureID;
++
++    glGenTextures(1, &new_textureID);
++    glBindTexture(GL_TEXTURE_2D, new_textureID);
+     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+     if ((error = glGetError()) != GL_NO_ERROR) {
+@@ -656,51 +622,22 @@ void YglTMRealloc(YglTextureManager * tm, unsigned int width, unsigned int heigh
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+ 
+-
+-    glGenBuffers(1, &new_pixelBufferID[i]);
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, new_pixelBufferID[i]);
+-    glBufferData(GL_PIXEL_UNPACK_BUFFER, width * height * 4, NULL, GL_DYNAMIC_DRAW);
+-
+-    int dh = tm->height;
+-    if (dh > height) dh = height;
+-
+-    glBindBuffer(GL_COPY_READ_BUFFER, tm->pixelBufferID_in[tm->current]);
+-    glBindBuffer(GL_COPY_WRITE_BUFFER, new_pixelBufferID[i]);
+-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, tm->width * dh * 4);
+-    if ((error = glGetError()) != GL_NO_ERROR) {
+-      YGLDEBUG("Fail to init new_texture %04X", error);
+-      abort();
+-    }
+-  }
+-
+-  glBindBuffer(GL_COPY_READ_BUFFER, 0);
+-  glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+-
+-  for (int i = 0; i < NUM_TEXTURE_BUFFER; i++) {
+-
+-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, new_pixelBufferID[i]);
+-    new_texture[i] = (unsigned int *)glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, width * height * 4, GL_MAP_WRITE_BIT );
+-    if ((error = glGetError()) != GL_NO_ERROR) {
+-      YGLDEBUG("Fail to init new_texture %04X", error);
+-      abort();
+-    }
+-
+-    // Free textures
+     glDeleteTextures(1, &tm->textureID_in[i]);
+-    glDeleteBuffers(1, &tm->pixelBufferID_in[i]);
+-    
+-    tm->texture_in[i] = new_texture[i];
+-    tm->textureID_in[i] = new_textureID[i];
+-    tm->pixelBufferID_in[i] = new_pixelBufferID[i];
+-
++    tm->textureID_in[i] = new_textureID;
+   }
+ 
++  new_texture = (unsigned int *)calloc(width * height, 4);
++  if (new_texture == NULL)
++    abort();
++  for (unsigned int y = 0; y < dh; y++)
++    memcpy(new_texture + y * width, tm->texture_in[0] + y * tm->width, dw * 4);
++  free(tm->texture_in[0]);
++  tm->texture_in[0] = new_texture;
++
+   // user new texture
+   tm->width = width;
+   tm->height = height;
+-  tm->texture = tm->texture_in[tm->current];
+-  //tm->textureID = new_textureID;
+-  //tm->pixelBufferID = new_pixelBufferID;
++  tm->texture = tm->texture_in[0];
+ 
+   return;
+ 
+-- 
+2.56.0
+

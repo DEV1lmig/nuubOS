@@ -7,9 +7,12 @@
  *   channel [NAME] show or choose the release channel (stable|rc|nightly)
  *   auto [on|off] show or set the daily automatic check (default on;
  *                 run by nuubos-update-auto)
- *   check         fetch and verify the release manifest of the channel:
- *                 OK available V | OK current | OK none (nothing published
- *                 on the channel) | ERR network | server | signature
+ *   check         fetch and verify the release manifests of the channel
+ *                 and of every more stable one (nightly sees nightly, rc
+ *                 and stable; rc sees rc and stable; stable only stable)
+ *                 and keep the newest: OK available V | OK current |
+ *                 OK none (nothing published on them) | ERR network |
+ *                 server | signature
  *   download      fetch the payload (resumable), verify its SHA-256 (a job)
  *   verify        re-check the downloaded payload against the manifest
  *   write DEVICE  unpack the verified system image onto DEVICE (the
@@ -23,7 +26,8 @@
  * Trust comes from the signature, never from the transport: the manifest
  * (a small key=value file) is signed with the nuubOS release key (Ed25519)
  * and carries the payload size and SHA-256 and the SHA-256 of the system
- * image inside it. Its channel must be the one asked for, and only a
+ * image inside it. Its channel must be the device's or a more stable one
+ * (the device keeps its own channel when it installs it), and only a
  * higher build serial than the running one is offered (an old signed
  * manifest can never downgrade). The public key is compiled in from
  * board/nuubos/common/ota/update-key.pub; a build without it reports
@@ -170,12 +174,18 @@ static long long current_serial(void)
 	return atoll(text);
 }
 
-static bool valid_channel(const char *name)
+/* Position in channels[] (most stable first), -1 when unknown. */
+static int channel_rank(const char *name)
 {
 	for (size_t i = 0; i < sizeof(channels) / sizeof(channels[0]); i++)
 		if (!strcmp(name, channels[i]))
-			return true;
-	return false;
+			return (int)i;
+	return -1;
+}
+
+static bool valid_channel(const char *name)
+{
+	return channel_rank(name) >= 0;
 }
 
 static void current_channel(char *out, size_t size)
@@ -222,7 +232,7 @@ static long read_file(const char *path, unsigned char *buf, size_t size)
 }
 
 /* The manifest is trusted only when its Ed25519 signature verifies. */
-static bool manifest_verified(void)
+static bool manifest_file_verified(const char *path, const char *sig_path)
 {
 	static unsigned char manifest[16384];
 	unsigned char sig[crypto_sign_BYTES + 1];
@@ -231,11 +241,16 @@ static bool manifest_verified(void)
 
 	if (!public_key(pk))
 		return false;
-	n = read_file(UPDATE_DIR "/manifest", manifest, sizeof(manifest));
-	s = read_file(UPDATE_DIR "/manifest.sig", sig, sizeof(sig));
+	n = read_file(path, manifest, sizeof(manifest));
+	s = read_file(sig_path, sig, sizeof(sig));
 	if (n <= 0 || s != crypto_sign_BYTES)
 		return false;
 	return crypto_sign_verify_detached(sig, manifest, (unsigned long long)n, pk) == 0;
+}
+
+static bool manifest_verified(void)
+{
+	return manifest_file_verified(UPDATE_DIR "/manifest", UPDATE_DIR "/manifest.sig");
 }
 
 /* A resumed request answered with the whole file (200 instead of 206)
@@ -397,17 +412,27 @@ static bool safe_payload(const char *s)
 	return safe_name(tag) && safe_name(slash + 1) && strcmp(tag, "..") && strcmp(slash + 1, "..");
 }
 
+/* Whether releases of CHANNEL are offered to a device on the channel in
+ * use: its own and the more stable ones. */
+static bool channel_visible(const char *channel)
+{
+	char wanted[32];
+	int rank = channel_rank(channel);
+
+	current_channel(wanted, sizeof(wanted));
+	return rank >= 0 && rank <= channel_rank(wanted);
+}
+
 /* A verified manifest of a format this build understands, for the channel
- * in use, newer than the running build. */
+ * in use or a more stable one, newer than the running build. */
 static bool manifest_offers_update(void)
 {
-	char format[16], channel[32], wanted[32], serial[32];
+	char format[16], channel[32], serial[32];
 
 	file_value(UPDATE_DIR "/manifest", "format", format, sizeof(format));
 	file_value(UPDATE_DIR "/manifest", "channel", channel, sizeof(channel));
 	file_value(UPDATE_DIR "/manifest", "serial", serial, sizeof(serial));
-	current_channel(wanted, sizeof(wanted));
-	return atoi(format) == MANIFEST_FORMAT && !strcmp(channel, wanted) &&
+	return atoi(format) == MANIFEST_FORMAT && channel_visible(channel) &&
 	       atoll(serial) > current_serial();
 }
 
@@ -418,46 +443,92 @@ static const char *http_failure(long status)
 	return status > 0 ? "server" : "network";
 }
 
+/*
+ * Fetch and verify the manifest of one channel into manifest.cand: 0 =
+ * a verified manifest of a format this build understands, published for
+ * that channel; 1 = nothing published there (404); else the failure.
+ */
+static const char *fetch_channel(const char *channel, long long *serial)
+{
+	char url[1024], format[16], name[32], text[32];
+	long status;
+
+	snprintf(url, sizeof(url), "%s/channel-%s/nuubos-update.manifest", UPDATE_URL, channel);
+	status = fetch(url, UPDATE_DIR "/manifest.cand", false, 30);
+	if (status == 404) {
+		unlink(UPDATE_DIR "/manifest.cand");
+		return "";
+	}
+	if (status != 200)
+		return http_failure(status);
+	snprintf(url, sizeof(url), "%s/channel-%s/nuubos-update.manifest.sig", UPDATE_URL, channel);
+	status = fetch(url, UPDATE_DIR "/manifest.cand.sig", false, 30);
+	if (status != 200)
+		return http_failure(status);
+	if (!manifest_file_verified(UPDATE_DIR "/manifest.cand", UPDATE_DIR "/manifest.cand.sig"))
+		return "signature";
+	file_value(UPDATE_DIR "/manifest.cand", "format", format, sizeof(format));
+	file_value(UPDATE_DIR "/manifest.cand", "channel", name, sizeof(name));
+	file_value(UPDATE_DIR "/manifest.cand", "serial", text, sizeof(text));
+	/* Signed but for another channel or format: nothing usable there. */
+	if (atoi(format) != MANIFEST_FORMAT || strcmp(name, channel))
+		return "";
+	*serial = atoll(text);
+	return NULL;
+}
+
+/*
+ * The device's channel and every more stable one are checked (user request
+ * 2026-10-22: a nightly console also sees RC and stable releases, an RC
+ * one stable releases), and the newest verified manifest is kept: an
+ * update from a more stable channel is offered and installed like one of
+ * the device's own, which keeps its channel. A failure on one channel does
+ * not hide an update found on another.
+ */
 static int cmd_check(void)
 {
 	unsigned char pk[crypto_sign_PUBLICKEYBYTES];
-	long status;
-	char url[1024], channel[32], version[64];
+	char channel[32], version[64];
+	const char *failure = NULL;
+	long long best = -1;
+	int rank;
 
 	if (!public_key(pk))
 		return fail("unavailable");
 	if (mkdir(UPDATE_DIR, 0700) != 0 && errno != EEXIST)
 		return fail("storage");
 	current_channel(channel, sizeof(channel));
-	snprintf(url, sizeof(url), "%s/channel-%s/nuubos-update.manifest", UPDATE_URL, channel);
-	status = fetch(url, UPDATE_DIR "/manifest.new", false, 30);
-	/* Nothing published on this channel yet: nothing to offer. */
-	if (status == 404) {
-		unlink(UPDATE_DIR "/manifest.new");
+	for (rank = channel_rank(channel); rank >= 0; rank--) {
+		long long serial = -1;
+		const char *rc = fetch_channel(channels[rank], &serial);
+
+		if (rc) {
+			if (*rc && !failure)
+				failure = rc;
+			continue;
+		}
+		if (serial <= best)
+			continue;
+		best = serial;
+		rename(UPDATE_DIR "/manifest.cand", UPDATE_DIR "/manifest.new");
+		rename(UPDATE_DIR "/manifest.cand.sig", UPDATE_DIR "/manifest.sig.new");
+	}
+	unlink(UPDATE_DIR "/manifest.cand");
+	unlink(UPDATE_DIR "/manifest.cand.sig");
+	if (best < 0) {
+		if (failure)
+			return fail(failure);
+		/* Nothing published on any of them yet: nothing to offer. */
 		puts("OK none");
 		return 0;
 	}
-	if (status != 200)
-		return fail(http_failure(status));
-	snprintf(url, sizeof(url), "%s/channel-%s/nuubos-update.manifest.sig", UPDATE_URL, channel);
-	status = fetch(url, UPDATE_DIR "/manifest.sig.new", false, 30);
-	if (status != 200)
-		return fail(http_failure(status));
-	/* Keep a previous good manifest until the new one verifies. */
-	rename(UPDATE_DIR "/manifest", UPDATE_DIR "/manifest.old");
-	rename(UPDATE_DIR "/manifest.sig", UPDATE_DIR "/manifest.sig.old");
 	rename(UPDATE_DIR "/manifest.new", UPDATE_DIR "/manifest");
 	rename(UPDATE_DIR "/manifest.sig.new", UPDATE_DIR "/manifest.sig");
-	if (!manifest_verified()) {
-		rename(UPDATE_DIR "/manifest.old", UPDATE_DIR "/manifest");
-		rename(UPDATE_DIR "/manifest.sig.old", UPDATE_DIR "/manifest.sig");
-		return fail("signature");
-	}
-	unlink(UPDATE_DIR "/manifest.old");
-	unlink(UPDATE_DIR "/manifest.sig.old");
 	file_value(UPDATE_DIR "/manifest", "version", version, sizeof(version));
 	if (manifest_offers_update())
 		printf("OK available %s\n", version);
+	else if (failure && best <= current_serial())
+		return fail(failure);
 	else
 		printf("OK current\n");
 	return 0;

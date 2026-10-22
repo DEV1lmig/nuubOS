@@ -395,9 +395,18 @@ if ((user_count == 1)); then
         && pass "single-user active profile equals default user" \
         || fail "single-user active profile inconsistent"
 elif [[ "$login_mode" == "DEFAULT" ]]; then
-    [[ "$active_user" == "$default_user" ]] \
-        && pass "default-login active profile equals default user" \
-        || fail "default-login active profile inconsistent"
+    # The default user is the one started at boot; Switch User can make
+    # another profile active afterwards, and nothing records the boot
+    # choice, so a different active profile is valid as long as it exists.
+    if [[ "$active_user" == "$default_user" ]]; then
+        pass "default-login active profile equals default user"
+    elif [[ -n "$active_user" ]] &&
+         remote "[ -f '/state/users/$active_user/settings.conf' ]"; then
+        pass "default-login active profile is an existing profile"
+        info "active profile differs from the default user (switched after boot)"
+    else
+        fail "default-login active profile inconsistent"
+    fi
 elif [[ -z "$active_user" ]]; then
     pass "multi-user selection has no premature active profile"
 else

@@ -1,0 +1,25 @@
+#!/bin/sh
+
+# Early UI (docs/dev/platform.md "Boot time"): labwc needs only the display,
+# udev and STATE, so its init (EGL, keymap, input devices, first-frame
+# splash) and nuubUI's own start overlap the S30-S49 services instead of
+# following them; nuubUI keeps the boot splash and connects to each service
+# as it appears. /run/nuubos/booting marks the services' start until
+# S50nuubos-ui: scripts whose readiness nobody needs at boot (audiod,
+# wifid) do not wait for it while it exists.
+
+case "${1:-}" in
+	start)
+		mkdir -p /run/nuubos
+		: > /run/nuubos/booting
+		/etc/init.d/S50nuubos-ui early
+		;;
+	stop|restart|reload)
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}" >&2
+		exit 1
+		;;
+esac
+
+exit 0

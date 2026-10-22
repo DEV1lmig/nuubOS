@@ -1345,3 +1345,9 @@
 1344={0} şu olarak eşitlensin
 1345=Kapat
 1346=nuubOS klasörünü kullan
+1347=HyperSleep
+1348=Neredeyse hiç pil kullanmaz. Güç düğmesiyle uyanır.
+1349=START ve kapak da uyandırır. Daha fazla pil kullanır.
+1350=Tanılama modu
+1351=Sonraki {0} açılış
+1352=Sonraki 10 açılış boyunca her şeyi kaydeder ve her yeniden başlatma veya kapatmada bir rapor saklar. Varsayılan olarak kapalı: kayıt tutmak performansa ve kart yazımına mal olur.

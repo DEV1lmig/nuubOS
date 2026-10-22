@@ -31,7 +31,6 @@ manifest() # CHANNEL SERIAL FILE
     openssl pkeyutl -sign -inkey "$T/key.pem" -rawin -in "$3" -out "$3.sig"
 }
 manifest nightly 200 "$W/channel-nightly/nuubos-update.manifest"
-# An rc manifest served under the nightly channel must not be offered.
 manifest rc 300 "$W/channel-rc/nuubos-update.manifest"
 PUB="$(openssl pkey -in "$T/key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')"
 PORT=$((20000 + $$ % 20000))
@@ -52,15 +51,24 @@ C="$T/updatectl"
 
 ck "no key: unavailable" '"$T/updatectl-nokey" check | grep -q "ERR unavailable"'
 ck "default channel nightly" '[ "$($C channel)" = nightly ] && $C status | grep -q "channel=nightly"'
-ck "check finds 0.6" '$C check | grep -q "OK available 0.6"'
+# Nightly sees nightly, rc and stable; the newest wins (rc, serial 300).
+ck "check finds 0.6" '$C check | grep -q "OK available 0.6" && grep -q "serial=300" "$U/manifest"'
 ck "status with escaped release notes" '$C status | grep -q "available=1" && $C status | grep -qxF "notes=- First item\\n- Second \\\\ item"'
 echo 300 > "$R/usr/share/nuubos/build-serial"
 ck "older serial never offered" '$C check | grep -q "OK current" && $C status | grep -q "available=0" && $C download | grep -q "ERR current"'
 echo 100 > "$R/usr/share/nuubos/build-serial"
-cp "$W/channel-rc/nuubos-update.manifest" "$W/channel-nightly/nuubos-update.manifest"
-cp "$W/channel-rc/nuubos-update.manifest.sig" "$W/channel-nightly/nuubos-update.manifest.sig"
-ck "other channel's manifest not offered" '$C check | grep -q "OK current"'
+# A manifest published under another channel's name is ignored there.
+mv "$W/channel-rc" "$T/rc.away"
+manifest rc 300 "$W/channel-nightly/nuubos-update.manifest"
+ck "other channel's manifest not offered" '$C check | grep -q "OK none"'
 manifest nightly 200 "$W/channel-nightly/nuubos-update.manifest"
+mv "$T/rc.away" "$W/channel-rc"
+# RC sees rc and stable only, stable only stable.
+ck "rc does not see nightly" '[ "$($C channel rc)" = OK ] && mv "$W/channel-rc" "$T/rc.away" && [ "$($C check)" = "OK none" ]; R1=$?; mv "$T/rc.away" "$W/channel-rc"; [ "$($C channel nightly)" = OK ] && [ $R1 = 0 ]'
+mkdir -p "$W/channel-stable"; manifest stable 250 "$W/channel-stable/nuubos-update.manifest"
+ck "stable sees only stable" '[ "$($C channel stable)" = OK ] && $C check | grep -q "OK available" && grep -q "channel=stable" "$U/manifest" && [ "$($C channel)" = stable ]'
+ck "nightly: newest of nightly, rc, stable" '[ "$($C channel nightly)" = OK ] && $C check | grep -q "OK available" && grep -q "channel=rc" "$U/manifest" && [ "$($C channel)" = nightly ]'
+rm -rf "$W/channel-stable"
 ck "invalid channel refused" '$C channel beta | grep -q "ERR channel"'
 ck "channel switch" '[ "$($C channel rc)" = OK ] && [ "$($C channel)" = rc ] && $C check | grep -q "OK available 0.6"'
 ck "channel switch forgets the offer" '[ "$($C channel nightly)" = OK ] && $C status | grep -q "available=0"'
@@ -80,7 +88,10 @@ ck "verify" '[ "$($C verify)" = OK ]'
 # Tampered manifest is refused, the good one kept.
 cp "$W/channel-nightly/nuubos-update.manifest" "$T/good.manifest"
 sed -i 's/serial=200/serial=999/' "$W/channel-nightly/nuubos-update.manifest"
-ck "tampered manifest rejected" '$C check | grep -q "ERR signature" && grep -q "serial=200" "$U/manifest"'
+mv "$W/channel-rc" "$T/rc.away"
+ck "tampered manifest rejected" '$C check | grep -q "ERR signature" && grep -q "serial=300" "$U/manifest"'
+mv "$T/rc.away" "$W/channel-rc"
+ck "a bad channel does not hide another" '$C check | grep -q "OK available" && grep -q "channel=rc" "$U/manifest"'
 cp "$T/good.manifest" "$W/channel-nightly/nuubos-update.manifest"
 # Corrupt payload part is not kept.
 rm -f "$U/payload"; echo garbage > "$U/payload.part"
@@ -120,6 +131,17 @@ ck "trial boot keeps STATE" '[ "$(cat "$R/state/settings")" = migrated ] && A st
 ck "confirm keeps B" '[ "$(A confirm)" = OK ] && grep -qx "nuubos_slot=b" "$T/boot/nuubos-slot.cfg" && grep -qx "nuubos_try=none" "$T/boot/nuubos-slot.cfg" && A status | grep -q "result=ok" && [ ! -f "$U/payload" ]'
 ck "installed announced once" 'grep -qx "post update.result update.installed version=0.5" "$T/notified.log" && [ "$(wc -l < "$T/notified.log")" = 1 ]'
 ck "confirm again is a no-op" '[ "$(A confirm)" = OK ] && [ "$(wc -l < "$T/notified.log")" = 1 ]'
+# Bootloader: written to SD1 (a file here, behind p1-like data) by confirm
+# when it differs, never past its own bytes, not with a low battery.
+mkdir -p "$R/usr/share/nuubos/bootloader"; head -c 5000 /dev/urandom > "$R/usr/share/nuubos/bootloader/u-boot-sunxi-with-spl.bin"
+head -c 1100000 /dev/zero | tr '\0' 'x' > "$T/disk.img"; cp "$T/disk.img" "$T/disk.orig"
+AB() { NUUBOS_TEST_DISK="$T/disk.img" A "$@"; }
+echo 30 > "$T/ps/axp20x-battery/capacity"
+ck "bootloader: low battery postpones" '[ "$(AB confirm)" = OK ] && cmp -s "$T/disk.img" "$T/disk.orig"'
+echo 80 > "$T/ps/axp20x-battery/capacity"
+ck "bootloader written at 8 KiB" '[ "$(AB confirm)" = OK ] && dd if="$T/disk.img" bs=1024 skip=8 2>/dev/null | head -c 5000 | cmp -s - "$R/usr/share/nuubos/bootloader/u-boot-sunxi-with-spl.bin" && cmp -s -n 8192 "$T/disk.img" "$T/disk.orig" && [ "$(tail -c +13193 "$T/disk.img" | head -c 100)" = "$(tail -c +13193 "$T/disk.orig" | head -c 100)" ] && [ -s "$R/state/update/bootloader" ]'
+ck "bootloader: same one not rewritten" 'cp "$T/disk.img" "$T/disk.ok"; rm -f "$R/state/update/bootloader"; [ "$(AB confirm)" = OK ] && cmp -s "$T/disk.img" "$T/disk.ok" && [ -s "$R/state/update/bootloader" ]'
+rm -rf "$R/usr/share/nuubos/bootloader" "$R/state/update/bootloader"
 
 # Next update from B into A, which never starts: U-Boot falls back to B.
 # A failed SD2 backup does not stop it, and its error is not the update's.

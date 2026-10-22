@@ -72,6 +72,11 @@ start_service()
     fi
 
     rm -f "$PIDFILE" "$SOCKET" "$STATE"
+    # The event listener first: statusd reads the Wi-Fi state once at start
+    # and then only on wpa_cli events, so a CONNECTED between that read and
+    # the listener attaching was lost and the top bar kept "connecting"
+    # (seen 2026-10-22 once boot got faster).
+    start_wpa_listener
     start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON"
     RC=$?
     if [ "$RC" -ne 0 ]; then
@@ -79,7 +84,6 @@ start_service()
         return "$RC"
     fi
 
-    start_wpa_listener
     request_time_sync
     return 0
 }

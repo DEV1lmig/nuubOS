@@ -1,0 +1,31 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] sunxi: h700: keep the speaker amplifier off at start
+
+Every H700 board drives its speaker amplifier enable from PI5 (the
+codec's allwinner,pa-gpios). Out of reset (power on, a reboot, a wake-up
+from the universal standby) the pin floats while the amplifier is
+already powered, which popped. The SPL drives it low right after the
+GPIO init, level before direction, until Linux takes it.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -479,6 +479,17 @@
+ 	timer_init();
+ 	clock_init();
+ 	gpio_init();
++#ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
++	/*
++	 * Every H700 board drives its speaker amplifier enable from PI5 (the
++	 * codec's allwinner,pa-gpios). Out of reset (power on, a reboot, a
++	 * wake-up from the universal standby) the pin floats while the
++	 * amplifier is already powered, which pops: hold it off until Linux
++	 * takes it. Level first, then direction, so it never drives high.
++	 */
++	gpio_set_value(SUNXI_GPI(5), 0);
++	gpio_direction_output(SUNXI_GPI(5), 0);
++#endif
+ 
+ 	spl_init();
+ 	preloader_console_init();

@@ -8,7 +8,10 @@ wait_ready()
 {
 	i=0
 
-	while [ "$i" -lt 10 ]; do
+	# Up to 10 s, looked at every 50 ms: the socket is there within
+	# milliseconds, and a whole-second step cost every boot ~1 s (boot audit
+	# 2026-10-22).
+	while [ "$i" -lt 200 ]; do
 		if [ -S "$SOCKET" ]; then
 			return 0
 		fi
@@ -20,7 +23,7 @@ wait_ready()
 			fi
 		fi
 
-		sleep 1
+		sleep 0.05
 		i=$((i + 1))
 	done
 
@@ -40,6 +43,12 @@ case "${1:-}" in
 			exit "$RC"
 		fi
 
+		# Boot (docs/dev/platform.md "Boot time"): no service started
+		# after this one talks to audiod, and nuubUI's clients retry, so
+		# its PipeWire route setup (~0.4-0.9 s) runs alongside the rest
+		# of the boot (/run/nuubos/booting: S13nuubos-ui-early to
+		# S50nuubos-ui).
+		[ -e /run/nuubos/booting ] && exit 0
 		if wait_ready; then
 			exit 0
 		fi

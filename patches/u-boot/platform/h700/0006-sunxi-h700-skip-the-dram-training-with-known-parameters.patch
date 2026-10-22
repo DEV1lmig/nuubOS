@@ -1,0 +1,124 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] sunxi: h700: skip the DRAM training with known parameters
+
+The vendor DRAM training (autoscan, DST eye scans) took 5.2 of the
+CubeXX's 7.8 s before Linux, on every cold boot. Its result is already
+kept in the RTC (GP1-GP4, GP7) for the universal-standby resume, and the
+RTC keeps it while the battery is connected. A DRAM init that passed its
+checks now also leaves H700_TRAINED_MAGIC in GP0 (a cold boot, or a
+resume with those parameters); the next cold boot clears it, runs the
+final core init with the kept parameters and accepts them only through
+the checks the trained result passes (size, vendor validation, final
+memory test). Anything else, or a hang (GP0 is already clear), trains as
+before. The universal standby still owns GP0 while it sleeps.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/arch/arm/mach-sunxi/dram_sun50i_h616.c
++++ b/arch/arm/mach-sunxi/dram_sun50i_h616.c
+@@ -145,6 +145,13 @@
+ #define H700_RESUME_GEOMETRY		0x07000110UL	/* RTC GP4 */
+ #define H700_RESUME_SIZE		0x0700011cUL	/* RTC GP7, MiB */
+ #define H700_RESUME_MAGIC		0x4e555352	/* "NUSR" */
++/*
++ * In GP0 instead: GP1-GP4 and GP7 hold the parameters of a DRAM init that
++ * passed its checks (a cold boot, or a resume with them), so the next cold
++ * boot may skip the training (h700_trained_init). The low half is the
++ * format: bump it when the training's result means something else.
++ */
++#define H700_TRAINED_MAGIC		0x4e440001	/* "ND", 1 */
+ /* Written by BL31 in its reserved DRAM (0x40000000-0x4003ffff). */
+ #define H700_RESUME_BLOCK		0x4003c000UL
+ #define H700_RESUME_BLOCK_MAGIC		0x4e55424c	/* "NUBL" */
+@@ -3634,6 +3641,8 @@
+ 	       H700_RESUME_SAVE_SIZE);
+ 	entry = (uintptr_t)blk->entry_lo | (uintptr_t)blk->entry_hi << 32;
+ 	writel(0x5a5a0012, (void *)H700_RESUME_STEP_REG);
++	/* The DRAM came back with GP1-GP4: they stay good for a cold boot. */
++	writel(H700_TRAINED_MAGIC, (void *)H700_RESUME_FLAG);
+ 
+ 	flush_dcache_all();
+ 	asm volatile(
+@@ -3652,6 +3661,48 @@
+ }
+ #endif
+ 
++#ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
++/*
++ * Cold boot with the parameters of the last DRAM init that passed its
++ * checks (RTC GP1-GP4, GP7, marked by H700_TRAINED_MAGIC in GP0; the RTC
++ * keeps them while the battery is connected): the final core init of the
++ * full path with them, without autoscan or DST (~5 s of the CubeXX's
++ * 7.8 s before Linux, docs/dev/platform.md "Boot time"). Accepted only
++ * through the checks the trained result passes (size, the vendor
++ * validation, the final memory test); 0 = train as usual. The caller
++ * clears GP0 first: a hang here leaves the next start to the training.
++ */
++static unsigned int h700_trained_init(struct dram_config *config)
++{
++	u32 geometry = readl((void *)H700_RESUME_GEOMETRY);
++	u32 saved_mib = readl((void *)H700_RESUME_SIZE);
++	unsigned int size_mib;
++
++	config->cols = geometry & 0xff;
++	config->rows = (geometry >> 8) & 0xff;
++	config->ranks = (geometry >> 16) & 0xff;
++	config->bus_full_width = (geometry >> 24) & 0xff;
++	if (!config->cols || !config->rows || saved_mib < 128 || saved_mib > 4096)
++		return 0;
++	h700_dram_runtime.current_para1 = readl((void *)H700_RESUME_PARA1);
++	h700_dram_runtime.current_para2 = readl((void *)H700_RESUME_PARA2);
++	h700_dram_runtime.current_tpr13 = readl((void *)H700_RESUME_TPR13);
++
++	if (!mctl_core_init(&para, config))
++		return 0;
++	size_mib = h700_vendor_finalize_size();
++	if (size_mib != saved_mib)
++		return 0;
++	if (!(h700_dram_runtime.current_tpr13 & BIT(27)))
++		mctl_set_master_priority();
++	if (!h700_vendor_validate((size_mib / 2) << 20, 0x8000, 8, true) ||
++	    !h700_vendor_final_memtest(size_mib))
++		return 0;
++
++	return size_mib;
++}
++#endif
++
+ unsigned long sunxi_dram_init(void)
+ {
+ 	void *const prcm = (void *)SUNXI_PRCM_BASE;
+@@ -3675,6 +3726,17 @@
+ 		if (readl((void *)H700_RESUME_FLAG) == H700_RESUME_MAGIC)
+ 			h700_resume();
+ 
++		if (readl((void *)H700_RESUME_FLAG) == H700_TRAINED_MAGIC) {
++			writel(0, (void *)H700_RESUME_FLAG);
++			size_mib = h700_trained_init(&config);
++			if (size_mib)
++				goto trained;
++			/* Back to the profile's nominal state, then train. */
++			h700_vendor_select_profile();
++			if (!h700_vendor_config(&config))
++				hang();
++		}
++
+ 		/*
+ 		 * TPR13 bit11 selects the vendor DST wrapper.  Profiles which do
+ 		 * not request DST still use the vendor autoscan and final raw
+@@ -3720,6 +3782,7 @@
+ 				hang();
+ 		}
+ 
++trained:
+ 		/*
+ 		 * boot0 top flow 0x27900 -> 0x231e0 always clears the H700
+ 		 * DRAM/boot scratch register at 0x070001f8 after the final
+@@ -3728,6 +3791,7 @@
+ 		 */
+ 		writel(0, (void *)0x070001f8UL);
+ 
++		writel(H700_TRAINED_MAGIC, (void *)H700_RESUME_FLAG);
+ 		writel((start_ms & 0xffff) | h700_boot_ms() << 16,
+ 		       (void *)H700_BOOT_TIMES_REG);
+ 		return (unsigned long)size_mib << 20;

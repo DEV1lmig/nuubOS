@@ -105,8 +105,19 @@ trap cleanup EXIT INT TERM
 
 {
     echo "time-sync-start=$(date +%s 2>/dev/null || echo 0) mode=${MODE:-periodic}"
-    /usr/sbin/nuubos-timectl sync
-    RC=$?
+    # Through regionald, the owner of the time settings: it records the
+    # sync and tells its subscribers (Settings -> Last Sync was stale
+    # until the next regionald command). Directly only when regionald does
+    # not answer (early boot).
+    REPLY="$(nuubos-regionalctl sync 2>/dev/null)"
+    if [ $? -eq 0 ] && [ -n "$REPLY" ]; then
+        echo "via=regionald reply=$REPLY"
+        [ "$REPLY" = OK ]
+        RC=$?
+    else
+        /usr/sbin/nuubos-timectl sync
+        RC=$?
+    fi
     echo "time-sync-rc=$RC"
 } >> "$LOG" 2>&1
 

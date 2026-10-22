@@ -1,0 +1,117 @@
+From b9f1b9d87379d653648b7d0f1aa890532fd0cddb Mon Sep 17 00:00:00 2001
+From: nuubOS Project <noreply@nuubos.invalid>
+Date: Thu, 22 Oct 2026 19:11:04 +0200
+Subject: [PATCH 3/3] Save states keep the Lua state
+
+The call of eris.init_persist_all after the BIOS was commented out, so
+eris.perm stayed empty and persist_all tried to persist every global,
+the PICO-8 API's light C functions included: it always failed, the error
+was dropped, and states held a Lua state of 0 bytes. Loading one restored
+the PICO-8 memory only, not the game's variables ("save states do not
+work").
+
+init_persist_all runs again, and it also registers the functions inside
+the library tables (string.sub, table.insert...) as permanents, in sorted
+order, so a cart keeping one in its own state can be saved. Failures to
+persist or restore are now written to the log.
+
+A Healthy Dose of Dungeon: Lua state 0 -> 241603 bytes, restored.
+
+Upstream-Status: Pending
+---
+ source/p8GlobalLuaFunctions.h | 22 ++++++++++++++++++++++
+ source/vm.cpp                 | 30 ++++++++++++++++++------------
+ 2 files changed, 40 insertions(+), 12 deletions(-)
+
+diff --git a/source/p8GlobalLuaFunctions.h b/source/p8GlobalLuaFunctions.h
+index 3158b96..e068eeb 100644
+--- a/source/p8GlobalLuaFunctions.h
++++ b/source/p8GlobalLuaFunctions.h
+@@ -358,6 +358,28 @@ eris.init_persist_all = function()
+     eris.unperm[i] = v
+     eris.original_G[k] = v
+   end
++  -- nuubOS: the functions inside the library tables (string.sub,
++  -- table.insert...) are permanents too: a cart keeping one in its own
++  -- state made every save fail ("attempt to persist a light C function").
++  -- Same sorted order on every run, so the indices match when loading.
++  for i=1,n do
++    local t=_G[keyset[i]]
++    if type(t)=="table" and t~=_G and t~=eris.perm and t~=eris.unperm and t~=eris.original_G then
++      local fkeys={}
++      for fk,fv in pairs(t) do
++        if type(fk)=="string" and type(fv)=="function" then fkeys[#fkeys+1]=fk end
++      end
++      table.sort(fkeys)
++      for _,fk in ipairs(fkeys) do
++        local fv=t[fk]
++        if eris.perm[fv]==nil then
++          n=n+1
++          eris.perm[fv]=n
++          eris.unperm[n]=fv
++        end
++      end
++    end
++  end
+ end
+ 
+ eris.persist_all = function()
+diff --git a/source/vm.cpp b/source/vm.cpp
+index 63a6a63..1fd90e8 100644
+--- a/source/vm.cpp
++++ b/source/vm.cpp
+@@ -171,17 +171,21 @@ bool _initializeLuaState(lua_State* luaState) {
+     // we call this function to establish the default global state of things not to save in the save state
+     // needs to be called after globals are loaded but before the cart is run, or _init is called
+     //TODO: move these calls to the glue code?
+-    // lua_getglobal(luaState, "eris");
+-	// lua_getfield(luaState, -1, "init_persist_all");
+-
+-    // if (lua_pcall(luaState, 0, 0, 0)){
+-    //     Logger_Write("Error setting up lua persistence: %s\n", lua_tostring(luaState, -1));
+-    //     lua_pop(luaState, 1);
+-    //     return false;
+-    // }
++    // nuubOS: this call was commented out, so eris.perm stayed empty and
++    // every save state failed to persist the Lua state ("attempt to
++    // persist a light C function"): states restored the PICO-8 memory
++    // only, not the game's variables.
++    lua_getglobal(luaState, "eris");
++	lua_getfield(luaState, -1, "init_persist_all");
++
++    if (lua_pcall(luaState, 0, 0, 0)){
++        Logger_Write("Error setting up lua persistence: %s\n", lua_tostring(luaState, -1));
++        lua_pop(luaState, 2);
++        return false;
++    }
+ 
+-    // //pop the eris.init_persist_all fuction off the stack now that we're done with it
+-    // lua_pop(luaState, 1);
++    //pop the eris table now that we're done with it
++    lua_pop(luaState, 1);
+ 
+ 
+     return true;
+@@ -1496,7 +1500,8 @@ size_t Vm::serializeLuaState(char* dest) {
+ 
+ 	if (lua_pcall(_luaState, 0, 1, 0) != 0) {
+ 		std::string e = lua_tostring(_luaState, -1);
+-		lua_pop(_luaState, 1);
++		fprintf(stderr, "[fake08] Lua state not saved: %s\n", e.c_str());
++		lua_pop(_luaState, 2);
+ 		return 0;
+ 	}
+ 
+@@ -1515,7 +1520,8 @@ void Vm::deserializeLuaState(const char* src, size_t len) {
+ 
+ 	if (lua_pcall(_luaState, 1, 0, 0) != 0) {
+ 		std::string e = lua_tostring(_luaState, -1);
+-		lua_pop(_luaState, 1);
++		fprintf(stderr, "[fake08] Lua state not restored: %s\n", e.c_str());
++		lua_pop(_luaState, 2);
+ 		return;
+ 	}
+ 	lua_pop(_luaState, 1);
+-- 
+2.56.0
+

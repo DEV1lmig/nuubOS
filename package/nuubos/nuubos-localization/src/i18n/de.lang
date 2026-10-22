@@ -1345,3 +1345,9 @@
 1344={0} synchronisieren als
 1345=Ausschalten
 1346=nuubOS-Ordner verwenden
+1347=HyperSleep
+1348=Fast kein Akkuverbrauch. Aufwecken mit der Ein-/Aus-Taste.
+1349=START und der Deckel wecken auch. Verbraucht mehr Akku.
+1350=Diagnosemodus
+1351=Nächste {0} Starts
+1352=Protokolliert alles für die nächsten 10 Starts und speichert bei jedem Neustart oder Ausschalten einen Bericht. Standardmäßig aus: Protokolle kosten Leistung und Schreibvorgänge auf der Karte.

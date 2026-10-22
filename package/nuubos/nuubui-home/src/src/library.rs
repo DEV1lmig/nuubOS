@@ -33,6 +33,8 @@ const EMULATION_SOCKET: &str = "/run/nuubos/emud.sock";
 pub static GAME_RUNNING: AtomicBool = AtomicBool::new(false);
 /* libraryd lists unavailable games (Settings → Gaming → LIBRARY). */
 pub static SHOW_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+/* The first library snapshot reached Home (home_covers_settled). */
+static SNAPSHOT_SEEN: AtomicBool = AtomicBool::new(false);
 /* Decoded covers kept in memory (LRU). */
 const COVER_CACHE_LIMIT: usize = 64;
 /* Grid rows above/below the visible ones whose covers are loaded. */
@@ -427,19 +429,37 @@ pub(crate) fn shape_cover(src: &Image, target: u32, radius_px: f32) -> Option<(S
  * record. Never backed up; started over past COVER_PACK_MAX. */
 const COVER_PACK: &str = "/userdata/library/cache/home-covers.pack";
 const COVER_PACK_MAX: u64 = 192 << 20;
+/* One record per packed cover: key u64, offset u64, length u32 (LE). */
+const COVER_PACK_INDEX: &str = "/userdata/library/cache/home-covers.idx";
+const COVER_INDEX_RECORD: usize = 20;
 /* Covers decoded at once: the H700 has four cores, one stays for the UI. */
 const COVER_DECODERS: usize = 3;
 
 struct CoverPack {
     file: std::fs::File,
+    index_file: Option<std::fs::File>,
+    index_file_len: u64,
     index: HashMap<u64, (u64, u32)>,
     len: u64,
+}
+
+fn index_record(key: u64, off: u64, n: u32) -> [u8; COVER_INDEX_RECORD] {
+    let mut rec = [0u8; COVER_INDEX_RECORD];
+    rec[..8].copy_from_slice(&key.to_le_bytes());
+    rec[8..16].copy_from_slice(&off.to_le_bytes());
+    rec[16..].copy_from_slice(&n.to_le_bytes());
+    rec
 }
 
 static COVER_PACK_STATE: Mutex<Option<CoverPack>> = Mutex::new(None);
 
 /* Opens the pack and reads its index once; a torn last record (power cut
- * while writing) is cut off. */
+ * while writing) is cut off. The index comes from COVER_PACK_INDEX, read in
+ * one go: rebuilding it from the pack's own record headers costs a small
+ * read per cover spread over up to 192 MB (~7 MB from the card and seconds
+ * at boot, docs/dev/platform.md "Boot time"). Covers packed after its last
+ * valid record (an older nuubUI, a power cut) are read from the headers and
+ * added to it. */
 fn with_pack<T>(f: impl FnOnce(&mut CoverPack) -> Option<T>) -> Option<T> {
     use std::os::unix::fs::FileExt;
     let mut guard = COVER_PACK_STATE.lock().unwrap();
@@ -449,6 +469,26 @@ fn with_pack<T>(f: impl FnOnce(&mut CoverPack) -> Option<T>) -> Option<T> {
         let size = file.metadata().ok()?.len();
         let mut index = HashMap::new();
         let mut pos = 0u64;
+        let index_file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(COVER_PACK_INDEX).ok();
+        let mut valid = 0u64;
+        if let Some(idx) = index_file.as_ref() {
+            let mut data = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut &*idx, &mut data);
+            for rec in data.chunks_exact(COVER_INDEX_RECORD) {
+                let key = u64::from_le_bytes(rec[..8].try_into().ok()?);
+                let off = u64::from_le_bytes(rec[8..16].try_into().ok()?);
+                let n = u32::from_le_bytes(rec[16..].try_into().ok()?);
+                if n == 0 || off != pos + 12 || off + n as u64 > size {
+                    break;
+                }
+                index.insert(key, (off, n));
+                pos = off + n as u64;
+                valid += COVER_INDEX_RECORD as u64;
+            }
+            if valid < data.len() as u64 {
+                let _ = idx.set_len(valid);
+            }
+        }
         let mut head = [0u8; 12];
         while pos + 12 <= size && file.read_exact_at(&mut head, pos).is_ok() {
             let key = u64::from_le_bytes(head[..8].try_into().ok()?);
@@ -457,12 +497,16 @@ fn with_pack<T>(f: impl FnOnce(&mut CoverPack) -> Option<T>) -> Option<T> {
                 break;
             }
             index.insert(key, (pos + 12, n));
+            if let Some(idx) = index_file.as_ref() {
+                let _ = idx.write_all_at(&index_record(key, pos + 12, n), valid);
+                valid += COVER_INDEX_RECORD as u64;
+            }
             pos += 12 + n as u64;
         }
         if pos < size {
             let _ = file.set_len(pos);
         }
-        *guard = Some(CoverPack { file, index, len: pos });
+        *guard = Some(CoverPack { file, index_file, index_file_len: valid, index, len: pos });
     }
     f(guard.as_mut()?)
 }
@@ -492,6 +536,10 @@ fn pack_put(key: u64, data: &[u8]) {
     let _ = with_pack(|p| {
         if p.len + 12 + data.len() as u64 > COVER_PACK_MAX {
             p.file.set_len(0).ok()?;
+            if let Some(idx) = p.index_file.as_ref() {
+                let _ = idx.set_len(0);
+            }
+            p.index_file_len = 0;
             p.index.clear();
             p.len = 0;
         }
@@ -500,6 +548,10 @@ fn pack_put(key: u64, data: &[u8]) {
         rec.extend_from_slice(&(data.len() as u32).to_le_bytes());
         rec.extend_from_slice(data);
         p.file.write_all_at(&rec, p.len).ok()?;
+        if let Some(idx) = p.index_file.as_ref() {
+            let _ = idx.write_all_at(&index_record(key, p.len + 12, data.len() as u32), p.index_file_len);
+            p.index_file_len += COVER_INDEX_RECORD as u64;
+        }
         p.index.insert(key, (p.len + 12, data.len() as u32));
         p.len += rec.len() as u64;
         Some(())
@@ -558,6 +610,13 @@ fn load_cover_scaled(path: &str, target: u32) -> Option<Image> {
         pack_put(k, &data);
     }
     Some(rgba_image(small))
+}
+
+/* Boot (main.rs): Home has its first library snapshot and no cover it
+ * asked for is still being decoded, so the first picture has its covers. */
+pub fn home_covers_settled() -> bool {
+    SNAPSHOT_SEEN.load(Ordering::SeqCst)
+        && STATE.with(|st| !st.borrow().covers.values().any(|c| matches!(c, CoverState::Loading)))
 }
 
 pub fn start_cover_loader(ui: &HomeWindow) {
@@ -1369,6 +1428,7 @@ pub fn start_library_listener(ui: &HomeWindow) {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
                                 apply_snapshot(&ui, snap);
+                                SNAPSHOT_SEEN.store(true, Ordering::SeqCst);
                             }
                         });
                     }

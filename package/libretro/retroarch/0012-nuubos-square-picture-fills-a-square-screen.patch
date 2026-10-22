@@ -1,0 +1,29 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] video: nuubOS square picture fills a square screen
+
+In smart integer scaling a 1:1 picture on a 1:1 screen is scaled to
+fill it instead of the largest integer factor: PICO-8 (128x128) on the
+RG CubeXX (720x720) was 640x640 in a 40-pixel frame. nuubOS draws
+non-integer scales with a sharp bilinear preset. Every other shape, and
+square pictures on other screens, keep the integer rule.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/gfx/video_driver.c
++++ b/gfx/video_driver.c
+@@ -2859,7 +2859,14 @@
+              * TODO: Make this threshold configurable. */
+             float width_utilization  = (float)(width  - padding_x) / width;
+             float height_utilization = (float)(height - padding_y) / height;
+-            if (MAX(height_utilization, width_utilization) < 0.88)
++            /* nuubOS: a square picture on a square screen (PICO-8 on the
++             * RG CubeXX's 720x720) fills it: integer 5x left a 40-pixel
++             * frame; the sharp bilinear preset keeps a fractional scale
++             * even. Other shapes keep the integer rule. */
++            bool nuubos_square = abs((int)width - (int)height) <= (int)height / 100
++                  && fabsf(aspect_ratio - 1.0f) < 0.01f;
++            if (MAX(height_utilization, width_utilization) < 0.88
++                  || (nuubos_square && (padding_x > 0 || padding_y > 0)))
+             {
+                video_viewport_get_scaled_aspect(vp, width, height, y_down);
+                return;

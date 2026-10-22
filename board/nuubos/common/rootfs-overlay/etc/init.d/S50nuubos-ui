@@ -80,6 +80,12 @@ start_ui()
 
 case "${1:-}" in
     start|restart)
+        # Boot: labwc already runs (S13nuubos-ui-early); every service has
+        # been started now.
+        rm -f /run/nuubos/booting
+        start_ui
+        ;;
+    early)
         start_ui
         ;;
     stop)

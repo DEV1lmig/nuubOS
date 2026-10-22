@@ -99,6 +99,7 @@
 /* Roots are overridable at build time for host tests. */
 #ifndef RUN_ROOT
 #define RUN_ROOT "/run/nuubos"
+#define UI_READY RUN_ROOT "/ui-ready"
 #endif
 #define SOCKET_PATH RUN_ROOT "/emud.sock"
 #define PIDFILE RUN_ROOT "/emud.pid"
@@ -106,6 +107,8 @@
 #define SESSION_CFG SESSION_DIR "/session.cfg"
 #define SESSION_SHADER SESSION_DIR "/session.glslp"
 #define RETROARCH_LOG RUN_ROOT "/retroarch.log"
+#define DIAG_ACTIVE RUN_ROOT "/diagnostics/active"
+#define DIAG_RETROARCH_LOG RUN_ROOT "/diagnostics/retroarch.log"
 #define LIBRARY_SOCKET RUN_ROOT "/libraryd.sock"
 #define INPUT_SOCKET RUN_ROOT "/inputd.sock"
 #define ACTIVE_USER_FILE RUN_ROOT "/user/active"
@@ -834,6 +837,13 @@ static void start_system_seed(void)
 		if (nice(19) == -1) {
 			/* copies at normal priority */
 		}
+		/* At boot not before nuubUI is ready (at the latest 60 s on):
+		 * even with nothing to copy, the walk (a lookup per file on the
+		 * image and on exFAT) read ~27 MB from the card during the UI's
+		 * own start (CubeXX 2026-10-22; nice is no I/O priority with
+		 * mq-deadline; docs/dev/platform.md "Boot time"). */
+		for (int i = 0; i < 300 && access(UI_READY, F_OK) != 0; i++)
+			usleep(200000);
 		seed_tree(SYSTEM_FILES, BIOS_DIR);
 		_exit(0);
 	}
@@ -1934,9 +1944,11 @@ static bool square_panel(void)
  * presentation (or the per-game Integer Scaling). 0 crops nothing: the
  * picture is as wide as the screen, any margin at the bottom (Dreamcast,
  * NAOMI, Atomiswave: user request 2026-10-21, their games use the whole
- * 640 pixels). Returns the percentage of the width that may be cropped,
- * -1 = off. */
-#define TV_OVERSCAN_DEFAULT_PCT 8
+ * 640 pixels). Since 2026-10-22 0 is the default for every system (user:
+ * "too much overscan on Saturn too, remove it from all cores"); a
+ * display.conf field 4 can still set a share for one system. Returns the
+ * percentage of the width that may be cropped, -1 = off. */
+#define TV_OVERSCAN_DEFAULT_PCT 0
 
 static int tv_overscan(const char *system, const struct game_overrides *o)
 {
@@ -3087,8 +3099,13 @@ static int write_session_cfg(const char *ra_dir, const char *saves,
 	fp = fopen(tmp, "w");
 	if (!fp)
 		return -1;
+	/* builtin_imageviewer_enable off: with it on, RetroArch opens .png
+	 * content in its own image viewer even with a core given by -L, so
+	 * every PICO-8 cartridge (.p8.png) showed its label picture instead
+	 * of running in FAKE-08/Retro8. nuubOS never uses that viewer. */
 	fprintf(fp,
 		"# Written by nuubos-emud for the running session.\n"
+		"builtin_imageviewer_enable = \"false\"\n"
 		"libretro_directory = \"" DOWNLOADED_CORES "\"\n"
 		"libretro_info_path = \"" CORE_INFO_DIR "\"\n"
 		"assets_directory = \"" RA_ASSETS_DIR "\"\n"
@@ -3549,6 +3566,12 @@ static const char *launch(const char *game, const char *mode, const char *net)
 			argv[argc++] = (char *)"--port";
 			argv[argc++] = net_port;
 		}
+		/* Diagnostic mode (docs/dev/system.md): RetroArch logs everything,
+		 * every session of the boot kept for the support bundle. */
+		bool diag = access(DIAG_ACTIVE, F_OK) == 0;
+
+		if (diag)
+			argv[argc++] = (char *)"--verbose";
 		argv[argc++] = (char *)"-L";
 		argv[argc++] = core_path;
 		argv[argc++] = session.content;
@@ -3563,7 +3586,8 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		setsid();
 		dup2(in_pipe[0], STDIN_FILENO);
 		dup2(out_pipe[1], STDOUT_FILENO);
-		log_fd = open(RETROARCH_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+		log_fd = diag ? open(DIAG_RETROARCH_LOG, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600)
+			      : open(RETROARCH_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 		if (log_fd >= 0)
 			dup2(log_fd, STDERR_FILENO);
 		clearenv();
@@ -3595,10 +3619,17 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		/* Dreamcast family (Flycast-nuubOS draws each frame at the start of
 		 * the next retro_run, so it reaches the GPU late): a swap may wait
 		 * two frames back instead of one (Mesa patch 0005). Crazy Taxi
-		 * while driving 53-56 -> 59.6 fps (2026-10-21). */
+		 * while driving 53-56 -> 59.6 fps (2026-10-21). It first waits up to
+		 * 8 ms for the frame before (Mesa patch 0006): frames the GPU had
+		 * not finished missed their vblank and went out in pairs. Frames
+		 * over 20 ms, 3 x 20 s per game (2026-10-22): depth 1 / 2 / 2+8 ms
+		 * DoA2 41 / 136 / 68, Le Mans 183 / 22 / 32, Crazy Taxi 12 / 4 /
+		 * 11, Shenmue II 13 / 11 / 10, same frame rates. */
 		if (!strcmp(session.system, "dreamcast") || !strcmp(session.system, "naomi") ||
-		    !strcmp(session.system, "atomiswave"))
+		    !strcmp(session.system, "atomiswave")) {
 			setenv("NUUBOS_THROTTLE_DEPTH", "2", 1);
+			setenv("NUUBOS_THROTTLE_SOFT_MS", "8", 1);
+		}
 		execv(RETROARCH_BIN, argv);
 		_exit(127);
 	}
@@ -3646,6 +3677,17 @@ static void request_quit(void)
 	 * while the quit state is written and the content closes, and its
 	 * audio stuttered meanwhile (user report 2026-10-18). */
 	ra_command("SET_MUTED 1");
+	/* Not while a screenshot is being written: RetroArch's state save
+	 * (whose thumbnail goes through the same screenshot path) then never
+	 * completed, the quit waited for its 10 s timeout and the progress was
+	 * not saved (2 of 3 quits right after a screenshot, 2026-10-22).
+	 * finish_screenshot() comes back here once the PNG is written (or its
+	 * 5 s timeout ran out). */
+	if (session.shot_fd > 0) {
+		session.quit_requested = true;
+		notify_subscribers();
+		return;
+	}
 	/* With slot rotation RetroArch's automatic slot is off: the progress
 	 * goes into the next slot first (once; a failed save still quits). */
 	if (session.settings.slot_rotation && !session.hardcore && !session.quit_saved) {
@@ -3839,6 +3881,8 @@ static void finish_screenshot(bool ok)
 	session.shot_fd = -1;
 	notify_screenshot(ok);
 	log_msg("emud: screenshot %s", ok ? "saved" : "failed");
+	if (session.quit_requested && session.state == SESSION_RUNNING)
+		request_quit();
 }
 
 /* RetroArch writes the PNG of its own rendering (never the composited

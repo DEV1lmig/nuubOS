@@ -104,3 +104,26 @@ mkdir -p "$TARGET_DIR/usr/share/nuubos"
 printf '%s\n' "$NUUBOS_BUILD" > "$TARGET_DIR/usr/share/nuubos/build-id"
 # OTA order (EPIC-048): a release is offered only above the running serial.
 echo "$NUUBOS_SERIAL" > "$TARGET_DIR/usr/share/nuubos/build-serial"
+# The bootloader (SPL + TF-A + U-Boot, one image for every H700 board) goes
+# with the system: an OTA-installed slot writes it to SD1 once it has
+# proven itself (nuubos-update-apply confirm), so firmware changes such as
+# deep sleep reach updated consoles too.
+if [ -f "$BINARIES_DIR/u-boot-sunxi-with-spl.bin" ]; then
+    install -D -m 0644 "$BINARIES_DIR/u-boot-sunxi-with-spl.bin" \
+        "$TARGET_DIR/usr/share/nuubos/bootloader/u-boot-sunxi-with-spl.bin"
+fi
+# udev's hardware database without the vendor/model name lists (PCI, USB,
+# OUI, ACPI, Bluetooth, FireWire: ~93% of it, ID_*_FROM_DATABASE names that
+# nothing in nuubOS reads). udevd reads hwdb.bin in full while the boot
+# waits for it (9.7 MB -> 0.2 MB; docs/dev/platform.md "Boot time"); the
+# input, sensor and autosuspend entries stay.
+HWDB_D="$TARGET_DIR/etc/udev/hwdb.d"
+if [ -d "$HWDB_D" ] && [ -x "$HOST_DIR/bin/udevadm" ]; then
+    rm -f "$HWDB_D/20-OUI.hwdb" \
+        "$HWDB_D/20-pci-vendor-model.hwdb" \
+        "$HWDB_D/20-usb-vendor-model.hwdb" \
+        "$HWDB_D/20-acpi-vendor.hwdb" \
+        "$HWDB_D/20-bluetooth-vendor-product.hwdb" \
+        "$HWDB_D/80-ieee1394-unit-function.hwdb"
+    "$HOST_DIR/bin/udevadm" hwdb --update --usr --root "$TARGET_DIR"
+fi

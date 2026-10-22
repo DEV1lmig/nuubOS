@@ -1,0 +1,54 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] sunxi: h700: record the cold-boot DRAM init time
+
+The diagnostic mode reports how the time before Linux splits: the SPL
+writes the system counter's milliseconds (running since the SoC reset)
+at the start and at the end of the cold-boot DRAM init into RTC GP5
+(low/high 16 bits). nuubos-suspend writes GP5 before every sleep, so
+BL31's sleep mode word never sees it; the resume path writes nothing.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/arch/arm/mach-sunxi/dram_sun50i_h616.c
++++ b/arch/arm/mach-sunxi/dram_sun50i_h616.c
+@@ -3562,6 +3562,23 @@
+ 	return sum;
+ }
+ 
++/*
++ * Boot timing for the diagnostic mode (docs/dev/platform.md "Boot time"):
++ * milliseconds of the system counter (24 MHz, running since the SoC
++ * reset) when the cold-boot DRAM init starts (low 16 bits) and ends (high
++ * 16 bits), in RTC GP5. nuubos-suspend writes GP5 before every sleep, so
++ * BL31 never sees this value.
++ */
++#define H700_BOOT_TIMES_REG		0x07000114UL
++
++static u32 h700_boot_ms(void)
++{
++	u64 count;
++
++	asm volatile("isb; mrs %0, cntpct_el0" : "=r"(count));
++	return (u32)(count / 24000);
++}
++
+ /* Universal standby resume (see H700_RESUME_FLAG). Never returns. */
+ static void __noreturn h700_resume(void)
+ {
+@@ -3646,6 +3663,7 @@
+ 
+ #ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
+ 	if (h700_vendor_select_profile()) {
++		u32 start_ms = h700_boot_ms();
+ 		unsigned int size_mib;
+ 		if (!h700_vendor_set_dram_voltage())
+ 			hang();
+@@ -3710,6 +3728,8 @@
+ 		 */
+ 		writel(0, (void *)0x070001f8UL);
+ 
++		writel((start_ms & 0xffff) | h700_boot_ms() << 16,
++		       (void *)H700_BOOT_TIMES_REG);
+ 		return (unsigned long)size_mib << 20;
+ 	}
+ #endif

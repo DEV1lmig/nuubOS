@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+# Diagnostic mode, end of boot (see S04nuubos-diagnostics): the late
+# hardware and network picture, into RAM (rcS writes the per-script boot
+# timing itself). With the mode off it only checks that no log escaped
+# S04's list.
+
+DIR=/run/nuubos/diagnostics
+
+case "$1" in
+start)
+    if [ ! -f "$DIR/active" ]; then
+        # Mode off: a log S04 did not know about goes to /dev/null too
+        # (its writer, if it keeps the file open, writes on into RAM until
+        # it reopens: add the name to S04's list).
+        for f in /run/nuubos/*.log; do
+            [ -f "$f" ] && [ ! -L "$f" ] && ln -sfn /dev/null "$f"
+        done
+        exit 0
+    fi
+    mkdir -p "$DIR/boot"
+    dmesg > "$DIR/boot/90-dmesg-late.txt" 2>&1
+    {
+        ip link; ip addr; ip route
+        iw dev 2>&1 || true
+    } > "$DIR/boot/91-network.txt" 2>&1
+    lsmod > "$DIR/boot/92-lsmod.txt" 2>&1
+    ps > "$DIR/boot/93-processes.txt" 2>&1
+    # The boot time the user sees (kernel start -> nuubUI ready, without
+    # the bootloader) and what the boot read from the card until then.
+    (
+        i=0
+        while [ ! -e /run/nuubos/ui-ready ] && [ "$i" -lt 1200 ]; do
+            sleep 0.05
+            i=$((i + 1))
+        done
+        read -r up _ < /proc/uptime
+        {
+            echo "ui_ready_uptime_s=$up"
+            grep ' mmcblk[0-9]p[0-9]* ' /proc/diskstats | \
+                awk '{ printf "%s reads=%s MB=%.1f read_ms=%s\n", $3, $4, $6 / 2048, $7 }'
+        } > "$DIR/boot/95-ui-ready.txt"
+    ) </dev/null >/dev/null 2>&1 &
+    # A bundle left by the last Restart / Power Off in diagnostic mode.
+    if [ -f /state/diagnostics/last-bundle ]; then
+        last="$(cat /state/diagnostics/last-bundle)"
+        rm -f /state/diagnostics/last-bundle
+        [ -f "$last" ] && /usr/bin/nuubos-notifyctl post diagnostics.bundle \
+            diagnostics.bundle.saved "path=$last" >/dev/null 2>&1
+    fi
+    ;;
+stop|restart|reload) ;;
+*) echo "Usage: $0 {start}"; exit 1 ;;
+esac
+exit 0

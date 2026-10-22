@@ -1,0 +1,16 @@
+#!/bin/sh
+# Counterpart of lifecycle-pre-power for Sleep: nuubos-systemd runs it after
+# every return from a suspend (woken or failed). Services that prepared for
+# the sleep in pre-power.d undo it here.
+
+HOOK_DIR=/usr/lib/nuubos/lifecycle-hooks/post-wake.d
+STATUS=0
+
+if [ -d "$HOOK_DIR" ]; then
+    for hook in "$HOOK_DIR"/*; do
+        [ -x "$hook" ] || continue
+        "$hook" wake || STATUS=1
+    done
+fi
+
+exit "$STATUS"

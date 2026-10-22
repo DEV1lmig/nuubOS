@@ -1438,7 +1438,10 @@ page('power', 'settings', () => C(813, 'Power'), async () => {
     row({ key: 'auto', title: C(53, 'Automatic Battery Saver'), value: Number(s['auto_battery.threshold']) ? '≤ ' + s['auto_battery.threshold'] + '%' : C(54, 'Off'), chevron: true,
       on: () => pickAndAct(C(53, 'Automatic Battery Saver'), [0, 10, 15, 20, 25, 30, 40, 50].map((v) => ({ value: String(v), label: v ? '≤ ' + v + '%' : C(54, 'Off') })), s['auto_battery.threshold'], 'system.autobattery') }),
     row({ key: 'sleep', title: C(56, 'Sleep After'), value: Number(s.sleep_after_min) ? s.sleep_after_min + C(215, ' min') : C(54, 'Off'), chevron: true,
-      on: () => pickAndAct(C(56, 'Sleep After'), [0, 1, 2, 5, 10, 15, 30, 45, 60, 120].map((v) => ({ value: String(v), label: v ? v + C(215, ' min') : C(54, 'Off') })), s.sleep_after_min, 'system.sleep') })),
+      on: () => pickAndAct(C(56, 'Sleep After'), [0, 1, 2, 5, 10, 15, 30, 45, 60, 120].map((v) => ({ value: String(v), label: v ? v + C(215, ' min') : C(54, 'Off') })), s.sleep_after_min, 'system.sleep') }),
+    row({ key: 'hypersleep', title: C(1347, 'HyperSleep'), toggle: s.hypersleep !== '0',
+      detail: s.hypersleep !== '0' ? C(1348, 'Almost no battery use. Wake with the power button.') : C(1349, 'START and the lid also wake it. Uses more battery.'),
+      set: (v) => act('system.hypersleep', { v: v ? '1' : '0' }, { topics: ['system'] }) })),
   section(C(814, 'BATTERY'), 'device'), group(
     ...(bstate === 'absent' ? [row({ key: 'charge', title: C(816, 'Charge'), value: C(1301, 'No battery') })] : [
     row({ key: 'charge', title: C(816, 'Charge'), value: s['battery.percent'] + '%', detail: bstate === 'charging' ? C(382, 'Charging') : bstate === 'full' ? C(383, 'Fully charged') : bstate === 'not-charging' ? C(819, 'Not charging') : C(818, 'Discharging') }),

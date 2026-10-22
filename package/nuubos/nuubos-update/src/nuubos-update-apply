@@ -14,6 +14,8 @@
 #   confirm            nuubUI reached its ready state: the new slot is kept;
 #                      the outcome of an update (installed / rolled back)
 #                      is announced once with a notification
+#                      ; then the bootloader this system ships is written
+#                      to SD1 when it differs (see bootloader below)
 #   status             slot= pending= trying= result= battery=ok|low end=1
 #
 # An installation needs the battery above MIN_BATTERY % (user request
@@ -44,6 +46,10 @@ TRIES=3
 MIN_BATTERY=30
 BATTERY_DIR="${NUUBOS_BATTERY_DIR:-/sys/class/power_supply}"
 MOUNT_DIR=/run/nuubos/update
+# SPL + TF-A + U-Boot as flashed by genimage (offset 8 KiB, before p1 at
+# 1 MiB); NUUBOS_TEST_DISK replaces SD1 with a file.
+BOOTLOADER="$R/usr/share/nuubos/bootloader/u-boot-sunxi-with-spl.bin"
+BOOTLOADER_OFFSET_KB=8
 
 . "${NUUBOS_PARTITIONS:-/usr/lib/nuubos/partitions.sh}"
 
@@ -259,6 +265,51 @@ announce()
     state_clear announce
 }
 
+# SHA-256 of the first SIZE bytes of the bootloader area of DISK.
+bootloader_on_disk()
+{
+    dd if="$1" bs=1024 skip="$BOOTLOADER_OFFSET_KB" count=$((($2 + 1023) / 1024)) 2>/dev/null |
+        head -c "$2" | sha256sum | cut -d' ' -f1
+}
+
+# The bootloader travels with the system (post-build.sh): a slot that has
+# reached nuubUI writes its own to SD1 when the card holds another one, so
+# firmware changes (TF-A deep sleep, U-Boot) reach updated consoles too.
+# There is no second copy to fall back on (the H616 BROM's backup location,
+# 256 KiB, overlaps the 745 KiB primary below p1): it is written only from
+# a proven system, only when it differs, with the battery above
+# MIN_BATTERY (else at a later boot), read back and written again once on
+# a mismatch. A rollback keeps the newer bootloader: it boots every slot.
+bootloader()
+{
+    [ -f "$BOOTLOADER" ] || return 0
+    if [ -n "${NUUBOS_TEST_DISK:-}" ]; then
+        disk="$NUUBOS_TEST_DISK"
+    else
+        disk="$(nuubos_boot_disk)" || return 0
+    fi
+    size="$(wc -c < "$BOOTLOADER")"
+    want="$(sha256sum < "$BOOTLOADER" | cut -d' ' -f1)"
+    [ "$(state_get bootloader)" = "$want" ] && return 0
+    if [ "$(bootloader_on_disk "$disk" "$size")" = "$want" ]; then
+        state_set bootloader "$want"
+        return 0
+    fi
+    battery_ok || { log "bootloader update postponed: battery low"; return 0; }
+    for attempt in 1 2; do
+        dd if="$BOOTLOADER" of="$disk" bs=1024 seek="$BOOTLOADER_OFFSET_KB" conv=notrunc,fsync 2>/dev/null
+        sync
+        [ -b "$disk" ] && blockdev --flushbufs "$disk" 2>/dev/null
+        if [ "$(bootloader_on_disk "$disk" "$size")" = "$want" ]; then
+            state_set bootloader "$want"
+            log "bootloader updated ($want)"
+            return 0
+        fi
+        log "bootloader read back mismatch (attempt $attempt)"
+    done
+    return 1
+}
+
 confirm()
 {
     running="$(running_slot)"
@@ -272,6 +323,7 @@ confirm()
         log "slot $running kept"
     fi
     announce
+    bootloader || log "bootloader update failed"
     echo OK
 }
 

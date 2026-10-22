@@ -135,6 +135,10 @@ struct audio_state {
 	bool screen_off;
 	bool media_playing;
 	bool speaker_parked;
+	/* Parked for a sleep (LIFECYCLE PARK, lifecycle pre-power hook) until
+	 * LIFECYCLE RESUME (post-wake hook): the codec powers down with the
+	 * amplifier already off, no pop. Nothing unparks it meanwhile. */
+	bool lifecycle_parked;
 
 	bool hdmi_known;
 	bool hdmi_available;
@@ -1834,6 +1838,8 @@ static void stop_test(struct audio_state *state)
 
 static void speaker_park(struct audio_state *state, bool park)
 {
+	if (!park && state->lifecycle_parked)
+		return;
 	if (park == state->speaker_parked)
 		return;
 	/* Unparked, the pin follows the headphone jack as the kernel sets
@@ -2399,6 +2405,21 @@ static void handle_command(struct audio_state *state,
 	if (strcmp(command, "TEST STATUS") == 0) {
 		snprintf(reply, reply_size, "%s\n",
 			 state->test_pid > 0 ? "playing" : "stopped");
+		return;
+	}
+
+	if (strcmp(command, "LIFECYCLE PARK") == 0) {
+		state->lifecycle_parked = true;
+		speaker_park(state, true);
+		snprintf(reply, reply_size,
+			 state->speaker_parked ? "OK\n" : "ERR park failed\n");
+		return;
+	}
+
+	if (strcmp(command, "LIFECYCLE RESUME") == 0) {
+		state->lifecycle_parked = false;
+		reconcile_speaker_park(state);
+		snprintf(reply, reply_size, "OK\n");
 		return;
 	}
 
@@ -3465,6 +3486,10 @@ int main(int argc, char **argv)
 	srand((unsigned int)(time(NULL) ^ getpid()));
 
 	load_config(&state);
+	/* At boot nuubos-pipewire-runtime leaves the speaker pin off until
+	 * now (the codec settles first, no power-up pop): the first
+	 * reconcile_speaker_park() then writes the real state. */
+	state.speaker_parked = true;
 	if (run_applications_volume_helper(&state, state.volume_applications) != 0)
 		fprintf(stderr, "nuubos-audiod: failed to apply Applications volume policy\n");
 	/* Hardware DAC stays at unity. Product master volume is handled in
@@ -3760,6 +3785,11 @@ int main(int argc, char **argv)
 	state.music_requested = false;
 	stop_music(&state);
 	stop_system_sound(&state);
+	/* Restart/Power Off (nuubos-systemd's mark): the amplifier goes off
+	 * before the codec loses power (pop). A plain service restart keeps
+	 * it as it is. */
+	if (access(RUN_MARK_DIR "/shutting-down", F_OK) == 0)
+		(void)set_codec_speaker_pin(false);
 	stop_child(&state.ui_anchor_pid);
 	if (state.volume_config_dirty)
 		(void)flush_volume_config(&state);

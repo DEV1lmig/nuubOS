@@ -1345,3 +1345,9 @@
 1344=Sync {0} as
 1345=Turn Off
 1346=Use the nuubOS Folder
+1347=HyperSleep
+1348=Almost no battery use. Wake with the power button.
+1349=START and the lid also wake it. Uses more battery.
+1350=Diagnostic Mode
+1351=Next {0} starts
+1352=Logs everything for the next 10 starts and saves a report at each restart or power off. Off by default: logging costs performance and card writes.

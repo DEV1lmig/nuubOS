@@ -1345,3 +1345,9 @@
 1344=Synkronoi {0} kohteena
 1345=Poista käytöstä
 1346=Käytä nuubOS-kansiota
+1347=HyperSleep
+1348=Lähes ei akunkulutusta. Herää virtapainikkeesta.
+1349=Herää myös START-painikkeesta ja kannesta. Kuluttaa enemmän akkua.
+1350=Diagnostiikkatila
+1351=Seuraavat {0} käynnistystä
+1352=Tallentaa kaikki lokit seuraavien 10 käynnistyksen ajan ja tallentaa raportin jokaisessa uudelleenkäynnistyksessä tai sammutuksessa. Oletuksena pois: lokit maksavat suorituskykyä ja kirjoituksia kortille.

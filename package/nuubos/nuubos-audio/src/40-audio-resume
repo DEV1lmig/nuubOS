@@ -1,0 +1,6 @@
+#!/bin/sh
+# After every return from sleep (see 40-audio-park). The codec powers up
+# again on resume: the amplifier comes back a moment later, once it has
+# settled (no wake-up pop), without holding the wake-up path.
+( sleep 1; exec /usr/bin/nuubos-audioctl lifecycle resume >/dev/null 2>&1 ) </dev/null >/dev/null 2>&1 &
+exit 0

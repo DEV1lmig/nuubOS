@@ -104,6 +104,7 @@
 #ifndef RUN_ROOT
 #define RUN_ROOT "/run/nuubos"
 #endif
+#define UI_READY RUN_ROOT "/ui-ready"
 #ifndef USERDATA_USERS
 #define USERDATA_USERS "/userdata/users"
 #endif
@@ -1318,7 +1319,9 @@ static void reconcile(void)
 		stop_child();
 		failed = false;
 	}
-	if (want && child <= 0 && !failed)
+	/* Not before nuubUI is ready: its start indexes the folders, and at
+	 * boot it slowed the UI coming up (boot audit 2026-10-22). */
+	if (want && child <= 0 && !failed && access(UI_READY, F_OK) == 0)
 		start_child(user);
 	/* The socket may already be there (an inotify event coalesced). */
 	if (child > 0 && !ready && access(GUI_SOCKET, F_OK) == 0)
@@ -1667,7 +1670,7 @@ int main(void)
 	struct sigaction sa;
 	pthread_t thread;
 	sigset_t block, old;
-	int in, l, gui_wd = -1;
+	int in, l, gui_wd = -1, ui_wd = -1;
 	FILE *fp;
 
 	if (pipe2(wake_pipe, O_CLOEXEC | O_NONBLOCK) != 0)
@@ -1702,6 +1705,9 @@ int main(void)
 	if (in < 0 || inotify_add_watch(in, USER_DIR, IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE | IN_CREATE) < 0 ||
 	    (gui_wd = inotify_add_watch(in, GUI_DIR, IN_CREATE)) < 0)
 		fprintf(stderr, "syncd: inotify unavailable\n");
+	/* Until nuubUI is ready (UI_READY): then the watch goes. */
+	if (in >= 0 && access(UI_READY, F_OK) != 0)
+		ui_wd = inotify_add_watch(in, RUN_ROOT, IN_CREATE | IN_MOVED_TO);
 	l = listener();
 	if (l < 0)
 		return 1;
@@ -1750,7 +1756,13 @@ int main(void)
 					for (char *q = buf; q < buf + len;) {
 						const struct inotify_event *ev = (const struct inotify_event *)q;
 
-						if (ev->wd != gui_wd || (ev->len && !strcmp(ev->name, GUI_NAME)))
+						if (ev->wd == ui_wd) {
+							if (ev->len && !strcmp(ev->name, "ui-ready")) {
+								inotify_rm_watch(in, ui_wd);
+								ui_wd = -1;
+								changed = true;
+							}
+						} else if (ev->wd != gui_wd || (ev->len && !strcmp(ev->name, GUI_NAME)))
 							changed = true;
 						q += sizeof(*ev) + ev->len;
 					}

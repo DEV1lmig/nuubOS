@@ -5,12 +5,15 @@
 ################################################################################
 
 # FAKE-08 (PICO-8 compatible). Pinned upstream commit; part of the
-# default H700 core matrix (package/libretro/README.md).
+# default H700 core matrix (package/libretro/README.md). Bundled as
+# FAKE-08-nuubOS (fake08_nuubos): the Lua interpreter optimized
+# (docs/dev/emulation.md "Saturn, PICO-8, overscan").
 LIBRETRO_FAKE08_VERSION = 814991a2571ad3970e386cef48f3b148aa1c27b9
 LIBRETRO_FAKE08_SITE = https://github.com/jtothebell/fake-08.git
 LIBRETRO_FAKE08_SITE_METHOD = git
 LIBRETRO_FAKE08_GIT_SUBMODULES = YES
 LIBRETRO_FAKE08_LICENSE = MIT
+LIBRETRO_FAKE08_DEPENDENCIES = libretro-core-info
 LIBRETRO_FAKE08_LICENSE_FILES = LICENSE.MD
 
 define LIBRETRO_FAKE08_BUILD_CMDS
@@ -19,8 +22,7 @@ define LIBRETRO_FAKE08_BUILD_CMDS
 endef
 
 define LIBRETRO_FAKE08_INSTALL_TARGET_CMDS
-	$(INSTALL) -D -m 0755 $(@D)/platform/libretro/fake08_libretro.so \
-		$(TARGET_DIR)/usr/lib/libretro/fake08_libretro.so
+	$(call LIBRETRO_NUUBOS_CORE_INSTALL,fake08,fake08_nuubos,$(@D)/platform/libretro/fake08_libretro.so)
 endef
 
 $(eval $(generic-package))

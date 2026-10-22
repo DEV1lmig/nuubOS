@@ -29,4 +29,12 @@ define NUUBUI_HOME_INSTALL_NOTICES
 endef
 NUUBUI_HOME_POST_INSTALL_TARGET_HOOKS += NUUBUI_HOME_INSTALL_NOTICES
 
+# Cargo.toml's release profile (LTO, one codegen unit) is what we ship:
+# Buildroot exports CARGO_PROFILE_RELEASE_LTO=false and CODEGEN_UNITS=16,
+# and the environment beats Cargo.toml. The binary is read from the card
+# at every boot (docs/dev/platform.md "Boot time").
+NUUBUI_HOME_CARGO_ENV = \
+	CARGO_PROFILE_RELEASE_LTO="true" \
+	CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1"
+
 $(eval $(cargo-package))

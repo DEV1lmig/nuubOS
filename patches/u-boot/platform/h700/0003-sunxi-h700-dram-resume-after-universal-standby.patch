@@ -1,0 +1,317 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] sunxi: h700: resume the DRAM after a universal standby
+
+BL31 (its patch 0004) powers the SoC off with the DRAM in self-refresh
+and its pads held. The next start is a cold boot: when RTC GP0 holds
+"NUSR", the SPL clears it first (one attempt only), re-runs the final
+core init with the geometry and runtime parameters published at the last
+cold boot (RTC GP1-GP4, size in GP7) in resume mode, like the vendor
+boot0 with its 0x1f8 standby flag: INIT0 skips the SDRAM init and the
+pads are released only after DFI init, right before self-refresh exit.
+No scan and no memory test on that path. It then puts back the two DRAM
+areas the training overwrites from BL31's resume block (magic and
+checksum checked) and jumps to BL31's resume entry. Any failure resets:
+the next start is an ordinary cold boot. RTC GP6 = 0x5a5a001N steps,
+0x5a5a00fN failures.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/arch/arm/include/asm/arch-sunxi/dram_sun50i_h616.h
++++ b/arch/arm/include/asm/arch-sunxi/dram_sun50i_h616.h
+@@ -195,6 +195,13 @@
+ 	u8 bus_full_width;
+ };
+ 
++/*
++ * A DRAM resume after a universal standby (dram_sun50i_h616.c), or the
++ * vendor boot0 standby flag in RTC 0x1f8: INIT0 then skips the SDRAM
++ * initialisation.
++ */
++bool h700_dram_resuming(void);
++
+ #define H616_PHY_INIT_LEN	27
+ 
+ static inline int ns_to_t(const struct dram_para *para, int nanoseconds)
+--- a/arch/arm/mach-sunxi/dram_sun50i_h616.c
++++ b/arch/arm/mach-sunxi/dram_sun50i_h616.c
+@@ -28,6 +28,7 @@
+ #include <axp_pmic.h>
+ #include <asm/gpio.h>
+ #include <hang.h>
++#include <cpu_func.h>
+ #endif
+ 
+ enum {
+@@ -123,6 +124,57 @@
+ 	.active = 0xff,
+ };
+ 
++/*
++ * nuubOS universal standby (the vendor "super standby", user request
++ * 2026-10-22: sleep near 0 % per hour): BL31 leaves the DRAM in
++ * self-refresh with its pads held (RTC 0x1f4 bit0 clear) and has the
++ * PMIC switch VDD-CPU, VDD-SYS and VCC-IO off. The power key powers the
++ * SoC on again: this SPL then finds H700_RESUME_FLAG in the RTC, brings
++ * the DRAM back like the vendor boot0 resume path (INIT0 skips the SDRAM
++ * init, the controller starts in self-refresh, the pads are released
++ * after DFI init) with the geometry found at the last cold boot, puts
++ * back the two DRAM areas the training overwrites and jumps to BL31's
++ * resume entry. The RTC domain stays powered; DRAM is never scanned or
++ * tested on that path. Any failure resets: the flag is cleared before
++ * anything else, so the next start is an ordinary cold boot.
++ */
++#define H700_RESUME_FLAG		0x07000100UL	/* RTC GP0 */
++#define H700_RESUME_PARA1		0x07000104UL	/* RTC GP1 */
++#define H700_RESUME_PARA2		0x07000108UL	/* RTC GP2 */
++#define H700_RESUME_TPR13		0x0700010cUL	/* RTC GP3 */
++#define H700_RESUME_GEOMETRY		0x07000110UL	/* RTC GP4 */
++#define H700_RESUME_SIZE		0x0700011cUL	/* RTC GP7, MiB */
++#define H700_RESUME_MAGIC		0x4e555352	/* "NUSR" */
++/* Written by BL31 in its reserved DRAM (0x40000000-0x4003ffff). */
++#define H700_RESUME_BLOCK		0x4003c000UL
++#define H700_RESUME_BLOCK_MAGIC		0x4e55424c	/* "NUBL" */
++#define H700_RESUME_SAVE_SIZE		0x1000
++
++struct h700_resume_block {
++	u32 magic;
++	u32 entry_lo;
++	u32 entry_hi;
++	u32 half;		/* DRAM address of the second saved area */
++	u32 checksum;		/* sum of the words above and of both areas */
++};
++
++static bool h700_resume_mode __section(".data");
++
++bool h700_dram_resuming(void)
++{
++	return h700_resume_mode || (readl((void *)0x070001f8UL) >> 16);
++}
++
++/* The geometry and runtime parameters of the final core init. */
++static void h700_publish_resume_state(const struct dram_config *config)
++{
++	writel(h700_dram_runtime.current_para1, (void *)H700_RESUME_PARA1);
++	writel(h700_dram_runtime.current_para2, (void *)H700_RESUME_PARA2);
++	writel(h700_dram_runtime.current_tpr13, (void *)H700_RESUME_TPR13);
++	writel(config->cols | config->rows << 8 | config->ranks << 16 |
++	       config->bus_full_width << 24, (void *)H700_RESUME_GEOMETRY);
++}
++
+ #endif
+ 
+ static void mctl_sys_init(u32 clk_rate)
+@@ -198,7 +250,8 @@
+ 		udelay(5);
+ 		writel(0x8000, &mctl_ctl->clken);
+ 
+-		if (!(readl((void *)0x070001f8UL) >> 16))
++		/* Resume: the DRAM pads stay held until it leaves self-refresh. */
++		if (!h700_resume_mode && !(readl((void *)0x070001f8UL) >> 16))
+ 			setbits_le32((void *)0x070001f4UL, BIT(0));
+ 	}
+ #else
+@@ -1406,8 +1459,13 @@
+ 	writel(0x37, SUNXI_DRAM_PHY0_BASE + 0x58);
+ 
+ #ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
+-	/* boot0 0x2593c: restore the H700 PHY gate before DFI init. */
+-	setbits_le32((void *)0x070001f4UL, BIT(0));
++	/*
++	 * boot0 0x2593c: restore the H700 PHY gate before DFI init. On a
++	 * resume the vendor firmware releases it only once DFI init is done,
++	 * right before leaving self-refresh (below).
++	 */
++	if (!h700_resume_mode)
++		setbits_le32((void *)0x070001f4UL, BIT(0));
+ 	/*
+ 	 * boot0 0x24ba8 starts DFI/MR initialisation by enabling
+ 	 * CTL.CLKEN[8].  Do this here, after 0x25818 PHY setup,
+@@ -1428,6 +1486,10 @@
+ 	writel(0, &mctl_ctl->swctl);
+ 	clrbits_le32(&mctl_ctl->dfimisc, 0x20);
+ 
++#ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
++	if (h700_resume_mode)
++		setbits_le32((void *)0x070001f4UL, BIT(0));
++#endif
+ 	clrbits_le32(&mctl_ctl->pwrctl, 0x20);
+ 	writel(1, &mctl_ctl->swctl);
+ 	mctl_await_completion(&mctl_ctl->swstat, 1, 1);
+@@ -3485,6 +3547,94 @@
+ 
+ #endif /* CONFIG_NUUBOS_H700_VENDOR_DRAM */
+ 
++#ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
++/* RTC GP6, shared with BL31's standby steps: 0x5a5a001N / 0x5a5a00fN. */
++#define H700_RESUME_STEP_REG		0x07000118UL
++
++static u32 h700_resume_sum(const struct h700_resume_block *blk)
++{
++	const u32 *w = (const u32 *)(H700_RESUME_BLOCK + H700_RESUME_SAVE_SIZE);
++	u32 sum = blk->magic + blk->entry_lo + blk->entry_hi + blk->half;
++	unsigned int i;
++
++	for (i = 0; i < 2 * H700_RESUME_SAVE_SIZE / 4; i++)
++		sum += w[i];
++	return sum;
++}
++
++/* Universal standby resume (see H700_RESUME_FLAG). Never returns. */
++static void __noreturn h700_resume(void)
++{
++	const struct h700_resume_block *blk = (void *)H700_RESUME_BLOCK;
++	u32 geometry = readl((void *)H700_RESUME_GEOMETRY);
++	u32 size_mib = readl((void *)H700_RESUME_SIZE);
++	struct dram_config config;
++	uintptr_t entry, half;
++	bool ok;
++
++	/* One attempt only: whatever happens next, the following start is
++	 * an ordinary cold boot. */
++	writel(0, (void *)H700_RESUME_FLAG);
++	writel(0x5a5a0010, (void *)H700_RESUME_STEP_REG);
++
++	config.cols = geometry & 0xff;
++	config.rows = (geometry >> 8) & 0xff;
++	config.ranks = (geometry >> 16) & 0xff;
++	config.bus_full_width = (geometry >> 24) & 0xff;
++	h700_dram_runtime.current_para1 = readl((void *)H700_RESUME_PARA1);
++	h700_dram_runtime.current_para2 = readl((void *)H700_RESUME_PARA2);
++	h700_dram_runtime.current_tpr13 = readl((void *)H700_RESUME_TPR13);
++	if (!config.cols || !config.rows || size_mib < 128 || size_mib > 4096) {
++		writel(0x5a5a00f0, (void *)H700_RESUME_STEP_REG);
++		reset_cpu();
++	}
++
++	h700_resume_mode = true;
++	ok = mctl_core_init(&para, &config);
++	h700_resume_mode = false;
++	if (!ok) {
++		writel(0x5a5a00f1, (void *)H700_RESUME_STEP_REG);
++		reset_cpu();
++	}
++	if (!(h700_dram_runtime.current_tpr13 & BIT(27)))
++		mctl_set_master_priority();
++	writel(0x5a5a0011, (void *)H700_RESUME_STEP_REG);
++
++	half = CFG_SYS_SDRAM_BASE + ((uintptr_t)size_mib << 19);
++	if (blk->magic != H700_RESUME_BLOCK_MAGIC || blk->half != half ||
++	    h700_resume_sum(blk) != blk->checksum) {
++		writel(blk->magic == H700_RESUME_BLOCK_MAGIC ? 0x5a5a00f3 :
++		       0x5a5a00f2, (void *)H700_RESUME_STEP_REG);
++		reset_cpu();
++	}
++
++	/* What the training overwrote: the start of BL31 and of the half. */
++	memcpy((void *)CFG_SYS_SDRAM_BASE,
++	       (void *)(H700_RESUME_BLOCK + H700_RESUME_SAVE_SIZE),
++	       H700_RESUME_SAVE_SIZE);
++	memcpy((void *)half,
++	       (void *)(H700_RESUME_BLOCK + 2 * H700_RESUME_SAVE_SIZE),
++	       H700_RESUME_SAVE_SIZE);
++	entry = (uintptr_t)blk->entry_lo | (uintptr_t)blk->entry_hi << 32;
++	writel(0x5a5a0012, (void *)H700_RESUME_STEP_REG);
++
++	flush_dcache_all();
++	asm volatile(
++		"mrs	x1, sctlr_el3\n"
++		"bic	x1, x1, #(1 << 0)\n"
++		"bic	x1, x1, #(1 << 2)\n"
++		"msr	sctlr_el3, x1\n"
++		"isb\n"
++		"ic	iallu\n"
++		"tlbi	alle3\n"
++		"dsb	sy\n"
++		"isb\n"
++		"br	%0\n"
++		: : "r"(entry) : "x1", "memory");
++	unreachable();
++}
++#endif
++
+ unsigned long sunxi_dram_init(void)
+ {
+ 	void *const prcm = (void *)SUNXI_PRCM_BASE;
+@@ -3503,6 +3653,10 @@
+ 		if (!h700_vendor_config(&config))
+ 			hang();
+ 
++		/* Universal standby: never scan or test the DRAM here. */
++		if (readl((void *)H700_RESUME_FLAG) == H700_RESUME_MAGIC)
++			h700_resume();
++
+ 		/*
+ 		 * TPR13 bit11 selects the vendor DST wrapper.  Profiles which do
+ 		 * not request DST still use the vendor autoscan and final raw
+@@ -3519,11 +3673,13 @@
+ 		}
+ 
+ 		/* boot0 performs one final core init with the discovered geometry. */
++		h700_publish_resume_state(&config);
+ 		if (!mctl_core_init(&para, &config))
+ 			hang();
+ 		size_mib = h700_vendor_finalize_size();
+ 		if (!size_mib)
+ 			hang();
++		writel(size_mib, (void *)H700_RESUME_SIZE);
+ 
+ 		if (!(h700_dram_runtime.current_tpr13 & BIT(27)))
+ 			mctl_set_master_priority();
+@@ -3533,11 +3689,13 @@
+ 		 * retest is permitted before declaring the DRAM unusable.
+ 		 */
+ 		if (!h700_vendor_final_memtest(size_mib)) {
++			h700_publish_resume_state(&config);
+ 			if (!mctl_core_init(&para, &config))
+ 				hang();
+ 			size_mib = h700_vendor_finalize_size();
+ 			if (!size_mib)
+ 				hang();
++			writel(size_mib, (void *)H700_RESUME_SIZE);
+ 			if (!(h700_dram_runtime.current_tpr13 & BIT(27)))
+ 				mctl_set_master_priority();
+ 			if (!h700_vendor_final_memtest(size_mib))
+--- a/arch/arm/mach-sunxi/dram_timings/h616_ddr3_1333.c
++++ b/arch/arm/mach-sunxi/dram_timings/h616_ddr3_1333.c
+@@ -116,7 +116,7 @@
+ 
+ 	/* boot0 common INIT/DFI registers are not banked. */
+ 	clrsetbits_le32(&common_ctl->init[0], 0xc0000fff,
+-			 0x112 | ((readl((void *)0x070001f8UL) >> 16) ?
++			 0x112 | (h700_dram_resuming() ?
+ 				  BIT(30) : 0));
+ 	writel(0x00420000, &common_ctl->init[1]);
+ 	clrsetbits_le32(&common_ctl->init[2], 0xff0f, 0x0d05);
+--- a/arch/arm/mach-sunxi/dram_timings/h616_lpddr3.c
++++ b/arch/arm/mach-sunxi/dram_timings/h616_lpddr3.c
+@@ -94,7 +94,7 @@
+ 	/* boot0 0x26b28..0x26d62: INIT0/1/2 and DFIMISC are common. */
+ 	clrsetbits_le32(&common_ctl->init[0], 0xc3ff0fff,
+ 			0x004f0112 |
+-			((readl((void *)0x070001f8UL) >> 16) ? BIT(30) : 0));
++			(h700_dram_resuming() ? BIT(30) : 0));
+ 	writel(0x00420000, &common_ctl->init[1]);
+ 	clrsetbits_le32(&common_ctl->init[2], 0xff0f, 0x0d05);
+ 	writel(0, &common_ctl->dfimisc);
+--- a/arch/arm/mach-sunxi/dram_timings/h616_lpddr4_2133.c
++++ b/arch/arm/mach-sunxi/dram_timings/h616_lpddr4_2133.c
+@@ -112,7 +112,7 @@
+ #ifdef CONFIG_NUUBOS_H700_VENDOR_DRAM
+ 	/* boot0 0x26d2c..0x26d62: these registers are not banked. */
+ 	clrsetbits_le32(&common_ctl->init[0], 0xc0000fff,
+-		       0x3f0 | ((readl((void *)0x070001f8UL) >> 16) ?
++		       0x3f0 | (h700_dram_resuming() ?
+ 				BIT(30) : 0));
+ 	writel(0x01f20000, &common_ctl->init[1]);
+ 	clrsetbits_le32(&common_ctl->init[2], 0xff0f, 0x0d05);
+--- a/arch/arm/mach-sunxi/dram_timings/h700_ddr4.c
++++ b/arch/arm/mach-sunxi/dram_timings/h700_ddr4.c
+@@ -78,7 +78,7 @@
+ 
+ 	/* boot0 0x26b28..0x26d62: these registers are common, not banked. */
+ 	clrsetbits_le32(&common_ctl->init[0], 0xc0000fff,
+-			 0x112 | ((readl((void *)0x070001f8UL) >> 16) ?
++			 0x112 | (h700_dram_resuming() ?
+ 				  BIT(30) : 0));
+ 	writel(0x01f20000, &common_ctl->init[1]);
+ 	clrsetbits_le32(&common_ctl->init[2], 0xff0f, 0x0d05);

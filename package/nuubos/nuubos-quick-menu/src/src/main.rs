@@ -2040,6 +2040,10 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
             format!("nuubOS {}", n.text("version")), -1),
         "update.rolledback" => (ICON_FAILED, SEVERITY_WARNING, tr(ui, 990, "The update could not be installed"),
             tr(ui, 658, "The previous version was restored"), -1),
+        /* Diagnostic mode: the report of the last Restart / Power Off
+         * (S99nuubos-diagnostics at the next start). */
+        "diagnostics.bundle.saved" => (ICON_DONE, SEVERITY_SUCCESS, tr(ui, 502, "Report saved"),
+            n.text("path").rsplit('/').next().unwrap_or("").to_owned(), -1),
         "game.storage_lost" => (ICON_STORAGE, SEVERITY_WARNING, tr(ui, 961, "SD2 removed: game saved and closed"), String::new(), -1),
         _ => return None,
     };

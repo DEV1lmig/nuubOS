@@ -1,0 +1,1088 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] allwinner: h616: universal standby (SoC powered off)
+
+Deep sleep (0003) keeps VDD-SYS, the DRAM controller and PLL_DDR running:
+~3-4 % battery per hour measured on the RG CubeXX. Like the vendor
+sun50iw9 firmware's "super standby" (universal-standby in its DT), this
+leaves the DRAM in self-refresh with its pads held (RTC 0x1f4 bit0) and
+has the AXP717 switch VDD-CPU (DCDC1), VDD-SYS (DCDC2), VCC-IO (CLDO3)
+and the speaker amplifier supply (CLDO1: its enable pin floats with
+VCC-IO off and it popped) off in its sleep state (SLEEP_CFG 0x25 = 0x2d, AUTO_SLP_MAP 0x28-0x2a,
+then 0x25 = 0x6d written from SRAM once the DRAM is in self-refresh).
+The rails still enabled but unused with the SoC off go too, each
+qualified alone (DCDC4, ALDO1 HDMI, ALDO4 avcc; not BLDO2 vcc-pll: the
+DRAM loses its content without it); their enable bits are written back
+as Linux left them on resume.
+Only the power key (and a critical battery) wakes the PMIC, which powers
+the SoC up again as a cold start: U-Boot SPL resumes the DRAM (its patch
+0003) and jumps to sunxi_universal_resume_entry, which re-enters the
+PSCI warm boot path.
+
+Saved before and written back after: CCU (PLLs first, U-Boot owns DRAM
+and MBUS), PIO and R_PIO, R_PRCM, system control, timers 0/1 (Linux's
+broadcast tick waits for timer 1), and, with their bus clock forced on,
+the display clocks/mapping/mixer top, TCON TOP, both TCONs (dot clock
+divider), PWM (backlight, LED, rumble), GPADC (analog sticks), the audio
+codec (mixer controls: the speaker was silent after a wake) and the
+IOMMU (programmed like sun50i_iommu_enable(), enable last). Then the
+security setup, the CPU entry points, the CPUIDLE controller and the GIC
+distributor are set up again; the NMI (PMIC IRQ line) is re-armed by
+writing its pending bit, as Linux's sunxi-nmi does at probe (without it
+no PMIC interrupt reached Linux: the power key stopped working), and the
+EINT status latched while the pins were restored is cleared (Linux read
+those edges as key presses: a Confirm launched a game). The resume block
+(entry point, the two 4 KiB DRAM areas the training overwrites,
+checksum) lies past BL31 in its reserved region; BL31 maps it and the
+DRAM half.
+
+Falls back to deep sleep when U-Boot published no DRAM state, the PMIC
+cannot be armed or the DRAM does not enter self-refresh. RTC GP5, written
+by nuubos-suspend before each suspend, selects the mode: 0x5170c0de =
+quick resume (deep sleep: the SoC stays powered, START and a lid wake it
+too), 0x57d0057d = watchdog reset instead of the PMIC sleep (development
+aid), 0x5a3eNNNN = universal standby with NNNN as the optional rail set
+(development aid), anything else = universal standby. RTC GP6 holds the last step
+(0x5a5a002N entry, 0x3N resume).
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/plat/allwinner/common/include/platform_def.h
++++ b/plat/allwinner/common/include/platform_def.h
+@@ -18,7 +18,8 @@
+ #define BL31_BASE			SUNXI_DRAM_BASE
+ #define BL31_LIMIT			(SUNXI_DRAM_BASE + 0x40000)
+ 
+-#define MAX_XLAT_TABLES			4
++/* +1: the universal standby resume mappings (sunxi_native_pm.c). */
++#define MAX_XLAT_TABLES			5
+ #define PLAT_VIRT_ADDR_SPACE_SIZE	(1ULL << 32)
+ 
+ #define SUNXI_BL33_VIRT_BASE		PRELOADED_BL33_BASE
+@@ -52,7 +53,8 @@
+ #define CACHE_WRITEBACK_GRANULE		(1 << CACHE_WRITEBACK_SHIFT)
+ 
+ #define MAX_STATIC_MMAP_REGIONS		3
+-#define MAX_MMAP_REGIONS		(5 + MAX_STATIC_MMAP_REGIONS)
++/* +2: the universal standby resume block and DRAM half (H616). */
++#define MAX_MMAP_REGIONS		(7 + MAX_STATIC_MMAP_REGIONS)
+ 
+ #define PLAT_CSS_SCP_COM_SHARED_MEM_BASE \
+ 	(SUNXI_SRAM_A2_BASE + SUNXI_SRAM_A2_SIZE - 0x200)
+--- a/plat/allwinner/common/include/sunxi_private.h
++++ b/plat/allwinner/common/include/sunxi_private.h
+@@ -25,6 +25,10 @@
+ #ifdef PLAT_sun50i_h616
+ int sunxi_pmic_vdd_cpu_suspend(void);
+ void sunxi_pmic_vdd_cpu_resume(int saved);
++int sunxi_pmic_standby_prepare(int extra_map);
++void sunxi_pmic_standby_resume(void);
++void sunxi_program_rvbar(void);
++void sunxi_resume_mmap(void);
+ #endif
+ 
+ #if SUNXI_PSCI_USE_NATIVE
+--- a/plat/allwinner/common/sunxi_common.c
++++ b/plat/allwinner/common/sunxi_common.c
+@@ -56,6 +56,9 @@
+ #endif
+ 
+ 	mmap_add(sunxi_mmap);
++#ifdef PLAT_sun50i_h616
++	sunxi_resume_mmap();
++#endif
+ 	init_xlat_tables();
+ 
+ 	enable_mmu_el3(0);
+--- a/plat/allwinner/common/sunxi_native_pm.c
++++ b/plat/allwinner/common/sunxi_native_pm.c
+@@ -7,11 +7,14 @@
+ #include <string.h>
+ 
+ #include <arch_helpers.h>
++#include <common/bl_common.h>
+ #include <common/debug.h>
+ #include <drivers/arm/gicv2.h>
+ #include <drivers/delay_timer.h>
+ #include <lib/mmio.h>
+ #include <lib/psci/psci.h>
++#include <lib/xlat_tables/xlat_tables_v2.h>
++#include <platform_def.h>
+ 
+ #include <sunxi_mmap.h>
+ #include <sunxi_private.h>
+@@ -56,6 +59,470 @@
+ /* RTC general purpose register 5: VDD-CPU step result, for diagnosis. */
+ #define SUNXI_SUSPEND_VDD_REG		0x07000114
+ 
++/*
++ * Universal standby (the vendor "super standby", user request 2026-10-22:
++ * sleep must cost a few tenths of a percent per hour at most). Deep sleep
++ * above keeps the SoC powered (~3-4 %/h measured on the CubeXX): here the
++ * DRAM stays in self-refresh with its pads held and the PMIC switches
++ * VDD-CPU, VDD-SYS and VCC-IO off. Only a PMIC IRQ (the power key, a
++ * critical battery) powers the SoC up again, as a cold start: U-Boot SPL
++ * finds SUNXI_RESUME_FLAG, resumes the DRAM with the geometry of the last
++ * cold boot, puts back the two DRAM areas its training overwrites (saved
++ * here in the resume block) and jumps to sunxi_universal_resume_entry,
++ * which re-enters the PSCI warm boot path. Everything VDD-SYS held that
++ * Linux expects to find again (clocks, pin setup, PRCM, system control)
++ * is saved here and written back in sunxi_pwr_domain_suspend_finish(),
++ * then the GIC, the security setup, the CPU entry points and the CPUIDLE
++ * controller are set up again. Linux saves and restores the GIC
++ * distributor itself (CPU cluster PM notifiers).
++ */
++#define SUNXI_RESUME_FLAG_REG		0x07000100	/* RTC GP0 */
++#define SUNXI_RESUME_FLAG_MAGIC		0x4e555352	/* "NUSR" */
++#define SUNXI_RESUME_GEOMETRY_REG	0x07000110	/* RTC GP4, U-Boot */
++#define SUNXI_RESUME_SIZE_REG		0x0700011c	/* RTC GP7, MiB */
++/* RTC GP5, written by nuubos-suspend before each suspend: the sleep mode.
++ * SUNXI_RESUME_MODE_QUICK keeps the SoC powered (deep sleep: START and a
++ * lid wake it too); SUNXI_RESUME_TEST_WDOG (development aid) resets with
++ * the watchdog instead of the PMIC sleep, so the resume path runs without
++ * anyone pressing the power key; SUNXI_RESUME_TEST_MAP | map (development
++ * aid) is the universal standby with the low 16 bits as the optional rail
++ * set (AUTO_SLP_MAP 0 | 1 << 8, sunxi_power.c) instead of the default;
++ * anything else is the universal standby. */
++#define SUNXI_RESUME_TEST_REG		0x07000114
++#define SUNXI_RESUME_MODE_QUICK		0x5170c0de
++#define SUNXI_RESUME_TEST_WDOG		0x57d0057d
++#define SUNXI_RESUME_TEST_MAP		0x5a3e0000
++/* RTC GP6: standby/resume step, shared with the SRAM code and U-Boot. */
++#define SUNXI_RESUME_STEP_REG		0x07000118
++#define SUNXI_RESUME_BLOCK		0x4003c000UL
++#define SUNXI_RESUME_BLOCK_MAGIC	0x4e55424c	/* "NUBL" */
++#define SUNXI_RESUME_SAVE_SIZE		0x1000
++
++struct sunxi_resume_block {
++	uint32_t magic;
++	uint32_t entry_lo;
++	uint32_t entry_hi;
++	uint32_t half;
++	uint32_t checksum;
++};
++
++extern const char sunxi_universal_sram[], sunxi_universal_sram_end[];
++int sunxi_universal_suspend_wfi(uintptr_t sram_entry, unsigned long mode);
++void sunxi_universal_resume_entry(void);
++
++#define SUNXI_CCU_PLL_DDR0		0x010
++#define SUNXI_CCU_PLL_DDR1		0x018
++#define SUNXI_CCU_PLL_DDR0_PAT		0x110
++#define SUNXI_CCU_PLL_DDR1_PAT		0x118
++#define SUNXI_CCU_MBUS			0x540
++#define SUNXI_CCU_DRAM_CLK		0x800
++#define SUNXI_CCU_DRAM_BGR		0x80c
++#define SUNXI_CCU_SEC_SWITCH		0xf00
++#define SUNXI_PIO_BANKS			9
++#define SUNXI_PIO_BANK_SIZE		0x24
++#define SUNXI_PIO_EINT_BASE		0x200
++#define SUNXI_PIO_EINT_SIZE		0x20
++#define SUNXI_PIO_EINT_STATUS		0x14
++#define SUNXI_PIO_POW_BASE		0x340
++#define SUNXI_R_PRCM_NMI_PENDING	0x324
++#define SUNXI_R_PRCM_SEC_SWITCH		0x290
++
++static uint32_t sunxi_saved_ccu[0x1000 / 4];
++static uint32_t sunxi_saved_pio[0x400 / 4];
++static uint32_t sunxi_saved_r_pio[0x400 / 4];
++static uint32_t sunxi_saved_r_prcm[0x400 / 4];
++static uint32_t sunxi_saved_syscon[0x100 / 4];
++/* Timers 0 and 1 (Linux's broadcast tick and its free-running reference:
++ * sun4i-timer waits for timer 1 to move); the watchdog after them is not
++ * part of it. */
++#define SUNXI_TIMER_BASE		0x03009000
++#define SUNXI_TIMER_IRQ_EN		0x00
++#define SUNXI_TIMER_CTL(n)		(0x10 * ((n) + 1))
++#define SUNXI_TIMER_INTV(n)		(0x10 * ((n) + 1) + 4)
++#define SUNXI_TIMER_CTL_ENABLE		BIT(0)
++#define SUNXI_TIMER_CTL_RELOAD		BIT(1)
++static uint32_t sunxi_saved_timer[0x30 / 4];
++
++/*
++ * Display and IOMMU state Linux sets up once when its drivers bind (DE33
++ * clock gates/resets, channel/port mapping and mixer top: display_clocks
++ * at 0x1008000; TCON TOP muxes; TCON dot clock dividers) and the IOMMU
++ * programming. Read and
++ * written with the block's bus clock forced on (an access to a gated
++ * display block can stall the bus).
++ */
++struct sunxi_gated_block {
++	uintptr_t base;
++	unsigned int size;
++	unsigned int bgr;	/* CCU bus gate (bit 0) / reset (bit 16) */
++	unsigned int mod;	/* CCU module clock (bit 31), 0 if none */
++	uint32_t *buf;
++};
++
++static uint32_t sunxi_saved_de[0x200 / 4];
++static uint32_t sunxi_saved_tcon_top[0x40 / 4];
++static uint32_t sunxi_saved_iommu[0x110 / 4];
++/* TCONs: their dot clock divider (TCON0_DCLK) lives here, and Linux's
++ * clock framework does not write it again for an unchanged rate. */
++static uint32_t sunxi_saved_tcon_lcd0[0x200 / 4];
++static uint32_t sunxi_saved_tcon_tv0[0x200 / 4];
++/* PWM (backlight, power LED, rumble): the PWM core does not write a state
++ * it already applied, so a channel would stay at its reset value. */
++#define SUNXI_PWM_BASE			0x0300a000
++#define SUNXI_PWM_PER			0x40
++static uint32_t sunxi_saved_pwm[0x140 / 4];
++/* GPADC (analog sticks): mode and calibration set at probe only. Only its
++ * configuration registers, never status or data. */
++#define SUNXI_GPADC_BASE		0x05070000
++static uint32_t sunxi_saved_gpadc[0x80 / 4];
++/* Audio codec: Linux writes its mixer controls (DAC and Line Out volume
++ * and switches, routes) only when they change, and its regmap has no
++ * cache to sync: without this the speaker stayed silent. Never the FIFO
++ * status, TX data or sample counter. */
++#define SUNXI_CODEC_BASE		0x05096000
++#define SUNXI_CODEC_DAC_DPC		0x000
++#define SUNXI_CODEC_DAC_FIFOC		0x010
++#define SUNXI_CODEC_ANALOG		0x300
++static uint32_t sunxi_saved_codec[0x320 / 4];
++
++static const struct sunxi_gated_block sunxi_gated_blocks[] = {
++	{ 0x01008000, sizeof(sunxi_saved_de), 0x60c, 0x600, sunxi_saved_de },
++	{ 0x06510000, sizeof(sunxi_saved_tcon_top), 0xb5c, 0, sunxi_saved_tcon_top },
++	{ 0x06511000, sizeof(sunxi_saved_tcon_lcd0), 0xb7c, 0xb60, sunxi_saved_tcon_lcd0 },
++	{ 0x06515000, sizeof(sunxi_saved_tcon_tv0), 0xb9c, 0, sunxi_saved_tcon_tv0 },
++	{ SUNXI_PWM_BASE, sizeof(sunxi_saved_pwm), 0x7ac, 0, sunxi_saved_pwm },
++	{ SUNXI_GPADC_BASE, sizeof(sunxi_saved_gpadc), 0x9ec, 0, sunxi_saved_gpadc },
++	{ SUNXI_CODEC_BASE, sizeof(sunxi_saved_codec), 0xa5c, 0, sunxi_saved_codec },
++	{ 0x030f0000, sizeof(sunxi_saved_iommu), 0x7bc, 0, sunxi_saved_iommu },
++};
++
++#define SUNXI_IOMMU_BASE		0x030f0000
++#define SUNXI_IOMMU_ENABLE		0x020
++#define SUNXI_IOMMU_TLB_FLUSH		0x080
++#define SUNXI_IOMMU_TLB_FLUSH_ALL	0x3003f
++
++static void sunxi_block_save(uintptr_t base, uint32_t *buf, unsigned int size);
++
++static void sunxi_block_clock_on(const struct sunxi_gated_block *b)
++{
++	mmio_setbits_32(SUNXI_CCU_BASE + b->bgr, BIT(16) | BIT(0));
++	if (b->mod)
++		mmio_setbits_32(SUNXI_CCU_BASE + b->mod, BIT(31));
++	dsbsy();
++	udelay(1);
++}
++
++static void sunxi_block_clock_back(const struct sunxi_gated_block *b)
++{
++	if (b->mod)
++		mmio_write_32(SUNXI_CCU_BASE + b->mod, sunxi_saved_ccu[b->mod / 4]);
++	mmio_write_32(SUNXI_CCU_BASE + b->bgr, sunxi_saved_ccu[b->bgr / 4]);
++	dsbsy();
++}
++
++/* The IOMMU as sun50i_iommu_enable() programs it, enable last. */
++static void sunxi_iommu_restore(void)
++{
++	const uint32_t *r = sunxi_saved_iommu;
++	unsigned int off, us;
++
++	if ((r[SUNXI_IOMMU_ENABLE / 4] & BIT(0)) == 0)
++		return;
++	for (off = 0x030; off <= 0x070; off += 4)
++		if (off != SUNXI_IOMMU_ENABLE)
++			mmio_write_32(SUNXI_IOMMU_BASE + off, r[off / 4]);
++	for (off = 0x0b0; off <= 0x0d0; off += 4)
++		mmio_write_32(SUNXI_IOMMU_BASE + off, r[off / 4]);
++	mmio_write_32(SUNXI_IOMMU_BASE + 0x100, r[0x100 / 4]);
++	mmio_write_32(SUNXI_IOMMU_BASE + SUNXI_IOMMU_TLB_FLUSH, SUNXI_IOMMU_TLB_FLUSH_ALL);
++	for (us = 0; us < 2000; us++) {
++		if (mmio_read_32(SUNXI_IOMMU_BASE + SUNXI_IOMMU_TLB_FLUSH) == 0)
++			break;
++		udelay(1);
++	}
++	mmio_write_32(SUNXI_IOMMU_BASE + SUNXI_IOMMU_ENABLE, r[SUNXI_IOMMU_ENABLE / 4]);
++}
++
++static void sunxi_gated_save(void)
++{
++	for (unsigned int i = 0; i < ARRAY_SIZE(sunxi_gated_blocks); i++) {
++		const struct sunxi_gated_block *b = &sunxi_gated_blocks[i];
++
++		sunxi_block_clock_on(b);
++		sunxi_block_save(b->base, b->buf, b->size);
++		sunxi_block_clock_back(b);
++	}
++}
++
++static void sunxi_gated_restore(void)
++{
++	for (unsigned int i = 0; i < ARRAY_SIZE(sunxi_gated_blocks); i++) {
++		const struct sunxi_gated_block *b = &sunxi_gated_blocks[i];
++
++		sunxi_block_clock_on(b);
++		if (b->base == SUNXI_IOMMU_BASE) {
++			sunxi_iommu_restore();
++		} else if (b->base == SUNXI_GPADC_BASE) {
++			for (unsigned int off = 0x04; off <= 0x28; off += 4)
++				if (off != 0x10 && off != 0x14 && off != 0x18)
++					mmio_write_32(b->base + off, b->buf[off / 4]);
++			for (unsigned int off = 0x40; off < b->size; off += 4)
++				mmio_write_32(b->base + off, b->buf[off / 4]);
++		} else if (b->base == SUNXI_CODEC_BASE) {
++			/* Analog path first, the digital DAC enable last. */
++			for (unsigned int off = SUNXI_CODEC_ANALOG; off < b->size; off += 4)
++				mmio_write_32(b->base + off, b->buf[off / 4]);
++			mmio_write_32(b->base + 0x004, b->buf[0x004 / 4]);
++			mmio_write_32(b->base + SUNXI_CODEC_DAC_FIFOC,
++				      b->buf[SUNXI_CODEC_DAC_FIFOC / 4] & ~BIT(0));
++			mmio_write_32(b->base + 0x028, b->buf[0x028 / 4]);
++			mmio_write_32(b->base + 0x0f0, b->buf[0x0f0 / 4]);
++			mmio_write_32(b->base + SUNXI_CODEC_DAC_DPC,
++				      b->buf[SUNXI_CODEC_DAC_DPC / 4]);
++		} else if (b->base == SUNXI_PWM_BASE) {
++			/* Not the interrupt status; the channel enables last. */
++			for (unsigned int off = 0; off < b->size; off += 4)
++				if (off != 0x04 && off != 0x14 && off != SUNXI_PWM_PER)
++					mmio_write_32(b->base + off, b->buf[off / 4]);
++			mmio_write_32(b->base + SUNXI_PWM_PER, b->buf[SUNXI_PWM_PER / 4]);
++		} else {
++			for (unsigned int off = 0; off < b->size; off += 4)
++				mmio_write_32(b->base + off, b->buf[off / 4]);
++		}
++		sunxi_block_clock_back(b);
++	}
++}
++static bool sunxi_universal_resumed;
++
++static void sunxi_block_save(uintptr_t base, uint32_t *buf, unsigned int size)
++{
++	for (unsigned int off = 0; off < size; off += 4)
++		buf[off / 4] = mmio_read_32(base + off);
++}
++
++static void sunxi_pll_restore(unsigned int off)
++{
++	uint32_t val = sunxi_saved_ccu[off / 4];
++	unsigned int us;
++
++	mmio_write_32(SUNXI_CCU_BASE + off, val);
++	if ((val & BIT(31)) == 0)
++		return;
++	for (us = 0; us < SUNXI_PLL_LOCK_TIMEOUT_US; ++us) {
++		if ((mmio_read_32(SUNXI_CCU_BASE + off) & SUNXI_PLL_LOCK) != 0)
++			break;
++		udelay(1);
++	}
++}
++
++/* Pin controller: I/O voltages, then levels/drive/pulls, then functions,
++ * then the external interrupt setup (never its write-1-to-clear status). */
++static void sunxi_pio_restore(uintptr_t base, const uint32_t *buf)
++{
++	unsigned int b, off;
++
++	for (off = SUNXI_PIO_POW_BASE; off < 0x400; off += 4)
++		mmio_write_32(base + off, buf[off / 4]);
++	for (b = 0; b < SUNXI_PIO_BANKS; b++)
++		for (off = 0x10; off < SUNXI_PIO_BANK_SIZE; off += 4)
++			mmio_write_32(base + b * SUNXI_PIO_BANK_SIZE + off,
++				      buf[(b * SUNXI_PIO_BANK_SIZE + off) / 4]);
++	for (b = 0; b < SUNXI_PIO_BANKS; b++)
++		for (off = 0; off < 0x10; off += 4)
++			mmio_write_32(base + b * SUNXI_PIO_BANK_SIZE + off,
++				      buf[(b * SUNXI_PIO_BANK_SIZE + off) / 4]);
++	for (off = SUNXI_PIO_EINT_BASE; off < SUNXI_PIO_POW_BASE; off += 4)
++		if ((off - SUNXI_PIO_EINT_BASE) % SUNXI_PIO_EINT_SIZE !=
++		    SUNXI_PIO_EINT_STATUS)
++			mmio_write_32(base + off, buf[off / 4]);
++	/*
++	 * Edges latched while the pins went from their reset state back to
++	 * their functions are not key presses: Linux would read them as
++	 * such (a Confirm launched a game, START looked like the wake key).
++	 */
++	for (b = 0; b < SUNXI_PIO_BANKS; b++)
++		mmio_write_32(base + SUNXI_PIO_EINT_BASE + b * SUNXI_PIO_EINT_SIZE +
++			      SUNXI_PIO_EINT_STATUS, 0xffffffffU);
++}
++
++static void sunxi_soc_save(void)
++{
++	sunxi_block_save(SUNXI_CCU_BASE, sunxi_saved_ccu, sizeof(sunxi_saved_ccu));
++	sunxi_block_save(SUNXI_PIO_BASE, sunxi_saved_pio, sizeof(sunxi_saved_pio));
++	sunxi_block_save(SUNXI_R_PIO_BASE, sunxi_saved_r_pio, sizeof(sunxi_saved_r_pio));
++	sunxi_block_save(SUNXI_R_PRCM_BASE, sunxi_saved_r_prcm, sizeof(sunxi_saved_r_prcm));
++	sunxi_block_save(SUNXI_SYSCON_BASE, sunxi_saved_syscon, sizeof(sunxi_saved_syscon));
++	sunxi_block_save(SUNXI_TIMER_BASE, sunxi_saved_timer, sizeof(sunxi_saved_timer));
++	sunxi_gated_save();
++}
++
++static void sunxi_timer_restore(void)
++{
++	for (unsigned int n = 0; n < 2; n++) {
++		uint32_t ctl = sunxi_saved_timer[SUNXI_TIMER_CTL(n) / 4];
++
++		mmio_write_32(SUNXI_TIMER_BASE + SUNXI_TIMER_INTV(n),
++			      sunxi_saved_timer[SUNXI_TIMER_INTV(n) / 4]);
++		mmio_write_32(SUNXI_TIMER_BASE + SUNXI_TIMER_CTL(n),
++			      ctl & ~SUNXI_TIMER_CTL_ENABLE);
++		if (ctl & SUNXI_TIMER_CTL_ENABLE)
++			mmio_write_32(SUNXI_TIMER_BASE + SUNXI_TIMER_CTL(n),
++				      ctl | SUNXI_TIMER_CTL_RELOAD |
++				      SUNXI_TIMER_CTL_ENABLE);
++	}
++	mmio_write_32(SUNXI_TIMER_BASE + SUNXI_TIMER_IRQ_EN,
++		      sunxi_saved_timer[SUNXI_TIMER_IRQ_EN / 4]);
++}
++
++static void sunxi_soc_restore(void)
++{
++	uint32_t cpux_axi = sunxi_saved_ccu[0x500 / 4];
++	unsigned int off;
++
++	for (off = 0; off < sizeof(sunxi_saved_syscon); off += 4)
++		mmio_write_32(SUNXI_SYSCON_BASE + off, sunxi_saved_syscon[off / 4]);
++
++	/* PLLs first (U-Boot owns PLL_DDR), CPU 0 on OSC24M meanwhile. */
++	mmio_write_32(SUNXI_CCU_CPUX_AXI_REG, cpux_axi & ~SUNXI_CPUX_SRC_MASK);
++	dsbsy();
++	isb();
++	for (off = 0x100; off < 0x400; off += 4)
++		if (off != SUNXI_CCU_PLL_DDR0_PAT && off != SUNXI_CCU_PLL_DDR1_PAT &&
++		    (off < 0x200 || off >= 0x300))
++			mmio_write_32(SUNXI_CCU_BASE + off, sunxi_saved_ccu[off / 4]);
++	for (off = 0; off < 0x100; off += 4)
++		if (off != SUNXI_CCU_PLL_DDR0 && off != SUNXI_CCU_PLL_DDR1)
++			sunxi_pll_restore(off);
++	udelay(20);
++	/* Buses, module clocks, gates and resets. */
++	for (off = 0x500; off < sizeof(sunxi_saved_ccu); off += 4)
++		if (off != SUNXI_CCU_MBUS && off != SUNXI_CCU_DRAM_CLK &&
++		    off != SUNXI_CCU_DRAM_BGR && off != SUNXI_CCU_SEC_SWITCH)
++			mmio_write_32(SUNXI_CCU_BASE + off, sunxi_saved_ccu[off / 4]);
++	dsbsy();
++	isb();
++
++	for (off = 0; off < sizeof(sunxi_saved_r_prcm); off += 4)
++		if (off != SUNXI_R_PRCM_NMI_PENDING && off != SUNXI_R_PRCM_SEC_SWITCH)
++			mmio_write_32(SUNXI_R_PRCM_BASE + off, sunxi_saved_r_prcm[off / 4]);
++	/*
++	 * The NMI (PMIC IRQ line) latches nothing after a cold start until
++	 * its pending bit is written, as Linux's sunxi-nmi does at probe:
++	 * without this no PMIC interrupt (power key, charger, battery)
++	 * reached Linux after a resume.
++	 */
++	mmio_write_32(SUNXI_R_PRCM_BASE + SUNXI_R_PRCM_NMI_PENDING, 1);
++	sunxi_pio_restore(SUNXI_R_PIO_BASE, sunxi_saved_r_pio);
++	sunxi_pio_restore(SUNXI_PIO_BASE, sunxi_saved_pio);
++	sunxi_timer_restore();
++	sunxi_gated_restore();
++	dsbsy();
++}
++
++static uint32_t sunxi_resume_sum(const struct sunxi_resume_block *blk)
++{
++	const uint32_t *w = (const uint32_t *)(SUNXI_RESUME_BLOCK + SUNXI_RESUME_SAVE_SIZE);
++	uint32_t sum = blk->magic + blk->entry_lo + blk->entry_hi + blk->half;
++
++	for (unsigned int i = 0; i < 2 * SUNXI_RESUME_SAVE_SIZE / 4; i++)
++		sum += w[i];
++	return sum;
++}
++
++/*
++ * BL31 maps only its own image and the BL33 window: the resume block past
++ * it and the start of the DRAM half (Linux memory, a 2 MiB block) need
++ * mappings of their own. U-Boot published the DRAM size before BL31 ran.
++ */
++void sunxi_resume_mmap(void)
++{
++	uint32_t size_mib = mmio_read_32(SUNXI_RESUME_SIZE_REG);
++	uintptr_t half = SUNXI_DRAM_BASE + ((uintptr_t)size_mib << 19);
++
++	mmap_add_region(SUNXI_RESUME_BLOCK, SUNXI_RESUME_BLOCK,
++			3 * SUNXI_RESUME_SAVE_SIZE, MT_RW_DATA | MT_SECURE);
++	if (size_mib >= 128 && size_mib <= 4096 && !(size_mib & (size_mib - 1)))
++		mmap_add_region(half, half, 2U << 20, MT_RW_DATA | MT_NS);
++	else
++		mmio_write_32(SUNXI_RESUME_SIZE_REG, 0);
++}
++
++/* Returns only when the universal standby could not be entered. */
++static void sunxi_universal_suspend(void)
++{
++	struct sunxi_resume_block *blk = (void *)SUNXI_RESUME_BLOCK;
++	uint32_t size_mib = mmio_read_32(SUNXI_RESUME_SIZE_REG);
++	size_t size = sunxi_universal_sram_end - sunxi_universal_sram;
++	uintptr_t entry = (uintptr_t)sunxi_universal_resume_entry;
++	unsigned long mode;
++	int extra_map = -1;
++
++	/* The resume block lies past BL31, inside its reserved region. */
++	if (BL31_END > SUNXI_RESUME_BLOCK ||
++	    SUNXI_RESUME_BLOCK + 3 * SUNXI_RESUME_SAVE_SIZE > BL31_LIMIT)
++		return;
++	/* Needs a U-Boot that published the DRAM state at its cold boot. */
++	if (size_mib < 128 || size_mib > 4096 || (size_mib & (size_mib - 1)) ||
++	    (mmio_read_32(SUNXI_RESUME_GEOMETRY_REG) & 0xff) == 0)
++		return;
++	mode = mmio_read_32(SUNXI_RESUME_TEST_REG);
++	mmio_write_32(SUNXI_RESUME_TEST_REG, 0);
++	if (mode == SUNXI_RESUME_MODE_QUICK)
++		return;
++	if ((mode & 0xffff0000U) == SUNXI_RESUME_TEST_MAP)
++		extra_map = mode & 0xffffU;
++	mode = mode == SUNXI_RESUME_TEST_WDOG;
++
++	if (sunxi_pmic_standby_prepare(extra_map) != 0) {
++		sunxi_pmic_standby_resume();
++		return;
++	}
++	sunxi_soc_save();
++
++	/* The data cache is off: all of this goes straight to DRAM. */
++	blk->magic = SUNXI_RESUME_BLOCK_MAGIC;
++	blk->entry_lo = entry & 0xffffffffU;
++	blk->entry_hi = (uint64_t)entry >> 32;
++	blk->half = SUNXI_DRAM_BASE + (size_mib << 19);
++	memcpy((void *)(SUNXI_RESUME_BLOCK + SUNXI_RESUME_SAVE_SIZE),
++	       (void *)SUNXI_DRAM_BASE, SUNXI_RESUME_SAVE_SIZE);
++	memcpy((void *)(SUNXI_RESUME_BLOCK + 2 * SUNXI_RESUME_SAVE_SIZE),
++	       (void *)(uintptr_t)blk->half, SUNXI_RESUME_SAVE_SIZE);
++	blk->checksum = sunxi_resume_sum(blk);
++	sunxi_universal_resumed = true;
++	memcpy((void *)SUNXI_STANDBY_SRAM_BASE, sunxi_universal_sram, size);
++	mmio_write_32(SUNXI_RESUME_FLAG_REG, SUNXI_RESUME_FLAG_MAGIC);
++	dsbsy();
++
++	(void)sunxi_universal_suspend_wfi(SUNXI_STANDBY_SRAM_BASE, mode);
++
++	/* The DRAM never entered self-refresh: plain deep sleep instead. */
++	mmio_write_32(SUNXI_RESUME_FLAG_REG, 0);
++	sunxi_universal_resumed = false;
++	blk->magic = 0;
++	sunxi_pmic_standby_resume();
++}
++
++static void sunxi_pwr_domain_suspend_finish(const psci_power_state_t *target_state)
++{
++	if (sunxi_universal_resumed) {
++		sunxi_universal_resumed = false;
++		((struct sunxi_resume_block *)SUNXI_RESUME_BLOCK)->magic = 0;
++		mmio_write_32(SUNXI_RESUME_STEP_REG, 0x5a5a0031);
++		/* VDD-CPU back to Linux's setpoint before its PLL_CPUX. */
++		sunxi_pmic_standby_resume();
++		mmio_write_32(SUNXI_RESUME_STEP_REG, 0x5a5a0032);
++		sunxi_soc_restore();
++		mmio_write_32(SUNXI_RESUME_STEP_REG, 0x5a5a0033);
++		sunxi_security_setup();
++		sunxi_program_rvbar();
++		sunxi_cpuidle_init();
++		gicv2_distif_init();
++		mmio_write_32(SUNXI_RESUME_STEP_REG, 0x5a5a0034);
++	}
++	sunxi_pwr_domain_on_finish(target_state);
++}
++
+ static bool sunxi_is_system_suspend(const psci_power_state_t *target_state)
+ {
+ 	return target_state->pwr_domain_state[PLAT_MAX_PWR_LVL] ==
+@@ -85,6 +552,8 @@
+ 	if (!sunxi_is_system_suspend(target_state))
+ 		return;
+ 
++	sunxi_universal_suspend();
++
+ 	/* CPU 0 from OSC24M, PLL_CPUX off, then VDD-CPU down. */
+ 	cpux_axi = mmio_read_32(SUNXI_CCU_CPUX_AXI_REG);
+ 	pll_cpux = mmio_read_32(SUNXI_CCU_PLL_CPUX_REG);
+@@ -187,7 +656,7 @@
+ 	.pwr_domain_on_finish		= sunxi_pwr_domain_on_finish,
+ #ifdef PLAT_sun50i_h616
+ 	.pwr_domain_suspend		= sunxi_pwr_domain_suspend,
+-	.pwr_domain_suspend_finish	= sunxi_pwr_domain_on_finish,
++	.pwr_domain_suspend_finish	= sunxi_pwr_domain_suspend_finish,
+ 	.pwr_domain_pwr_down		= sunxi_pwr_domain_pwr_down,
+ 	.validate_power_state		= sunxi_validate_power_state,
+ 	.get_sys_suspend_power_state	= sunxi_get_sys_suspend_power_state,
+--- a/plat/allwinner/common/sunxi_pm.c
++++ b/plat/allwinner/common/sunxi_pm.c
+@@ -40,12 +40,14 @@
+ 	return PSCI_E_SUCCESS;
+ }
+ 
+-int plat_setup_psci_ops(uintptr_t sec_entrypoint,
+-			const plat_psci_ops_t **psci_ops)
++static uintptr_t sunxi_sec_entrypoint;
++
++/* Program all CPU entry points (again after a universal standby: the
++ * CPUCFG registers lose them with VDD-SYS). */
++void sunxi_program_rvbar(void)
+ {
+-	assert(psci_ops);
++	uintptr_t sec_entrypoint = sunxi_sec_entrypoint;
+ 
+-	/* Program all CPU entry points. */
+ 	for (unsigned int cpu = 0; cpu < PLATFORM_CORE_COUNT; ++cpu) {
+ 		if (sunxi_cpucfg_has_per_cluster_regs()) {
+ 			mmio_write_32(SUNXI_CPUCFG_RVBAR_LO_REG(cpu),
+@@ -59,6 +61,15 @@
+ 				      sec_entrypoint >> 32);
+ 		}
+ 	}
++}
++
++int plat_setup_psci_ops(uintptr_t sec_entrypoint,
++			const plat_psci_ops_t **psci_ops)
++{
++	assert(psci_ops);
++
++	sunxi_sec_entrypoint = sec_entrypoint;
++	sunxi_program_rvbar();
+ 
+ #ifdef PLAT_sun50i_h616
+ 	/*
+--- a/plat/allwinner/sun50i_h616/sunxi_power.c
++++ b/plat/allwinner/sun50i_h616/sunxi_power.c
+@@ -340,6 +340,182 @@
+ 	udelay(AXP717_VDD_CPU_RAMP_US);
+ }
+ 
++/*
++ * Universal standby (the vendor "super standby", user request 2026-10-22):
++ * the AXP717 switches DCDC1 (VDD-CPU), DCDC2 (VDD-SYS) and CLDO3 (VCC-IO)
++ * off in its sleep state and back on at a wake-up IRQ, which then is a
++ * cold start of the SoC (U-Boot SPL resumes the DRAM and comes back here).
++ * Register use from the vendor sun50iw9 BL31 for this PMIC (0x0e = 2):
++ * every IRQ status cleared, SLEEP_CFG 0x25 = 0x2d (bit 5: IRQs wake),
++ * AUTO_SLP_MAP 0x28-0x2a = the rails to switch off, then 0x25 = 0x6d
++ * (bit 6: enter sleep), written from SRAM once the DRAM is in
++ * self-refresh (sunxi_universal_sram). Only the power key press and the
++ * critical battery level wake it: the IRQ enables are kept here and
++ * written back on resume, together with the VDD-CPU/VDD-SYS setpoints
++ * U-Boot programs at every start.
++ */
++#define AXP717_IRQ_EN0			0x40
++#define AXP717_IRQ_STATE0		0x48
++#define AXP717_IRQ_REGS			5
++#define AXP717_IRQ0_SOC_DROP_LVL2	BIT(7)
++#define AXP717_IRQ1_PEK_FALLING		BIT(1)
++#define AXP717_SLEEP_CFG		0x25
++#define AXP717_SLEEP_CFG_ARM		0x2d
++#define AXP717_AUTO_SLP_MAP0		0x28
++#define AXP717_DCDC2_CONTROL		0x84
++#define AXP717_DCDC_OUTPUT_CONTROL	0x80
++#define AXP717_LDO0_OUTPUT_CONTROL	0x90
++#define AXP717_LDO1_OUTPUT_CONTROL	0x91
++/* Map bits: map 0 = DCDC1-4 (bits 0-3), ALDO1-4 (4-7); map 1 = BLDO1-4
++ * (0-3), CLDO1-4 (4-7). DCDC1, DCDC2 (map 0) and CLDO3 (map 1 bit 6), as
++ * the vendor DT's standby_param (vdd-cpua | vdd-sys | vcc-io), plus CLDO1
++ * (map 1 bit 4, vcc-spkr-amp): with VCC-IO off its enable pin (PI5)
++ * floats, and a powered speaker amplifier popped. */
++static const uint8_t axp717_sleep_map[3] = { 0x03, 0x50, 0x00 };
++/* Optional rails, switched off too to bring the sleep drain down: those
++ * still enabled at this point but unused with the SoC off, each
++ * qualified alone (RTC GP5 test map, sunxi_native_pm.c; DRAM content
++ * checked across the wake, CubeXX 2026-10-22): DCDC4 0x08 (no consumer),
++ * ALDO1 0x10 (HDMI hvcc), ALDO4 0x80 (codec avcc, Wi-Fi vqmmc). Never
++ * BLDO2 (vcc-pll): the DRAM loses its content without it (the SPL
++ * resume fails, a cold boot). DCDC3 (vdd-dram) and CPUSLDO always stay
++ * on. The enable bits of these rails are written back on resume as
++ * Linux left them. */
++#define AXP717_SLEEP_EXTRA_MAP		0x0098
++
++static uint8_t axp717_standby_saved[AXP717_IRQ_REGS + 3];
++static uint8_t axp717_standby_extra[2];
++static uint8_t axp717_standby_out[3];
++static bool axp717_standby_out_saved;
++
++int sunxi_pmic_standby_prepare(int extra_map)
++{
++	int i, val;
++
++	axp717_standby_out_saved = false;
++	if (pmic != AXP717 || is_using_rsb())
++		return -ENODEV;
++	/* The bus stays set up for the final write from SRAM. */
++	if (pmic_bus_init(SUNXI_SOC_H616, pmic_bus_addr) != 0)
++		return -EIO;
++
++	if (extra_map < 0)
++		extra_map = AXP717_SLEEP_EXTRA_MAP;
++	/* Never DCDC3 (vdd-dram): it keeps the DRAM in self-refresh. */
++	extra_map &= ~0x04;
++	axp717_standby_extra[0] = extra_map & 0xff;
++	axp717_standby_extra[1] = (extra_map >> 8) & 0xff;
++	val = axp_read(AXP717_DCDC_OUTPUT_CONTROL);
++	if (val < 0)
++		return val;
++	axp717_standby_out[0] = val;
++	val = axp_read(AXP717_LDO0_OUTPUT_CONTROL);
++	if (val < 0)
++		return val;
++	axp717_standby_out[1] = val;
++	val = axp_read(AXP717_LDO1_OUTPUT_CONTROL);
++	if (val < 0)
++		return val;
++	axp717_standby_out[2] = val;
++	axp717_standby_out_saved = true;
++
++	for (i = 0; i < AXP717_IRQ_REGS; i++) {
++		val = axp_read(AXP717_IRQ_EN0 + i);
++		if (val < 0)
++			return val;
++		axp717_standby_saved[i] = val;
++	}
++	val = axp_read(AXP717_SLEEP_CFG);
++	if (val < 0)
++		return val;
++	axp717_standby_saved[AXP717_IRQ_REGS] = val;
++	val = axp_read(AXP717_DCDC1_CONTROL);
++	if (val < 0)
++		return val;
++	axp717_standby_saved[AXP717_IRQ_REGS + 1] = val;
++	val = axp_read(AXP717_DCDC2_CONTROL);
++	if (val < 0)
++		return val;
++	axp717_standby_saved[AXP717_IRQ_REGS + 2] = val;
++
++	for (i = 0; i < AXP717_IRQ_REGS; i++) {
++		uint8_t en = 0;
++
++		if (i == 0)
++			en = AXP717_IRQ0_SOC_DROP_LVL2;
++		else if (i == 1)
++			en = AXP717_IRQ1_PEK_FALLING;
++		if (axp_write(AXP717_IRQ_EN0 + i, en) != 0 ||
++		    axp_write(AXP717_IRQ_STATE0 + i, 0xff) != 0)
++			return -EIO;
++	}
++	for (i = 0; i < 3; i++) {
++		uint8_t map = axp717_sleep_map[i];
++
++		if (i < 2)
++			map |= axp717_standby_extra[i];
++		if (axp_write(AXP717_AUTO_SLP_MAP0 + i, map) != 0)
++			return -EIO;
++	}
++	if (axp_write(AXP717_SLEEP_CFG, AXP717_SLEEP_CFG_ARM) != 0)
++		return -EIO;
++
++	return 0;
++}
++
++/*
++ * The wake-up powers the map rails up again: give the optional ones back
++ * the state Linux left them in (an unused rail stays off).
++ */
++static void axp717_standby_restore_outputs(void)
++{
++	static const uint8_t reg[3] = {
++		AXP717_DCDC_OUTPUT_CONTROL,
++		AXP717_LDO0_OUTPUT_CONTROL,
++		AXP717_LDO1_OUTPUT_CONTROL,
++	};
++	/* Output control bits of the map bits: DCDC1-4 | ALDO1-4 | BLDO1-4
++	 * in 0x80 bits 0-3, 0x90 bits 0-3 and 4-7, CLDO1-4 in 0x91 bits 0-3. */
++	uint8_t mask[3] = {
++		axp717_standby_extra[0] & 0x0f,
++		(axp717_standby_extra[0] >> 4) | (axp717_standby_extra[1] & 0x0f) << 4,
++		axp717_standby_extra[1] >> 4,
++	};
++	int i, val;
++
++	axp717_standby_out_saved = false;
++	for (i = 0; i < 3; i++) {
++		if (mask[i] == 0)
++			continue;
++		val = axp_read(reg[i]);
++		if (val < 0)
++			continue;
++		val = (val & ~mask[i]) | (axp717_standby_out[i] & mask[i]);
++		(void)axp_write(reg[i], val);
++	}
++}
++
++/* Undo sunxi_pmic_standby_prepare(), after a resume or a failed entry. */
++void sunxi_pmic_standby_resume(void)
++{
++	int i;
++
++	if (pmic != AXP717 || is_using_rsb())
++		return;
++	if (pmic_bus_init(SUNXI_SOC_H616, pmic_bus_addr) != 0)
++		return;
++
++	/* Linux's setpoints first, before its clocks are back. */
++	(void)axp_write(AXP717_DCDC2_CONTROL, axp717_standby_saved[AXP717_IRQ_REGS + 2]);
++	(void)axp_write(AXP717_DCDC1_CONTROL, axp717_standby_saved[AXP717_IRQ_REGS + 1]);
++	udelay(AXP717_VDD_CPU_RAMP_US);
++	(void)axp_write(AXP717_SLEEP_CFG, axp717_standby_saved[AXP717_IRQ_REGS]);
++	for (i = 0; i < AXP717_IRQ_REGS; i++)
++		(void)axp_write(AXP717_IRQ_EN0 + i, axp717_standby_saved[i]);
++	if (axp717_standby_out_saved)
++		axp717_standby_restore_outputs();
++}
++
+ #define SUNXI_CPUIDLE_VERSION_MASK	0x7U
+ #define SUNXI_CPUIDLE_V1_CTRL_REG	(SUNXI_R_CPUCFG_BASE + 0x010c)
+ 
+--- a/plat/allwinner/sun50i_h616/sunxi_suspend.S
++++ b/plat/allwinner/sun50i_h616/sunxi_suspend.S
+@@ -12,6 +12,7 @@
+ #include <arch.h>
+ #include <asm_macros.S>
+ 
++#include <sunxi_def.h>
+ #include <sunxi_mmap.h>
+ 
+ #define CCU_PLL_PERI0		0x020
+@@ -67,6 +68,10 @@
+ 	.globl	sunxi_standby_sram_end
+ 	.globl	sunxi_system_suspend_wfi
+ 	.globl	sunxi_system_resume_warm
++	.globl	sunxi_universal_sram
++	.globl	sunxi_universal_sram_end
++	.globl	sunxi_universal_suspend_wfi
++	.globl	sunxi_universal_resume_entry
+ 
+ 	.macro	standby_step _n
+ 	mov_imm	w1, STANDBY_STEP(\_n)
+@@ -307,3 +312,243 @@
+ func sunxi_system_resume_warm
+ 	b	bl31_warm_entrypoint
+ endfunc sunxi_system_resume_warm
++
++/*
++ * Universal standby (see sunxi_native_pm.c): SRAM part.
++ *
++ * int sunxi_universal_sram(unsigned long mode)
++ *
++ * Copied to SRAM A1 and run with the MMU and the data cache off, no
++ * stack. Puts the DRAM in self-refresh, holds its pads (RTC 0x1f4 bit0
++ * clear), takes the PHY out of DFI operation like the vendor firmware,
++ * then, mode 0, writes AXP717 SLEEP_CFG = 0x6d over R_I2C (set up by
++ * sunxi_pmic_standby_prepare()): the PMIC switches VDD-CPU/VDD-SYS off
++ * and this never returns. Mode 1 (test), or a PMIC that did not cut the
++ * power within 3 s, resets the SoC with the watchdog instead: the DRAM
++ * stays held and the SPL resumes it the same way. Returns 1 only if the
++ * DRAM never entered self-refresh (nothing changed then).
++ */
++#define DRAM_PAD_HOLD_REG	0x070001f4
++#define CTL_DFIMISC		0x1b0
++#define CTL_DFISTAT		0x1bc
++#define CTL_SWCTL		0x320
++#define TWI_DATA		0x08
++#define TWI_CNTR		0x0c
++#define TWI_STAT		0x10
++#define TWI_CNTR_IFLG		(1 << 3)
++#define TWI_CNTR_STOP		(1 << 4)
++#define TWI_CNTR_START		(1 << 5)
++#define TWI_STAT_START		0x08
++#define TWI_STAT_ADDR_W_ACK	0x18
++#define TWI_STAT_DATA_W_ACK	0x28
++#define AXP717_I2C_WRITE	(0x34 << 1)
++#define AXP717_SLEEP_CFG_REG	0x25
++#define AXP717_SLEEP_ENTER	0x6d
++#define WDOG_CFG_REG		(SUNXI_WDOG_BASE + 0x14)
++#define WDOG_MODE_REG		(SUNXI_WDOG_BASE + 0x18)
++/* 2 ms of the 24 MHz counter per I2C step, 3 s for the power to go. */
++#define TWI_TIMEOUT		48000
++#define POWER_OFF_TIMEOUT	72000000
++
++	/* Wait for the TWI interrupt flag, then check the status (w4). */
++	.macro	twi_wait _status
++	mrs	x2, cntpct_el0
++	mov_imm	x3, TWI_TIMEOUT
++	add	x2, x2, x3
++.Ltwi_poll\@:
++	ldr	w1, [x9, #TWI_CNTR]
++	tbnz	w1, #3, .Ltwi_flag\@
++	mrs	x3, cntpct_el0
++	cmp	x3, x2
++	b.lo	.Ltwi_poll\@
++	b	.Luniv_twi_fail
++.Ltwi_flag\@:
++	ldr	w4, [x9, #TWI_STAT]
++	cmp	w4, #\_status
++	b.ne	.Luniv_twi_fail
++	.endm
++
++	/* Send one byte; the flag clears by writing 1 (sunxi). */
++	.macro	twi_byte _byte, _status
++	mov	w1, #\_byte
++	str	w1, [x9, #TWI_DATA]
++	ldr	w1, [x9, #TWI_CNTR]
++	orr	w1, w1, #TWI_CNTR_IFLG
++	str	w1, [x9, #TWI_CNTR]
++	twi_wait \_status
++	.endm
++
++func sunxi_universal_sram
++	mov	x14, x0
++	mov_imm	x10, MCTL_CTL_BASE
++	mov_imm	x11, MCTL_COM_BASE
++	mov_imm	x12, STANDBY_STEP_REG
++	standby_step 0x21
++
++	/* Stop every DRAM master (kept in w5-w7 for the failure path). */
++	ldr	w5, [x11, #MC_MAER0]
++	ldr	w6, [x11, #MC_MAER1]
++	ldr	w7, [x11, #MC_MAER2]
++	str	wzr, [x11, #MC_MAER0]
++	str	wzr, [x11, #MC_MAER1]
++	str	wzr, [x11, #MC_MAER2]
++	dsb	sy
++
++	/* Request software self-refresh and wait for the controller. */
++	ldr	w1, [x10, #CTL_PWRCTL]
++	orr	w1, w1, #PWRCTL_SELFREF_SW
++	str	w1, [x10, #CTL_PWRCTL]
++	dsb	sy
++	mrs	x2, cntpct_el0
++	mov_imm	x3, SELFREF_TIMEOUT
++	add	x2, x2, x3
++1:	ldr	w1, [x10, #CTL_STATR]
++	and	w1, w1, #STATR_OP_MODE_MASK
++	cmp	w1, #STATR_OP_MODE_SELFREF
++	b.eq	2f
++	mrs	x3, cntpct_el0
++	cmp	x3, x2
++	b.lo	1b
++
++	/* Timed out: leave self-refresh, masters back, give up. */
++	standby_step 0xe1
++	ldr	w1, [x10, #CTL_PWRCTL]
++	bic	w1, w1, #PWRCTL_SELFREF_SW
++	str	w1, [x10, #CTL_PWRCTL]
++	dsb	sy
++3:	ldr	w1, [x10, #CTL_STATR]
++	and	w1, w1, #STATR_OP_MODE_MASK
++	cmp	w1, #STATR_OP_MODE_NORMAL
++	b.ne	3b
++	str	w5, [x11, #MC_MAER0]
++	str	w6, [x11, #MC_MAER1]
++	str	w7, [x11, #MC_MAER2]
++	dsb	sy
++	mov	w0, #1
++	ret
++
++	/* Hold the DRAM pads, then take the PHY out of DFI operation. */
++2:	standby_step 0x22
++	mov_imm	x5, DRAM_PAD_HOLD_REG
++	ldr	w1, [x5]
++	bic	w1, w1, #1
++	str	w1, [x5]
++	str	wzr, [x10, #CTL_SWCTL]
++	ldr	w1, [x10, #CTL_DFIMISC]
++	bic	w1, w1, #1
++	orr	w1, w1, #0x1f00
++	str	w1, [x10, #CTL_DFIMISC]
++	ldr	w1, [x10, #CTL_DFIMISC]
++	orr	w1, w1, #0x20
++	str	w1, [x10, #CTL_DFIMISC]
++	mov	w1, #1
++	str	w1, [x10, #CTL_SWCTL]
++	dsb	sy
++	mrs	x2, cntpct_el0
++	mov_imm	x3, SELFREF_TIMEOUT
++	add	x2, x2, x3
++4:	ldr	w1, [x10, #CTL_DFISTAT]
++	tbz	w1, #0, 5f
++	mrs	x3, cntpct_el0
++	cmp	x3, x2
++	b.lo	4b
++	standby_step 0xe2
++5:	standby_step 0x23
++	cbnz	x14, .Luniv_wdog
++
++	/* AXP717: START, address, SLEEP_CFG, 0x6d, STOP. */
++	mov_imm	x9, SUNXI_R_I2C_BASE
++	ldr	w1, [x9, #TWI_CNTR]
++	orr	w1, w1, #TWI_CNTR_START
++	str	w1, [x9, #TWI_CNTR]
++	twi_wait TWI_STAT_START
++	twi_byte AXP717_I2C_WRITE, TWI_STAT_ADDR_W_ACK
++	twi_byte AXP717_SLEEP_CFG_REG, TWI_STAT_DATA_W_ACK
++	twi_byte AXP717_SLEEP_ENTER, TWI_STAT_DATA_W_ACK
++	ldr	w1, [x9, #TWI_CNTR]
++	orr	w1, w1, #(TWI_CNTR_STOP | TWI_CNTR_IFLG)
++	str	w1, [x9, #TWI_CNTR]
++	dsb	sy
++	standby_step 0x24
++
++	/* The PMIC takes the power away here. */
++	mrs	x2, cntpct_el0
++	mov_imm	x3, POWER_OFF_TIMEOUT
++	add	x2, x2, x3
++6:	mrs	x3, cntpct_el0
++	cmp	x3, x2
++	b.lo	6b
++	standby_step 0xe5
++	b	.Luniv_wdog
++
++.Luniv_twi_fail:
++	str	w4, [x12, #-4]
++	standby_step 0xe4
++
++	/* Reset the SoC: the DRAM stays in self-refresh, held. */
++.Luniv_wdog:
++	standby_step 0x25
++	mov_imm	x1, WDOG_CFG_REG
++	mov	w2, #1
++	str	w2, [x1]
++	mov_imm	x1, WDOG_MODE_REG
++	str	w2, [x1]
++	dsb	sy
++7:	wfi
++	b	7b
++sunxi_universal_sram_end:
++endfunc sunxi_universal_sram
++
++/*
++ * int sunxi_universal_suspend_wfi(uintptr_t sram_entry, unsigned long mode)
++ *
++ * MMU off (the translation tables are in DRAM), run the SRAM part; back
++ * only when the DRAM could not enter self-refresh.
++ */
++func sunxi_universal_suspend_wfi
++	stp	x29, x30, [sp, #-16]!
++	mrs	x2, sctlr_el3
++	bic	x2, x2, #SCTLR_M_BIT
++	bic	x2, x2, #SCTLR_C_BIT
++	msr	sctlr_el3, x2
++	isb
++	ic	iallu
++	dsb	sy
++	isb
++	mov	x2, x0
++	mov	x0, x1
++	blr	x2
++	mrs	x1, sctlr_el3
++	orr	x1, x1, #SCTLR_M_BIT
++	msr	sctlr_el3, x1
++	isb
++	ldp	x29, x30, [sp], #16
++	ret
++endfunc sunxi_universal_suspend_wfi
++
++/*
++ * void sunxi_universal_resume_entry(void)
++ *
++ * Entered from U-Boot SPL at EL3 after a cold start of the SoC, the DRAM
++ * resumed: the counter frequency (per core, lost) and a reset-like
++ * SCTLR_EL3, then the PSCI warm boot path as for any CPU powered up.
++ */
++func sunxi_universal_resume_entry
++	msr	daifset, #0xf
++	mov_imm	x1, STANDBY_STEP_REG
++	mov_imm	w0, STANDBY_STEP(0x30)
++	str	w0, [x1]
++	mov_imm	x0, SUNXI_OSC24M_CLK_IN_HZ
++	msr	cntfrq_el0, x0
++	mrs	x0, sctlr_el3
++	bic	x0, x0, #SCTLR_M_BIT
++	bic	x0, x0, #SCTLR_C_BIT
++	bic	x0, x0, #SCTLR_A_BIT
++	msr	sctlr_el3, x0
++	isb
++	ic	iallu
++	tlbi	alle3
++	dsb	sy
++	isb
++	b	bl31_warm_entrypoint
++endfunc sunxi_universal_resume_entry

@@ -50,6 +50,10 @@ define NUUBOS_AUDIO_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/sbin/nuubos-audiod
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-audioctl \
 		$(TARGET_DIR)/usr/bin/nuubos-audioctl
+	$(INSTALL) -D -m 0755 $(@D)/40-audio-park \
+		$(TARGET_DIR)/usr/lib/nuubos/lifecycle-hooks/pre-power.d/40-audio-park
+	$(INSTALL) -D -m 0755 $(@D)/40-audio-resume \
+		$(TARGET_DIR)/usr/lib/nuubos/lifecycle-hooks/post-wake.d/40-audio-resume
 	$(INSTALL) -D -m 0755 $(@D)/S43nuubos-audiod \
 		$(TARGET_DIR)/etc/init.d/S43nuubos-audiod
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-audio-rate-probe \

@@ -1345,3 +1345,9 @@
 1344=Synchronizuj {0} jako
 1345=Wyłącz
 1346=Użyj folderu nuubOS
+1347=HyperSleep
+1348=Prawie bez zużycia baterii. Wybudzanie przyciskiem zasilania.
+1349=START i klapka też wybudzają. Zużywa więcej baterii.
+1350=Tryb diagnostyczny
+1351=Następne uruchomienia: {0}
+1352=Zapisuje wszystkie logi przez następne 10 uruchomień i tworzy raport przy każdym ponownym uruchomieniu lub wyłączeniu. Domyślnie wyłączony: logi kosztują wydajność i zapisy na karcie.

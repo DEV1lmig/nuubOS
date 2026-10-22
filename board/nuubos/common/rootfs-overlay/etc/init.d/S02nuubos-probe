@@ -1,61 +1,26 @@
 #!/bin/sh
+#
+# Drivers built as modules that the system needs: Wi-Fi, Bluetooth, the
+# HDMI/display glue, the GPU and the DMA-BUF heaps (/dev/dma_heap/{system,
+# reserved}: Steam Link's Wayland video output allocates from them and
+# crashes without them, streaming-media.md). modprobe returns once each
+# driver is registered; their users start seconds later (wifid S44, the UI
+# S50). Boot audit 2026-10-22: this script also slept 2 s and wrote a debug
+# dump to /boot with sync on every boot (3.2 s); the dump now belongs to the
+# diagnostic mode (S04nuubos-diagnostics, in RAM), and the firmware loads
+# in the background.
 
-LOGDIR=/boot/nuubos-debug
-mkdir -p "$LOGDIR"
-
-mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
-
-{
-    echo "=== BEFORE MODPROBE ==="
-    cat /sys/kernel/debug/devices_deferred 2>/dev/null || true
-
-    echo
-    echo "=== WIFI MODPROBE ==="
-    modprobe rtw88_8821cs 2>&1 || true
-
-    echo
-    echo "=== BLUETOOTH MODPROBE ==="
-    modprobe hci_uart 2>&1 || true
-
-    echo
-    echo "=== DRM MODPROBE ==="
-    modprobe sun8i_dw_hdmi 2>&1 || true
-    modprobe sun8i_mixer 2>&1 || true
-    modprobe panfrost 2>&1 || true
-
-    echo
-    echo "=== DMA-BUF HEAPS MODPROBE ==="
-    # /dev/dma_heap/{system,reserved}: Steam Link's Wayland video output
-    # allocates from them and crashes without them (streaming-media.md).
-    modprobe system_heap 2>&1 || true
-    modprobe cma_heap 2>&1 || true
-
-    sleep 2
-
-    echo
-    echo "=== AFTER MODPROBE ==="
-    cat /sys/kernel/debug/devices_deferred 2>/dev/null || true
-
-    echo
-    echo "=== MODULES ==="
-    lsmod
-
-    echo
-    echo "=== MMC DEVICES ==="
-    find /sys/bus/mmc/devices -maxdepth 2 -print 2>/dev/null || true
-
-    echo
-    echo "=== PLATFORM DRIVERS ==="
-    find /sys/bus/platform/devices -maxdepth 2 -type l -name driver -print -exec readlink {} \; 2>/dev/null || true
-
-    echo
-    echo "=== DRM ==="
-    find /sys/class/drm -maxdepth 2 -print 2>/dev/null || true
-
-    echo
-    echo "=== DMESG ==="
-    dmesg
-} > "$LOGDIR/20-probe-debug.txt" 2>&1
-
-sync
+for m in sun8i_dw_hdmi sun8i_mixer panfrost system_heap cma_heap; do
+    modprobe "$m" 2>/dev/null
+done
+# Wi-Fi and Bluetooth load their firmware (~1 s together): in the
+# background, the boot goes on. BlueZ takes the adapter whenever it comes;
+# S44nuubos-wifid waits for wlan0 while /run/nuubos/wifi-probing exists.
+mkdir -p /run/nuubos
+: > /run/nuubos/wifi-probing
+(
+    modprobe rtw88_8821cs 2>/dev/null
+    rm -f /run/nuubos/wifi-probing
+    modprobe hci_uart 2>/dev/null
+) &
 exit 0

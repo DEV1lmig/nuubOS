@@ -16,6 +16,8 @@ R="${NUUBOS_ROOT:-}"
 OUT_DEFAULT="$R/userdata/diagnostics"
 KEEP=5
 LOG_LINES=500
+# Diagnostic mode: the service logs are verbose and the point of the bundle.
+[ -f "$R/run/nuubos/diagnostics/active" ] && LOG_LINES=5000
 
 redact()
 {
@@ -56,7 +58,10 @@ bounded()
     secs="$1"; shift
     "$@" 2>&1 &
     pid=$!
-    ( sleep "$secs"; kill "$pid" 2>/dev/null ) &
+    # The killer must not hold the caller's pipe: its sleep kept the
+    # output open for the whole timeout after every command (5 calls x 5 s:
+    # a 25 s summary, measured 2026-10-22).
+    ( sleep "$secs"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
     killer=$!
     wait "$pid" 2>/dev/null
     kill "$killer" 2>/dev/null
@@ -198,6 +203,15 @@ logs_dir()
         [ -f "$f" ] || continue
         redact < "$f" > "$1/logs/boot-${f##*/}"
     done
+    # Diagnostic mode (S04nuubos-diagnostics): everything collected in RAM
+    # during this boot, whole files.
+    if [ -d "$R/run/nuubos/diagnostics" ]; then
+        ( cd "$R/run/nuubos/diagnostics" && find . -type f ! -name active ) |
+        while read -r f; do
+            mkdir -p "$1/diagnostics/$(dirname "$f")"
+            redact < "$R/run/nuubos/diagnostics/$f" > "$1/diagnostics/$f"
+        done
+    fi
 }
 
 summary()

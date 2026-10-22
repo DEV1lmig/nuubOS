@@ -1,0 +1,17 @@
+#!/bin/sh
+# Diagnostic mode: at Restart / Power Off of a boot in diagnostic mode the
+# logs collected in RAM become a support bundle in /userdata/diagnostics
+# (the only write to the card); never on Sleep. Its path is kept in
+# /state/diagnostics/last-bundle for the notification at the next boot.
+case "${1:-}" in
+    restart|poweroff) ;;
+    *) exit 0 ;;
+esac
+[ -f /run/nuubos/diagnostics/active ] || exit 0
+dmesg > /run/nuubos/diagnostics/dmesg-shutdown.txt 2>&1
+out="$(/usr/bin/nuubos-diag bundle 2>/dev/null | tail -1)"
+[ -n "$out" ] && [ -f "$out" ] || exit 0
+mkdir -p /state/diagnostics
+echo "$out" > /state/diagnostics/last-bundle
+sync
+exit 0

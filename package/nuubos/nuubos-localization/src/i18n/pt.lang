@@ -1345,3 +1345,9 @@
 1344=Sincronizar {0} como
 1345=Desativar
 1346=Usar a pasta do nuubOS
+1347=HyperSleep
+1348=Quase sem consumo de bateria. Acorda com o botão de energia.
+1349=START e a tampa também o acordam. Gasta mais bateria.
+1350=Modo de diagnóstico
+1351=Próximos {0} arranques
+1352=Regista tudo nos próximos 10 arranques e guarda um relatório em cada reinício ou encerramento. Desligado por predefinição: os registos custam desempenho e escritas no cartão.

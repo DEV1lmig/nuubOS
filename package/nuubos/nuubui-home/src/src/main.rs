@@ -192,6 +192,10 @@ struct SystemSnapshot {
     sleep_after_min: i32,
     charge_limit: i32,
     charge_limit_supported: bool,
+    hypersleep: bool,
+    /* Diagnostic mode (nuubos-systemd): boots still to log, running boot. */
+    diag_boots: i32,
+    diag_active: bool,
     cpu_freq_khz: i64,
     gpu_freq_hz: i64,
     cpu_temp_millic: i64,
@@ -217,6 +221,9 @@ impl Default for SystemSnapshot {
             sleep_after_min: 0,
             charge_limit: 100,
             charge_limit_supported: false,
+            hypersleep: true,
+            diag_boots: 0,
+            diag_active: false,
             cpu_freq_khz: -1,
             gpu_freq_hz: -1,
             cpu_temp_millic: -1,
@@ -629,6 +636,9 @@ fn parse_system_snapshot(reply: &str) -> SystemSnapshot {
             "sleep_after_min" => s.sleep_after_min = value.parse().unwrap_or(0),
             "charge_limit" => s.charge_limit = value.parse().unwrap_or(100),
             "charge_limit.supported" => s.charge_limit_supported = value == "1",
+            "hypersleep" => s.hypersleep = value != "0",
+            "diagnostics.boots" => s.diag_boots = value.parse().unwrap_or(0),
+            "diagnostics.active" => s.diag_active = value == "1",
             "cpu.freq_khz" => s.cpu_freq_khz = value.parse().unwrap_or(-1),
             "gpu.freq_hz" => s.gpu_freq_hz = value.parse().unwrap_or(-1),
             "temp.cpu_millic" => s.cpu_temp_millic = value.parse().unwrap_or(-1),
@@ -669,6 +679,17 @@ fn apply_system_snapshot(ui: &HomeWindow, s: &SystemSnapshot) {
         rebuild_power_devices(ui);
     }
     ui.set_system_charge_limit(s.charge_limit);
+    ui.set_system_hypersleep(s.hypersleep);
+    /* Diagnostic Mode row: Off, or the starts still to log (1351); On (222)
+     * for the last logged start. */
+    ui.set_diag_mode_on(s.diag_active || s.diag_boots > 0);
+    ui.set_diag_mode_value(if s.diag_boots > 0 {
+        tr(ui, 1351, "Next {0} starts").replace("{0}", &s.diag_boots.to_string()).into()
+    } else if s.diag_active {
+        tr(ui, 222, "On").into()
+    } else {
+        tr(ui, 54, "Off").into()
+    });
 
     ui.set_system_cpu_clock(if s.cpu_freq_khz >= 0 {
         format!("{:.2} GHz", s.cpu_freq_khz as f64 / 1_000_000.0).into()
@@ -4489,14 +4510,16 @@ fn safe_confirm(ui: &HomeWindow, row: i32, settings_active: &Arc<AtomicBool>) {
  * Information) | TROUBLESHOOTING (3 Diagnostics, 4 Backup, 5 Recovery). */
 const SYSTEM_ROWS: i32 = 6;
 /* Settings → Power (settings-view 69, category 5): POWER (0 Performance
- * Profile, 1 Automatic Battery Saver, 2 Sleep After) | BATTERY (3 Charge,
- * 4 Health, read-only; 5 Charge Limit when the battery driver has one) |
- * CONNECTED DEVICES (after them, read-only, at least one row: "none"). */
+ * Profile, 1 Automatic Battery Saver, 2 Sleep After, 3 Hypersleep) |
+ * BATTERY (4 Charge, 5 Health, read-only; 6 Charge Limit when the battery
+ * driver has one) | CONNECTED DEVICES (after them, read-only, at least one
+ * row: "none"). */
 const POWER_VIEW: i32 = 69;
-const POWER_CHARGE_LIMIT_ROW: i32 = 5;
+const POWER_HYPERSLEEP_ROW: i32 = 3;
+const POWER_CHARGE_LIMIT_ROW: i32 = 6;
 
 fn power_devices_start(ui: &HomeWindow) -> i32 {
-    if ui.get_system_charge_limit_supported() { 6 } else { 5 }
+    if ui.get_system_charge_limit_supported() { 7 } else { 6 }
 }
 
 fn power_row_count(ui: &HomeWindow) -> i32 {
@@ -4509,7 +4532,7 @@ fn update_power_scroll(ui: &HomeWindow) {
         ui.get_power_index(),
         power_row_count(ui),
         ui.get_power_scroll_offset(),
-        (3, power_devices_start(ui), 0),
+        (4, power_devices_start(ui), 0),
     ));
 }
 
@@ -5212,6 +5235,11 @@ fn handle_settings_action(
                 }
                 1 => open_auto_battery_dropdown(ui),
                 2 => open_sleep_timeout_dropdown(ui),
+                /* Hypersleep on/off (nuubos-systemd, platform.md). */
+                POWER_HYPERSLEEP_ROW => {
+                    let next = if ui.get_system_hypersleep() { 0 } else { 1 };
+                    system_set(ui, format!("SET HYPERSLEEP {next}"));
+                }
                 POWER_CHARGE_LIMIT_ROW if ui.get_system_charge_limit_supported() => open_charge_limit_dropdown(ui),
                 /* Battery and device rows are read-only. */
                 _ => {}
@@ -5236,9 +5264,15 @@ fn handle_settings_action(
             _ => {}
         },
         27 => match action {
-            "menu_up" => ui.set_diag_index(move_model_selection(ui.get_diag_index(), 2, -1)),
-            "menu_down" => ui.set_diag_index(move_model_selection(ui.get_diag_index(), 2, 1)),
+            "menu_up" => ui.set_diag_index(move_model_selection(ui.get_diag_index(), 3, -1)),
+            "menu_down" => ui.set_diag_index(move_model_selection(ui.get_diag_index(), 3, 1)),
             "menu_confirm" if ui.get_diag_index() == 0 && !ui.get_diag_busy() => create_support_bundle(ui),
+            /* Diagnostic Mode (docs/dev/system.md): off by default; on logs
+             * the next 10 starts, confirm again turns it off. */
+            "menu_confirm" | "menu_left" | "menu_right" if ui.get_diag_index() == 1 => {
+                let boots = if ui.get_diag_mode_on() { 0 } else { 10 };
+                system_set(ui, format!("SET DIAGNOSTICS {boots}"));
+            }
             _ => {}
         },
         18 => {
@@ -5904,6 +5938,8 @@ static BOOT_PALETTE: OnceLock<splash::Palette> = OnceLock::new();
 
 thread_local! {
     static SPLASH_TIMER: Timer = Timer::default();
+    /* Keeps the boot animation's wait for the covers (main()) alive. */
+    static BOOT_GATE: std::cell::RefCell<Option<Rc<Timer>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Rasters and track geometry of the lifecycle splash for `mode` at the
@@ -6144,9 +6180,26 @@ fn main() -> Result<(), slint::PlatformError> {
                     return;
                 }
                 probe.stop();
-                if let Some(ui) = weak.upgrade() {
-                    start_boot_transition(&ui);
-                }
+                /* The recently played covers belong to the first picture:
+                 * the animation also waits for the first library snapshot
+                 * and its covers (decoded from the cover pack), at most
+                 * 1.5 s. */
+                let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+                let gate = Rc::new(Timer::default());
+                let gate_ref = Rc::downgrade(&gate);
+                let weak = weak.clone();
+                gate.start(slint::TimerMode::Repeated, Duration::from_millis(20), move || {
+                    if !library::home_covers_settled() && std::time::Instant::now() < deadline {
+                        return;
+                    }
+                    if let Some(gate) = gate_ref.upgrade() {
+                        gate.stop();
+                    }
+                    if let Some(ui) = weak.upgrade() {
+                        start_boot_transition(&ui);
+                    }
+                });
+                BOOT_GATE.with(|g| *g.borrow_mut() = Some(gate));
             }
         };
         let on_frame = begin.clone();

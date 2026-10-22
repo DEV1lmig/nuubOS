@@ -1,0 +1,29 @@
+From 96d1f6c7883f84e8e119b2d56a1c78852dc49b67 Mon Sep 17 00:00:00 2001
+From: nuubOS Project <noreply@nuubos.invalid>
+Date: Thu, 22 Oct 2026 19:05:21 +0200
+Subject: [PATCH 3/3] Report the core as YabaSanshiro-nuubOS
+
+nuubOS build (H700 performance patches), told apart from upstream
+YabaSanshiro, which users may download next to it.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+ yabause/src/libretro/libretro.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/yabause/src/libretro/libretro.c b/yabause/src/libretro/libretro.c
+index 52adda5..7badb3a 100644
+--- a/yabause/src/libretro/libretro.c
++++ b/yabause/src/libretro/libretro.c
+@@ -657,7 +657,7 @@ static struct retro_system_av_info g_av_info;
+ void retro_get_system_info(struct retro_system_info *info)
+ {
+    memset(info, 0, sizeof(*info));
+-   info->library_name     = "YabaSanshiro";
++   info->library_name     = "YabaSanshiro-nuubOS";
+ #ifndef GIT_VERSION
+ #define GIT_VERSION ""
+ #endif
+-- 
+2.56.0
+

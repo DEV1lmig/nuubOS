@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+# Start all init scripts in /etc/init.d executing them in numerical order
+# (Buildroot's rcS). nuubOS: the start and end of each script (seconds since
+# the kernel started) are kept for the diagnostic mode's support bundle;
+# /proc/uptime is read with the shell builtin, no extra process
+# (docs/dev/system.md).
+times=""
+for i in /etc/init.d/S??*; do
+
+	# Ignore dangling symlinks (if any).
+	[ ! -f "$i" ] && continue
+
+	read -r t0 _ < /proc/uptime
+	case "$i" in
+		*.sh)
+			# Source shell script for speed.
+			(
+				trap - INT QUIT TSTP
+				set start
+				# shellcheck source=/dev/null
+				. "$i"
+			)
+			;;
+		*)
+			# No sh extension, so fork subprocess.
+			"$i" start
+			;;
+	esac
+	read -r t1 _ < /proc/uptime
+	times="$times$t0 $t1 ${i##*/}
+"
+done
+[ -d /run/nuubos/diagnostics/boot ] &&
+	printf '%s' "$times" > /run/nuubos/diagnostics/boot/94-boot-times.txt
+exit 0

@@ -236,12 +236,41 @@ static void log_message(const char *fmt, ...)
 	if (!log_file)
 		return;
 
+	/* Monotonic seconds like dmesg: input reports (ghost input after a
+	 * resume, 2026-10-22) need to know how far apart events were. */
+	{
+		struct timespec ts;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+			fprintf(log_file, "[%5lld.%03ld] ", (long long)ts.tv_sec,
+				ts.tv_nsec / 1000000);
+	}
 	va_start(ap, fmt);
 	vfprintf(log_file, fmt, ap);
 	va_end(ap);
 
 	fputc('\n', log_file);
 	fflush(log_file);
+}
+
+/* Per-event lines (keys, axes, navigation repeats, hotkeys) only in
+ * diagnostic mode (docs/dev/system.md): logs are off by default for
+ * performance and SD wear (user decision 2026-10-22). The flag is looked
+ * at every 2 s at most, so turning the mode on needs no restart. */
+static bool diag_verbose(void)
+{
+	static long long checked_ms = -1;
+	static bool active;
+	struct timespec ts;
+	long long now;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	now = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	if (checked_ms < 0 || now - checked_ms >= 2000) {
+		active = access("/run/nuubos/diagnostics/active", F_OK) == 0;
+		checked_ms = now;
+	}
+	return active;
 }
 
 static void handle_signal(int sig)
@@ -1036,9 +1065,12 @@ static void sync_input_grab(void)
 }
 
 static void release_all_vpads(void);
+static void reset_pad_navigation(void);
 
 static void set_menu_grab(bool enabled)
 {
+	if (enabled != menu_open && gamepads_forwarding())
+		reset_pad_navigation();
 	menu_open = enabled;
 	/* The Quick Menu takes the controllers: nothing stays held in the
 	 * game underneath it. */
@@ -1299,7 +1331,8 @@ static void broadcast_action_state(const char *action, const char *state)
 	snprintf(message, sizeof(message),
 		 "EVENT 1 %s %s\n", action, state);
 
-	log_message(
+	if (diag_verbose())
+		log_message(
 		"emit action=%s state=%s subscribers=%zu quick-menu=%d settings=%d",
 		action,
 		state,
@@ -1414,11 +1447,49 @@ static int navigation_repeat_timeout_ms(void)
 }
 
 /*
+ * Thresholds on the binding's travel (0..100): a hat reports 0 or 100, an
+ * analog half axis or trigger needs a deliberate press and releases with
+ * hysteresis so it does not chatter.
+ */
+#define ABS_BINDING_PRESS 50
+#define ABS_BINDING_RELEASE 30
+
+static int abs_binding_travel(const struct abs_binding *binding, int normalized)
+{
+	switch (binding->dir) {
+	case 1:
+		return normalized;
+	case -1:
+		return -normalized;
+	case 2:
+		return (normalized + 100) / 2;
+	default:
+		return (100 - normalized) / 2;
+	}
+}
+
+/* The device's live value of an axis, false when it cannot be read. */
+static bool live_abs_value(const struct input_dev *input, int code, int *value)
+{
+	struct input_absinfo info;
+
+	if (ioctl(input->fd, EVIOCGABS(code), &info) < 0)
+		return false;
+	*value = info.value;
+	return true;
+}
+
+/*
  * Whether a navigation action is still held on some controller right now:
- * its key in the device's live key state, its axis binding, or the stick's
- * navigation direction. A repeat whose release never arrived (it took
- * another route: game, Quick Menu, remapping...) stops by itself instead of
- * scrolling forever.
+ * its key in the device's live key state, its axis binding or the stick's
+ * navigation direction, both confirmed by the live axis value. A repeat
+ * whose release never arrived (it took another route: game, Quick Menu,
+ * remapping...) stops by itself instead of scrolling forever. The cached
+ * direction alone is not enough: while a game owns the controllers the
+ * stick's events go to the game only, so a direction set in the Quick Menu
+ * stayed set after it closed and kept the menus scrolling by themselves
+ * (user report 2026-10-22, CubeXX). A device that cannot be read holds
+ * nothing.
  */
 static bool navigation_action_held(const char *action)
 {
@@ -1437,18 +1508,33 @@ static bool navigation_action_held(const char *action)
 			if (code >= 0 && code <= KEY_MAX) {
 				unsigned long keys[NBITS(KEY_MAX + 1)];
 
-				if (ioctl(input->fd, EVIOCGKEY(sizeof(keys)), keys) < 0 ||
+				if (ioctl(input->fd, EVIOCGKEY(sizeof(keys)), keys) >= 0 &&
 				    bit_is_set(keys, (unsigned int)code))
 					return true;
 			}
-			if (input->abs_bindings[b].present && input->abs_bindings[b].pressed)
-				return true;
+			if (input->abs_bindings[b].present && input->abs_bindings[b].pressed) {
+				const struct abs_binding *binding = &input->abs_bindings[b];
+				int value;
+
+				if (live_abs_value(input, binding->code, &value) &&
+				    abs_binding_travel(binding,
+						       normalize_abs(input, binding->code, value)) >=
+					    ABS_BINDING_RELEASE)
+					return true;
+			}
 		}
 		for (size_t a = 0; a < 2; a++) {
 			const struct nav_axis *axis = axes[a];
 			const char *held;
+			int value;
 
-			if (!axis->present || axis->direction == 0)
+			if (!axis->present || axis->direction == 0 ||
+			    !live_abs_value(input, axis->code, &value))
+				continue;
+			if (axis->inverted)
+				value = 2 * axis->center - value;
+			if (axis->direction < 0 ? value >= axis->center - axis->release_delta
+						: value <= axis->center + axis->release_delta)
 				continue;
 			if (axis->horizontal)
 				held = axis->direction < 0 ? "menu_left" : "menu_right";
@@ -1472,8 +1558,12 @@ static void navigation_repeat_tick(void)
 	if (now < repeat_next_ms)
 		return;
 
-	if (!navigation_action_held(repeat_action)) {
-		log_message("navigation-repeat stop action=%s reason=not-held", repeat_action);
+	/* With the Quick Menu closed a running game owns the controllers:
+	 * nothing navigates the UI underneath it. */
+	if (!navigation_action_held(repeat_action) ||
+	    (gamepads_forwarding() && !menu_open)) {
+		log_message("navigation-repeat stop action=%s reason=%s", repeat_action,
+			    menu_open || !gamepads_forwarding() ? "not-held" : "game");
 		broadcast_action_state(repeat_action, "released");
 		repeat_action[0] = '\0';
 		repeat_next_ms = 0;
@@ -1481,12 +1571,40 @@ static void navigation_repeat_tick(void)
 	}
 
 	mapped_press_count++;
-	log_message("navigation-repeat action=%s", repeat_action);
+	if (diag_verbose())
+		log_message("navigation-repeat action=%s", repeat_action);
 	snprintf(last_action, sizeof(last_action), "%s", repeat_action);
 	snprintf(last_device, sizeof(last_device), "%s", "repeat-timer");
 	last_value = 2;
 	broadcast_action_state(repeat_action, "pressed");
 	repeat_next_ms = now + NAV_REPEAT_INTERVAL_MS;
+}
+
+/*
+ * The controllers change hands between a running game and the Quick Menu
+ * (or a game starts or ends): from here their stick and hat events reach
+ * process_nav_axis() / process_abs_binding() only while the Quick Menu is
+ * open, so a direction remembered now would never see its release. Forget
+ * it, and end a repeat in progress with its release to the current owner.
+ */
+static void reset_pad_navigation(void)
+{
+	size_t i, b;
+
+	for (i = 0; i < input_count; i++) {
+		if (!input_is_pad(&inputs[i]))
+			continue;
+		inputs[i].abs_x.direction = 0;
+		inputs[i].abs_y.direction = 0;
+		for (b = 0; b < sizeof(bindings) / sizeof(bindings[0]); b++)
+			inputs[i].abs_bindings[b].pressed = false;
+	}
+	if (repeat_action[0] == '\0')
+		return;
+	log_message("navigation-repeat stop action=%s reason=owner-change", repeat_action);
+	broadcast_action_state(repeat_action, "released");
+	repeat_action[0] = '\0';
+	repeat_next_ms = 0;
 }
 
 /*
@@ -2158,6 +2276,7 @@ static void set_gamepads(bool enabled)
 {
 	if (gamepads_on == enabled)
 		return;
+	reset_pad_navigation();
 	gamepads_on = enabled;
 	pad_inject = 0;
 	hotkey_held = false;
@@ -2286,7 +2405,8 @@ static void send_game_hotkey(const char *action)
 	size_t i;
 
 	snprintf(message, sizeof(message), "HOTKEY %s\n", action);
-	log_message("game-hotkey action=%s", action);
+	if (diag_verbose())
+		log_message("game-hotkey action=%s", action);
 	for (i = 0; i < MAX_CLIENTS; i++) {
 		if (clients[i].fd < 0 || !clients[i].owns_gamepads)
 			continue;
@@ -2619,6 +2739,7 @@ static void set_web(bool enabled)
 {
 	if (web_on == enabled)
 		return;
+	reset_pad_navigation();
 	web_on = enabled;
 	hotkey_held = false;
 	hotkey_used = false;
@@ -3350,7 +3471,8 @@ static void process_nav_axis(struct input_dev *input,
 
 	axis->direction = next;
 
-	log_message(
+	if (diag_verbose())
+		log_message(
 		"nav-axis-event device=%s code=%d value=%d previous=%d next=%d quick-menu=%d settings=%d",
 		input->name,
 		axis->code,
@@ -3394,36 +3516,13 @@ static void process_nav_axis(struct input_dev *input,
 	emit_action_state(action, "pressed");
 }
 
-/*
- * Thresholds on the binding's travel (0..100): a hat reports 0 or 100, an
- * analog half axis or trigger needs a deliberate press and releases with
- * hysteresis so it does not chatter.
- */
-#define ABS_BINDING_PRESS 50
-#define ABS_BINDING_RELEASE 30
-
 static void process_abs_binding(struct input_dev *input, size_t index,
 				int normalized)
 {
 	struct abs_binding *binding = &input->abs_bindings[index];
 	const char *action = bindings[index].name;
-	int travel;
+	int travel = abs_binding_travel(binding, normalized);
 	bool pressed;
-
-	switch (binding->dir) {
-	case 1:
-		travel = normalized;
-		break;
-	case -1:
-		travel = -normalized;
-		break;
-	case 2:
-		travel = (normalized + 100) / 2;
-		break;
-	default:
-		travel = (100 - normalized) / 2;
-		break;
-	}
 
 	pressed = binding->pressed ? travel >= ABS_BINDING_RELEASE
 				   : travel >= ABS_BINDING_PRESS;
@@ -3615,7 +3714,8 @@ static void process_events(struct input_dev *input,
 		if (!action)
 			continue;
 
-		log_message(
+		if (diag_verbose())
+			log_message(
 			"key-action device=%s code=%d value=%d action=%s quick-menu=%d settings=%d",
 			input->name,
 			events[i].code,

@@ -33,6 +33,8 @@ File name mapping (nuubOS id <- original file):
   pcengine.png <- NEC - PC Engine - TurboGrafx 16.png
   neogeo.png <- SNK - Neo Geo.png
   arcade.png <- FBNeo - Arcade Games.png
+  naomi.png <- FBNeo - Arcade Games.png (the set has no NAOMI icon)
+  atomiswave.png <- FBNeo - Arcade Games.png (the set has no Atomiswave icon)
   ngp.png <- SNK - Neo Geo Pocket.png
   wonderswan.png <- Bandai - WonderSwan.png
   lynx.png <- Atari - Lynx.png
@@ -90,5 +92,5 @@ File name mapping (nuubOS id <- original file):
   oric.png <- Tangerine Computer Systems - Oric.png
   fmtowns.png <- Fujitsu - FM Towns.png
 
-pico8, atomiswave, naomi, samcoupe, coco, dragon32, sordm5 and trs80 have no icon in this set; the UI shows
+pico8, samcoupe, coco, dragon32, sordm5 and trs80 have no icon in this set; the UI shows
 its generic gamepad glyph.

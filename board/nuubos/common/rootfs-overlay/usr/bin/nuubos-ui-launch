@@ -29,4 +29,8 @@ export XCURSOR_THEME=nuubos-hidden
 export XCURSOR_SIZE=1
 
 echo $$ > "$PIDFILE"
+# Diagnostic mode (docs/dev/system.md): wlroots/labwc debug log, timestamped.
+if [ -f /run/nuubos/diagnostics/active ]; then
+    exec /usr/bin/labwc -d >/run/nuubos/diagnostics/labwc.log 2>&1
+fi
 exec /usr/bin/labwc >"$LOGFILE" 2>&1

@@ -579,8 +579,9 @@ fn main() {
             ui.set_display_audio_index(12); ui.set_display_audio_scroll_offset(9);
         })),
         ("system", Box::new(|ui| { ui.set_display_color_temperature_available(false); ui.set_settings_selected_index(6); ui.set_settings_view(19); ui.set_system_index(5); ui.set_system_scroll_offset(0); })),
-        ("power", Box::new(|ui| { ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(1); ui.set_power_scroll_offset(0); })),
-        ("power_devices", Box::new(|ui| { ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(5); ui.set_power_scroll_offset(3); })),
+        ("power", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(3); ui.set_power_scroll_offset(0); })),
+        ("power_quick", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_system_hypersleep(false); ui.set_power_index(3); ui.set_power_scroll_offset(0); })),
+        ("power_devices", Box::new(|ui| { ui.set_settings_open(true); ui.set_system_hypersleep(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(6); ui.set_power_scroll_offset(4); })),
         ("controllers", Box::new(|ui| { ui.set_settings_selected_index(2); ui.set_settings_view(0); })),
         ("lighting", Box::new(|ui| {
             ui.set_lighting_supported(true); ui.set_lighting_effect("orbit".into()); ui.set_lighting_color("theme".into());

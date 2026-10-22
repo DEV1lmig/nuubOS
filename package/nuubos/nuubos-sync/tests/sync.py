@@ -199,6 +199,10 @@ try:
     check('folder before enabling (saves by default)', ctl('folder', 'states', 'on').startswith('OK')
           and 'FOLDERS=saves,states' in conf())
     check('enable', ctl('enable').startswith('OK'))
+    # Syncthing waits for nuubUI (boot audit 2026-10-22).
+    time.sleep(0.5)
+    check('not started before ui-ready', 'running=0' in last())
+    open(run + '/ui-ready', 'w').close()
     check('runs, becomes ready', wait(lambda: 'ready=1' in last()))
     check('per-user api key', 'APIKEY=' in conf())
     check('no monitor process', open(users + '/' + U1 + '/appdata/syncthing/env').read() == 'yes')

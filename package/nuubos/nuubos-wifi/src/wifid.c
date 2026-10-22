@@ -688,7 +688,9 @@ static bool ensure_wpa_running(void)
         ;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
         return false;
-    usleep(150000);
+    /* No wait needed: with -B wpa_supplicant creates the interface's
+     * control socket (wpa_supplicant_add_iface) before it daemonizes
+     * (wpa_supplicant_run), so it exists once the parent has exited. */
     if (!wpa_ping())
         return false;
     /* A previous instance's monitor died with it. */

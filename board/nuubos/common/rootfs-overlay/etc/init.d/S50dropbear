@@ -4,7 +4,20 @@
 # (nuubos-remotectl, which also prepares the device credential).
 
 case "${1:-}" in
-    start|restart|reload)
+    start)
+        # At boot after nuubUI is ready (boot audit 2026-10-22: the UI
+        # first), at the latest 30 s on so that SSH also reaches a console
+        # whose UI does not come up (remote assistance, safe mode).
+        (
+            I=0
+            while [ ! -e /run/nuubos/ui-ready ] && [ "$I" -lt 150 ]; do
+                sleep 0.2
+                I=$((I + 1))
+            done
+            /usr/sbin/nuubos-remotectl start
+        ) >/dev/null 2>&1 &
+        ;;
+    restart|reload)
         /usr/sbin/nuubos-remotectl start
         ;;
     stop)

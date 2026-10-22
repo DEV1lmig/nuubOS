@@ -1,0 +1,6 @@
+#!/bin/sh
+# Sleep only: the speaker amplifier goes off before the kernel powers the
+# codec down (no pop); 40-audio-resume (post-wake.d) lets it back on.
+# Restart and Power Off keep it: their system sounds play during them.
+[ "${1:-}" = sleep ] || exit 0
+exec /usr/bin/nuubos-audioctl lifecycle park >/dev/null

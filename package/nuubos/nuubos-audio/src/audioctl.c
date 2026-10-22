@@ -27,9 +27,10 @@ static void usage(const char *argv0)
 		"  %s music start|stop|next\n"
 		"  %s sfx navigation|select|back|quick-settings|launch|error|screenshot|boot|restart|poweroff\n"
 		"  %s test-sound start|stop|status\n"
-		"  %s reset-defaults\n",
+		"  %s reset-defaults\n"
+		"  %s lifecycle park|resume\n",
 		argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0,
-		argv0, argv0, argv0, argv0, argv0, argv0);
+		argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static int connect_daemon(void)
@@ -62,6 +63,10 @@ int main(int argc, char **argv)
 
 	if (argc == 2 && strcmp(argv[1], "status") == 0) {
 		snprintf(command, sizeof(command), "STATUS");
+	} else if (argc == 3 && strcmp(argv[1], "lifecycle") == 0 &&
+		   (strcmp(argv[2], "park") == 0 || strcmp(argv[2], "resume") == 0)) {
+		snprintf(command, sizeof(command), "LIFECYCLE %s",
+			 strcmp(argv[2], "park") == 0 ? "PARK" : "RESUME");
 	} else if (argc == 2 && strcmp(argv[1], "route") == 0) {
 		snprintf(command, sizeof(command), "ROUTE GET");
 	} else if (argc == 2 && strcmp(argv[1], "output") == 0) {

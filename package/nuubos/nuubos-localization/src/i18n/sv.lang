@@ -1345,3 +1345,9 @@
 1344=Synka {0} som
 1345=Stäng av
 1346=Använd nuubOS-mappen
+1347=HyperSleep
+1348=Nästan ingen batteriförbrukning. Väcks med strömknappen.
+1349=START och locket väcker också. Drar mer batteri.
+1350=Diagnostikläge
+1351=Nästa {0} starter
+1352=Loggar allt under de nästa 10 starterna och sparar en rapport vid varje omstart eller avstängning. Av som standard: loggning kostar prestanda och skrivningar till kortet.

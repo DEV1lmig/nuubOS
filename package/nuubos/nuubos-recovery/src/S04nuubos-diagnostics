@@ -1,0 +1,90 @@
+#!/bin/sh
+#
+# Diagnostic mode (user request 2026-10-22, docs/dev/system.md): off by
+# default, and then there is no log at all (see logs_off). While
+# /state/diagnostics/boots (set by nuubos-systemctl set-diagnostics) is above
+# zero, each boot spends one and is marked in RAM (/run/nuubos/diagnostics/
+# active): the boot collectors here and in S99, the rcS script timing,
+# emud (RetroArch --verbose) and inputd (per-event lines) then log into
+# /run/nuubos/diagnostics, and the pre-power hook 95-diagnostics turns it
+# into a support bundle at Restart / Power Off. Runs right after S03
+# mounted STATE.
+
+BOOTS=/state/diagnostics/boots
+DIR=/run/nuubos/diagnostics
+# Every service log of /run/nuubos (all in RAM; nothing in the product reads
+# them). With the mode off each one is a link to /dev/null before the
+# services start (S10 on), and syslogd/klogd (S01/S02, before STATE) stop:
+# no diagnostics at all (user decision 2026-10-22). S99 replaces any log
+# not in this list. Logs of a service started later go to /dev/null too.
+LOGS="castd charge emud inputd jobd labwc libraryd mediad notifyd pipewire
+quick-menu-action regionald retroarch splash status-time-sync streamd syncd
+syncthing systemd tsd ui-bootstrap usersd wifi-dhcp wireplumber"
+
+logs_off()
+{
+    for l in $LOGS; do
+        ln -sfn /dev/null "/run/nuubos/$l.log"
+    done
+    /etc/init.d/S02klogd stop >/dev/null 2>&1
+    /etc/init.d/S01syslogd stop >/dev/null 2>&1
+    rm -f /var/log/messages
+}
+
+case "$1" in
+start)
+    mkdir -p /run/nuubos
+    [ -f "$BOOTS" ] || { logs_off; exit 0; }
+    n="$(cat "$BOOTS" 2>/dev/null)"
+    case "$n" in
+        ''|*[!0-9]*) rm -f "$BOOTS"; logs_off; exit 0 ;;
+    esac
+    [ "$n" -gt 0 ] || { rm -f "$BOOTS"; logs_off; exit 0; }
+    n=$((n - 1))
+    if [ "$n" -gt 0 ]; then
+        echo "$n" > "$BOOTS.tmp" && mv "$BOOTS.tmp" "$BOOTS"
+    else
+        rm -f "$BOOTS"
+    fi
+    mkdir -p "$DIR/boot"
+    chmod 700 "$DIR"
+    : > "$DIR/active"
+    {
+        echo "boots_left_after_this=$n"
+        cat /proc/cmdline
+        cat /proc/device-tree/model; echo
+        uname -a
+    } > "$DIR/boot/01-identity.txt" 2>&1
+    mount > "$DIR/boot/02-mounts.txt" 2>&1
+    cat /proc/partitions > "$DIR/boot/03-partitions.txt" 2>&1
+    dmesg > "$DIR/boot/04-dmesg-early.txt" 2>&1
+    # The time before Linux (bootloader, DRAM init): read before any sleep.
+    /usr/libexec/nuubos-boot-stages > "$DIR/boot/00-before-linux.txt" 2>&1
+    # Power supplies and the AXP717 status registers (REG 00 battery
+    # present, REG 20 power-on source): what the charge screen decides on.
+    {
+        for d in /sys/class/power_supply/*; do echo "== $d"; cat "$d/uevent"; done
+        for r in 0x00 0x01 0x04 0x20; do echo "axp717 $r=$(i2cget -f -y 0 0x34 $r 2>&1)"; done
+    } > "$DIR/boot/05-power.txt" 2>&1
+    # Driver probing (was S02nuubos-probe's dump on every boot).
+    mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    {
+        echo "=== deferred ==="
+        cat /sys/kernel/debug/devices_deferred 2>/dev/null
+        echo "=== modules ==="
+        lsmod
+        echo "=== platform drivers ==="
+        for l in /sys/bus/platform/devices/*/driver; do
+            echo "${l%/driver} -> $(readlink "$l")"
+        done
+    } > "$DIR/boot/07-probe.txt" 2>&1
+    for f in /sys/class/drm/*/status; do
+        [ -f "$f" ] || continue
+        echo "=== $f ==="
+        cat "$f"
+    done > "$DIR/boot/06-drm-status.txt" 2>&1
+    ;;
+stop|restart|reload) ;;
+*) echo "Usage: $0 {start}"; exit 1 ;;
+esac
+exit 0

@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# boot-timing-rcS: drop-in /etc/init.d/rcS for a boot time audit (test only,
+# put back the original afterwards). Same order as Buildroot's rcS; each
+# script's start and end (seconds since the kernel started, /proc/uptime)
+# go to /run/boot-times.txt, one line "start end name".
+for i in /etc/init.d/S??*; do
+	[ ! -f "$i" ] && continue
+	t0=$(cut -d' ' -f1 /proc/uptime)
+	case "$i" in
+		*.sh)
+			(
+				trap - INT QUIT TSTP
+				set start
+				. "$i"
+			)
+			;;
+		*)
+			"$i" start
+			;;
+	esac
+	echo "$t0 $(cut -d' ' -f1 /proc/uptime) ${i##*/}" >> /run/boot-times.txt
+done
