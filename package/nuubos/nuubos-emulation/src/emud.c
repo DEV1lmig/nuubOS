@@ -1198,6 +1198,21 @@ static bool read_active_user(char *out, size_t size)
 	return out[0] != '\0';
 }
 
+/* Systems whose frames keep the H700 GPU or CPU near its limit: they keep
+ * the default swap order (see NUUBOS_SWAP_WAIT_AFTER at the launch). */
+static bool heavy_system(const char *system)
+{
+	static const char *const heavy[] = {
+		"dreamcast", "naomi", "atomiswave", "n64", "psp", "nds", "saturn", NULL
+	};
+	int i;
+
+	for (i = 0; heavy[i]; i++)
+		if (!strcmp(system, heavy[i]))
+			return true;
+	return false;
+}
+
 /* RetroArch user_language for the user's nuubOS language. */
 static int retroarch_language(const char *user)
 {
@@ -3164,6 +3179,15 @@ static int write_session_cfg(const char *ra_dir, const char *saves,
 	remember_key("video_threaded");
 	if (!strcmp(session.system, "nds"))
 		fprintf(fp, "video_threaded = \"true\"\n");
+	/* Light systems run the core late in the refresh, closer to the
+	 * vblank, so it reads the input later: RetroArch's automatic frame
+	 * delay (0 = target 3/4 of a frame) and it lowers the delay by itself
+	 * when the core's time no longer fits. Heavy systems need the whole
+	 * frame (see heavy_system). */
+	remember_key("video_frame_delay");
+	remember_key("video_frame_delay_auto");
+	fprintf(fp, "video_frame_delay = \"0\"\nvideo_frame_delay_auto = \"%s\"\n",
+		heavy_system(session.system) ? "false" : "true");
 	/* The performance overlay line is drawn into the frame with the OSD
 	 * font (RetroArch notifications use widgets, not this font). */
 	remember_key("video_font_enable");
@@ -3616,6 +3640,12 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		}
 		if (session.bezel_env[0])
 			setenv("NUUBOS_RA_BEZEL", session.bezel_env, 1);
+		/* Saturn: YabaSanshiro uploads its texture atlas by regions; Mesa
+		 * patch 0008 makes such textures linear (no staging copy and
+		 * software tiling per upload). Virtua Fighter 2 fight 27.3-27.8
+		 * -> 28.4 fps (2026-10-23); neutral on Dreamcast, so Saturn only. */
+		if (!strcmp(session.system, "saturn"))
+			setenv("NUUBOS_PAN_LINEAR_UPLOADS", "1", 1);
 		/* Dreamcast family (Flycast-nuubOS draws each frame at the start of
 		 * the next retro_run, so it reaches the GPU late): a swap may wait
 		 * two frames back instead of one (Mesa patch 0005). Crazy Taxi
@@ -3630,6 +3660,16 @@ static const char *launch(const char *game, const char *mode, const char *net)
 			setenv("NUUBOS_THROTTLE_DEPTH", "2", 1);
 			setenv("NUUBOS_THROTTLE_SOFT_MS", "8", 1);
 		}
+		/* Light systems: every frame is committed at the start of its swap
+		 * and the swap then waits for its frame callback (Mesa patch
+		 * 0007); before, the wait came first and each frame reached labwc
+		 * one refresh later. Input -> screen 57 -> 40.6 ms with the
+		 * latency probe core on the CubeXX (2026-10-23, docs/dev/input.md).
+		 * Heavy systems keep the wait first: their frames reach the GPU
+		 * late, committed at once they missed the vblank (Crazy Taxi
+		 * while driving ~60 -> 40 fps, user 2026-10-23). */
+		if (!heavy_system(session.system))
+			setenv("NUUBOS_SWAP_WAIT_AFTER", "1", 1);
 		execv(RETROARCH_BIN, argv);
 		_exit(127);
 	}
