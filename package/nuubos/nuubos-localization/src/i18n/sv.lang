@@ -1351,3 +1351,4 @@
 1350=Diagnostikläge
 1351=Nästa {0} starter
 1352=Loggar allt under de nästa 10 starterna och sparar en rapport vid varje omstart eller avstängning. Av som standard: loggning kostar prestanda och skrivningar till kortet.
+1353=Inget batteri: håll strömkabeln ansluten tills uppdateringen är klar

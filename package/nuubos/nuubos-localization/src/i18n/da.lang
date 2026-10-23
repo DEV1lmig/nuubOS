@@ -1351,3 +1351,4 @@
 1350=Diagnosetilstand
 1351=Næste {0} opstarter
 1352=Logger alt ved de næste 10 opstarter og gemmer en rapport ved hver genstart eller slukning. Slået fra som standard: logning koster ydeevne og skrivninger på kortet.
+1353=Intet batteri: hold strømkablet tilsluttet, indtil opdateringen er færdig

@@ -1598,7 +1598,7 @@ async function updatePage() {
         available && !downloaded ? row({ key: 'dl', title: C(653, 'Download'), on: () => act('update.download', {}, { topics: ['jobs'] }) }) : null,
         available && downloaded && u.apply_battery === 'low' ? row({ key: 'inst', title: C(654, 'Install and Restart'), detail: C(1012, 'Charge the battery above 30% to install'),
           on: () => toast(C(1012, 'Charge the battery above 30% to install')) }) : null,
-        available && downloaded && u.apply_battery !== 'low' ? row({ key: 'inst', title: C(654, 'Install and Restart'), detail: C(657, 'Your games, saves and settings are kept'), arm: { prompt: C(191, 'Press again to confirm') },
+        available && downloaded && u.apply_battery !== 'low' ? row({ key: 'inst', title: C(654, 'Install and Restart'), detail: u.apply_battery === 'absent' ? C(1353, 'No battery: keep the power cable connected until the update is complete') : C(657, 'Your games, saves and settings are kept'), arm: { prompt: C(191, 'Press again to confirm') },
           on: async () => { await act('update.install', {}, { topics: ['jobs'] }); toast(C(984, 'Installing update'), T('console_restarts'), false, 0); } }) : null,
         notes.length ? row({ key: 'notes', title: C(1005, "What's New"), chevron: true, on: () => showNotes(C(1005, "What's New") + ' • nuubOS ' + u.version, notes) }) : null])],
   };

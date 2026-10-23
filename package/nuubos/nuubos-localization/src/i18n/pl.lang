@@ -1351,3 +1351,4 @@
 1350=Tryb diagnostyczny
 1351=Następne uruchomienia: {0}
 1352=Zapisuje wszystkie logi przez następne 10 uruchomień i tworzy raport przy każdym ponownym uruchomieniu lub wyłączeniu. Domyślnie wyłączony: logi kosztują wydajność i zapisy na karcie.
+1353=Brak baterii: nie odłączaj zasilania, dopóki aktualizacja się nie zakończy

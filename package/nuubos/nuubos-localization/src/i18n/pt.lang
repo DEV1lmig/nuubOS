@@ -1351,3 +1351,4 @@
 1350=Modo de diagnóstico
 1351=Próximos {0} arranques
 1352=Regista tudo nos próximos 10 arranques e guarda um relatório em cada reinício ou encerramento. Desligado por predefinição: os registos custam desempenho e escritas no cartão.
+1353=Sem bateria: mantém o cabo de alimentação ligado até a atualização terminar

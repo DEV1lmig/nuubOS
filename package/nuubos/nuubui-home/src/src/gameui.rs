@@ -608,6 +608,7 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                     rows.push(("update-busy".into(), progress_row(tr(ui, 984, "Installing update"), st.update_progress), false));
                 } else if available && get("downloaded") == "1" {
                     let detail = if get("battery") == "low" { tr(ui, 1012, "Charge the battery above 30% to install") }
+                        else if get("battery") == "absent" { tr(ui, 1353, "No battery: keep the power cable connected until the update is complete") }
                         else { tr(ui, 657, "Your games, saves and settings are kept") };
                     rows.push(("update-install".into(), row(tr(ui, 654, "Install and Restart"), String::new(),
                         armed_detail(&st.armed, "update-install", tr(ui, 191, "Press again to confirm"), detail)), !st.busy));

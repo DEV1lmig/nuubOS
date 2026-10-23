@@ -34,7 +34,7 @@ manifest nightly 200 "$W/channel-nightly/nuubos-update.manifest"
 manifest rc 300 "$W/channel-rc/nuubos-update.manifest"
 PUB="$(openssl pkey -in "$T/key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')"
 PORT=$((20000 + $$ % 20000))
-(cd "$W" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1) & HTTP=$!
+(cd "$W" && exec python3 "$HERE/range_server.py" "$PORT" >/dev/null 2>&1) & HTTP=$!
 sleep 1
 cc_updatectl() # OUTPUT [EXTRA...]
 {
@@ -84,6 +84,17 @@ $C check >/dev/null
 head -c 100 "$P" > "$U/payload.part"
 OUT="$(NUUBOS_JOB_ID=1 $C download)"
 ck "download (resumed) verified" 'echo "$OUT" | grep -q "@result downloaded" && cmp -s "$U/payload" "$P"'
+ck "no clean marker left after the download" '[ ! -f "$U/payload.part.clean" ]'
+# After a clean stop the part is trusted up to the size it recorded.
+rm -f "$U/payload"; head -c 100 "$P" > "$U/payload.part"; echo 100 > "$U/payload.part.clean"
+ck "clean stop: resumed from its size" '$C download | grep -q "OK downloaded" && cmp -s "$U/payload" "$P"'
+# After a crash (no marker) the end of the part may be garbage: dropped.
+rm -f "$U/payload"; { head -c 100 "$P"; echo garbage; } > "$U/payload.part"
+ck "crash: the part's tail dropped, download verified" '$C download | grep -q "OK downloaded" && cmp -s "$U/payload" "$P"'
+# The marker is what the resume trusts: a wrong part with it is resumed.
+rm -f "$U/payload"; echo garbage > "$U/payload.part"; echo 8 > "$U/payload.part.clean"
+ck "clean marker: the part kept, so a bad one fails its checksum" '$C download | grep -q "ERR checksum" && [ ! -f "$U/payload.part" ]'
+$C download >/dev/null
 ck "verify" '[ "$($C verify)" = OK ]'
 # Tampered manifest is refused, the good one kept.
 cp "$W/channel-nightly/nuubos-update.manifest" "$T/good.manifest"
@@ -113,6 +124,9 @@ echo 30 > "$T/ps/axp20x-battery/capacity"
 ck "battery at 30%: refused, nothing written" 'A status | grep -qx "battery=low" && NUUBOS_JOB_ID=1 A install | grep -qx "@error battery" && [ ! -s "$T/slots/b.img" ] && [ ! -f "$T/sd2.backup" ]'
 echo 31 > "$T/ps/axp20x-battery/capacity"
 ck "battery above 30%: allowed" 'A status | grep -qx "battery=ok"'
+echo 0 > "$T/ps/axp20x-battery/present"
+ck "no battery: allowed, reported absent" 'A status | grep -qx "battery=absent"'
+echo 1 > "$T/ps/axp20x-battery/present"
 OUT="$(NUUBOS_JOB_ID=1 A install)"
 ck "install writes slot B" 'cmp -s "$T/slots/b.img" "$T/system.img" && echo "$OUT" | grep -q "@result restart-required" && echo "$OUT" | grep -q "@progress 100"'
 ck "SD2 backup first, its progress on 0..15" '[ -f "$T/sd2.backup" ] && echo "$OUT" | grep -qx "@progress 7" && echo "$OUT" | grep -qx "@progress 15" && ! echo "$OUT" | grep -q "@progress 50"'

@@ -1351,3 +1351,4 @@
 1350=Diagnosemodus
 1351=Nächste {0} Starts
 1352=Protokolliert alles für die nächsten 10 Starts und speichert bei jedem Neustart oder Ausschalten einen Bericht. Standardmäßig aus: Protokolle kosten Leistung und Schreibvorgänge auf der Karte.
+1353=Kein Akku: Lass das Stromkabel angeschlossen, bis das Update abgeschlossen ist

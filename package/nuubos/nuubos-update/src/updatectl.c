@@ -308,7 +308,9 @@ static int progress_cb(void *p, curl_off_t dltotal, curl_off_t dlnow, curl_off_t
 	return 0;
 }
 
-/* GET url into path; with resume, append from the current size. */
+/* GET url into path; with resume, append from the current size. The HTTP
+ * status, -1 without one (no connection), -2 when the file may not be on
+ * the card. */
 static long fetch(const char *url, const char *path, bool resume, long timeout)
 {
 	CURL *curl = curl_easy_init();
@@ -319,6 +321,7 @@ static long fetch(const char *url, const char *path, bool resume, long timeout)
 	CURLcode res;
 	struct sink sink;
 	char range[32];
+	bool synced;
 
 	if (!curl)
 		return -1;
@@ -355,13 +358,14 @@ static long fetch(const char *url, const char *path, bool resume, long timeout)
 	curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_cb);
 	curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &have);
 	res = curl_easy_perform(curl);
+	synced = fflush(fp) == 0 && fsync(fileno(fp)) == 0;
 	if (res == CURLE_OK)
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	else if (res == CURLE_HTTP_RETURNED_ERROR)
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);
-	if (fclose(fp) != 0)
-		return -1;
+	if (fclose(fp) != 0 || !synced)
+		return -2;
 	return status;
 }
 
@@ -548,6 +552,46 @@ static bool room_for(long long size)
 	return (long long)vfs.f_bavail * (long long)vfs.f_frsize > size - have + (64LL << 20);
 }
 
+/*
+ * payload.part.clean holds the part's size after a download stopped
+ * cleanly (done, failed or cancelled, the data synced). A part without it,
+ * or of another size, survived a crash or a power cut: its end may be a
+ * size that reached the card without the data (2026-10-23, RG35XX Pro SD
+ * hang), so the resume starts PART_TAIL earlier. Only then: on a Wi-Fi
+ * that drops every few MB a clean stop must keep everything.
+ */
+#define PART_CLEAN UPDATE_DIR "/payload.part.clean"
+#define PART_TAIL (8LL << 20)
+
+static void trim_part(void)
+{
+	unsigned char text[32] = "";
+	struct stat st;
+	long long keep;
+
+	if (stat(UPDATE_DIR "/payload.part", &st) != 0)
+		return;
+	if (read_file(PART_CLEAN, text, sizeof(text) - 1) > 0 && atoll((char *)text) == (long long)st.st_size)
+		return;
+	keep = (long long)st.st_size > PART_TAIL ? ((long long)st.st_size - PART_TAIL) & ~((1LL << 20) - 1) : 0;
+	if (truncate(UPDATE_DIR "/payload.part", keep) != 0)
+		unlink(UPDATE_DIR "/payload.part");
+}
+
+static void mark_part_clean(void)
+{
+	struct stat st;
+	FILE *fp;
+
+	if (stat(UPDATE_DIR "/payload.part", &st) != 0 || !(fp = fopen(PART_CLEAN ".tmp", "w")))
+		return;
+	fprintf(fp, "%lld\n", (long long)st.st_size);
+	if (fflush(fp) == 0 && fsync(fileno(fp)) == 0 && fclose(fp) == 0)
+		rename(PART_CLEAN ".tmp", PART_CLEAN);
+	else
+		unlink(PART_CLEAN ".tmp");
+}
+
 static int cmd_download(void)
 {
 	char url[1024], payload[160], sha[80], size_text[32];
@@ -573,7 +617,11 @@ static int cmd_download(void)
 	if (!room_for(size))
 		return fail("space");
 	snprintf(url, sizeof(url), "%s/%s", UPDATE_URL, payload);
+	trim_part();
+	unlink(PART_CLEAN);
 	status = fetch(url, UPDATE_DIR "/payload.part", true, 0);
+	if (status != -2)
+		mark_part_clean();
 	if (cancelled)
 		return fail("cancelled");
 	/* 206 partial content or 200 for a fresh download; 416 means the
@@ -587,6 +635,7 @@ static int cmd_download(void)
 	}
 	if (rename(UPDATE_DIR "/payload.part", UPDATE_DIR "/payload") != 0)
 		return fail("storage");
+	unlink(PART_CLEAN);
 	sync();
 	printf(as_job ? "@result downloaded\n" : "OK downloaded\n");
 	return 0;
@@ -658,6 +707,7 @@ static int cmd_channel(const char *name)
 	unlink(UPDATE_DIR "/manifest.sig");
 	unlink(UPDATE_DIR "/payload");
 	unlink(UPDATE_DIR "/payload.part");
+	unlink(PART_CLEAN);
 	puts("OK");
 	return 0;
 }

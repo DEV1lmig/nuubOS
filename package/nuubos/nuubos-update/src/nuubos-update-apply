@@ -16,7 +16,7 @@
 #                      is announced once with a notification
 #                      ; then the bootloader this system ships is written
 #                      to SD1 when it differs (see bootloader below)
-#   status             slot= pending= trying= result= battery=ok|low end=1
+#   status             slot= pending= trying= result= battery=ok|low|absent end=1
 #
 # An installation needs the battery above MIN_BATTERY % (user request
 # 2026-10-12; a board without a battery always may), the bootloader write
@@ -127,6 +127,17 @@ battery_ok()
         [ "$(cat "$b/present" 2>/dev/null || echo 1)" = 1 ] || continue
         [ "$(cat "$b/capacity" 2>/dev/null || echo 0)" -gt "$min" ]
         return
+    done
+    return 0
+}
+
+# 1 when the console runs without a battery (TV box mode): the UI warns to
+# keep the power connected until the update is complete.
+battery_absent()
+{
+    for b in "$BATTERY_DIR"/axp20x-battery "$BATTERY_DIR"/battery; do
+        [ -r "$b/capacity" ] || [ -r "$b/present" ] || continue
+        [ "$(cat "$b/present" 2>/dev/null || echo 1)" = 1 ] && return 1
     done
     return 0
 }
@@ -323,7 +334,7 @@ confirm()
         state_clear trying
         state_set result ok
         state_set announce installed
-        rm -f "$UPDATE_DIR/payload" "$UPDATE_DIR/payload.part"
+        rm -f "$UPDATE_DIR/payload" "$UPDATE_DIR/payload.part" "$UPDATE_DIR/payload.part.clean"
         sync
         log "slot $running kept"
     fi
@@ -342,6 +353,7 @@ case "${1:-}" in
     confirm) confirm ;;
     status)
         battery=ok; battery_ok || battery=low
+        battery_absent && battery=absent
         printf 'slot=%s\npending=%s\ntrying=%s\nresult=%s\nbattery=%s\nend=1\n' \
             "$(running_slot)" "$(state_get pending || echo 0)" "$(state_get trying)" "$(state_get result)" "$battery"
         ;;
