@@ -6547,6 +6547,45 @@ EPIC-056 is considered **REFINED** as a product contract; implementation starts 
 
 ---
 
+## EPIC-057 — Native PICO-8 (bring your own copy) and Splore
+
+**Status:** `PLANNED AFTER 1.0` (product decision 2026-10-23, community request; not in the RC phase: new feature)
+
+### Product contract
+
+Players who own PICO-8 can run Lexaloffle's own program on the console, as an alternative to the bundled FAKE-08 core, including Splore (the official cart browser of the Lexaloffle BBS).
+
+**MUST**
+- nuubOS prepares the whole environment and the user only brings their copy (user decision 2026-10-23): the image ships the launcher, the libraries the program needs, the controller mapping, the emulator entry and the Splore entry, and creates the folder on USERDATA (with a short readme naming the two files); dropping in the files is the only step, no configuration, no restart;
+- nuubOS never ships, downloads or links to the PICO-8 program itself: the user copies the files of their own purchased copy (Raspberry Pi 64-bit build, `pico8_64` + `pico8.dat`) into that folder, like BIOS files;
+- without those files nothing changes: FAKE-08 stays the default PICO-8 emulator and the native option is not offered (or shown as needing the user's files, with the folder named);
+- with them, "PICO-8 (native)" is a per-game and per-system emulator choice for PICO-8 carts, and the PICO-8 system offers a Splore entry;
+- the session goes through emud like a libretro game: Home -> launch screen, Quick Menu opens over it (pause), Quit returns to Home, Sleep/Restart/Power Off go through the central lifecycle path;
+- controls work with the built-in pad and external controllers; the picture is scaled as the 1:1 systems are (fills a square screen, integer elsewhere);
+- the UI says what native PICO-8 lacks against FAKE-08 (no save states, no RetroAchievements);
+- every new visible string localized.
+
+**Product decisions**
+- licensing: PICO-8 is a paid closed program; its license allows no redistribution in an image (Lexaloffle asks to be contacted for separate products or hardware runs), so it is bring-your-own only, as Batocera and other distributions do. Check the `license.txt` of the purchased download before release.
+- Splore is Lexaloffle's own feature: it downloads carts from the official BBS, where authors publish them to be played (free; licence chosen by the author, by default non-commercial Creative Commons). nuubOS only launches the user's copy and is not a distributor of carts.
+- nuubOS does not add its own BBS browser or cart downloader (on top of FAKE-08 or otherwise), and bundles no carts it has no licence for: that would make nuubOS the distributor.
+- carts saved by Splore stay in PICO-8's own folder on USERDATA; whether they also appear in the library is decided at refinement.
+
+**Acceptance baseline**
+Without the user's files the PICO-8 system is unchanged. After copying `pico8_64` + `pico8.dat`, a cart launches natively from Home, the Quick Menu pauses and quits it, Splore opens from the PICO-8 system and downloads and plays a BBS cart over Wi-Fi, sleep/resume and quit leave no stale process, on 640x480, 720x720, 720x480 and HDMI.
+
+**Platform/GAP**
+- which binary the Raspberry Pi zip holds (SDL2 static or system SDL2) and whether it runs under labwc/Wayland or needs KMS/X11 support; dependencies against nuubOS's glibc;
+- input: SDL game controller mapping of the built-in pad, hotkey for the Quick Menu without a libretro frontend;
+- pause/quit of a non-libretro process (SIGSTOP/SIGCONT, quit with PICO-8's own shutdown), audio through PipeWire with the product volume;
+- performance/latency of the native program on the H700 vs FAKE-08.
+
+### Refinement result
+
+EPIC-057 is a **product direction** recorded for the roadmap; refine and implement after 1.0.
+
+---
+
 # L. Platform / architecture enablers
 
 The following are not necessarily user-facing Product Epics, but they are required technical enablers for the final nuubOS platform contract.
@@ -6822,7 +6861,7 @@ At this stage:
 
 - **56 Product Epics identified**
 - **9 Technical Enablers identified**
-- **56 Product Epics refined** (`EPIC-001` through `EPIC-056`)
+- **56 Product Epics refined** (`EPIC-001` through `EPIC-056`); `EPIC-057` recorded as a roadmap direction (2026-10-23)
 - **0 Epics frozen**
 - remaining Epics remain subject to refinement;
 - no new platform implementation should be derived from an unrefined Epic until it has been decomposed into explicit requirements.
@@ -7506,6 +7545,7 @@ health/recovery path
 
 - `EPIC-029` Wireless Casting to TV
 - `EPIC-056` Spotify Connect (after EPIC-029, before EPIC-030 Web Mode)
+- `EPIC-057` Native PICO-8 (bring your own copy) and Splore (after 1.0)
 - future product requirements accepted after the baseline release
 
 ### Wireless casting gate
