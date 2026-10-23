@@ -19,7 +19,9 @@
 #   status             slot= pending= trying= result= battery=ok|low end=1
 #
 # An installation needs the battery above MIN_BATTERY % (user request
-# 2026-10-12; a board without a battery always may).
+# 2026-10-12; a board without a battery always may), the bootloader write
+# after it above MIN_BATTERY_BOOTLOADER %: the margin keeps a console that
+# started the update just above the limit from postponing it (2026-10-23).
 #
 # SD1 has two system slots (partitions.sh): A = p1, B = p5. U-Boot reads
 # nuubos-slot.cfg on NUUBOS_BOOT (good slot, slot on trial, tries left;
@@ -44,6 +46,7 @@ SD2_BACKUP="${NUUBOS_SD2_BACKUP:-/usr/sbin/nuubos-sd2-backup}"
 NOTIFYCTL="${NUUBOS_NOTIFYCTL:-/usr/bin/nuubos-notifyctl}"
 TRIES=3
 MIN_BATTERY=30
+MIN_BATTERY_BOOTLOADER=20
 BATTERY_DIR="${NUUBOS_BATTERY_DIR:-/sys/class/power_supply}"
 MOUNT_DIR=/run/nuubos/update
 # SPL + TF-A + U-Boot as flashed by genimage (offset 8 KiB, before p1 at
@@ -115,12 +118,14 @@ carry_over()
     umount "$dir"
 }
 
+# Battery above $1 % (default MIN_BATTERY).
 battery_ok()
 {
+    min="${1:-$MIN_BATTERY}"
     for b in "$BATTERY_DIR"/axp20x-battery "$BATTERY_DIR"/battery; do
         [ -r "$b/capacity" ] || continue
         [ "$(cat "$b/present" 2>/dev/null || echo 1)" = 1 ] || continue
-        [ "$(cat "$b/capacity" 2>/dev/null || echo 0)" -gt "$MIN_BATTERY" ]
+        [ "$(cat "$b/capacity" 2>/dev/null || echo 0)" -gt "$min" ]
         return
     done
     return 0
@@ -278,7 +283,7 @@ bootloader_on_disk()
 # There is no second copy to fall back on (the H616 BROM's backup location,
 # 256 KiB, overlaps the 745 KiB primary below p1): it is written only from
 # a proven system, only when it differs, with the battery above
-# MIN_BATTERY (else at a later boot), read back and written again once on
+# MIN_BATTERY_BOOTLOADER (else at a later boot), read back and written again once on
 # a mismatch. A rollback keeps the newer bootloader: it boots every slot.
 bootloader()
 {
@@ -295,7 +300,7 @@ bootloader()
         state_set bootloader "$want"
         return 0
     fi
-    battery_ok || { log "bootloader update postponed: battery low"; return 0; }
+    battery_ok "$MIN_BATTERY_BOOTLOADER" || { log "bootloader update postponed: battery low"; return 0; }
     for attempt in 1 2; do
         dd if="$BOOTLOADER" of="$disk" bs=1024 seek="$BOOTLOADER_OFFSET_KB" conv=notrunc,fsync 2>/dev/null
         sync

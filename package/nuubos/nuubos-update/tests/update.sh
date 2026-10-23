@@ -136,11 +136,12 @@ ck "confirm again is a no-op" '[ "$(A confirm)" = OK ] && [ "$(wc -l < "$T/notif
 mkdir -p "$R/usr/share/nuubos/bootloader"; head -c 5000 /dev/urandom > "$R/usr/share/nuubos/bootloader/u-boot-sunxi-with-spl.bin"
 head -c 1100000 /dev/zero | tr '\0' 'x' > "$T/disk.img"; cp "$T/disk.img" "$T/disk.orig"
 AB() { NUUBOS_TEST_DISK="$T/disk.img" A "$@"; }
-echo 30 > "$T/ps/axp20x-battery/capacity"
-ck "bootloader: low battery postpones" '[ "$(AB confirm)" = OK ] && cmp -s "$T/disk.img" "$T/disk.orig"'
-echo 80 > "$T/ps/axp20x-battery/capacity"
-ck "bootloader written at 8 KiB" '[ "$(AB confirm)" = OK ] && dd if="$T/disk.img" bs=1024 skip=8 2>/dev/null | head -c 5000 | cmp -s - "$R/usr/share/nuubos/bootloader/u-boot-sunxi-with-spl.bin" && cmp -s -n 8192 "$T/disk.img" "$T/disk.orig" && [ "$(tail -c +13193 "$T/disk.img" | head -c 100)" = "$(tail -c +13193 "$T/disk.orig" | head -c 100)" ] && [ -s "$R/state/update/bootloader" ]'
+echo 20 > "$T/ps/axp20x-battery/capacity"
+ck "bootloader: battery at 20% postpones" '[ "$(AB confirm)" = OK ] && cmp -s "$T/disk.img" "$T/disk.orig"'
+echo 21 > "$T/ps/axp20x-battery/capacity"
+ck "bootloader written at 8 KiB (battery 21%)" '[ "$(AB confirm)" = OK ] && dd if="$T/disk.img" bs=1024 skip=8 2>/dev/null | head -c 5000 | cmp -s - "$R/usr/share/nuubos/bootloader/u-boot-sunxi-with-spl.bin" && cmp -s -n 8192 "$T/disk.img" "$T/disk.orig" && [ "$(tail -c +13193 "$T/disk.img" | head -c 100)" = "$(tail -c +13193 "$T/disk.orig" | head -c 100)" ] && [ -s "$R/state/update/bootloader" ]'
 ck "bootloader: same one not rewritten" 'cp "$T/disk.img" "$T/disk.ok"; rm -f "$R/state/update/bootloader"; [ "$(AB confirm)" = OK ] && cmp -s "$T/disk.img" "$T/disk.ok" && [ -s "$R/state/update/bootloader" ]'
+echo 80 > "$T/ps/axp20x-battery/capacity"
 rm -rf "$R/usr/share/nuubos/bootloader" "$R/state/update/bootloader"
 
 # Next update from B into A, which never starts: U-Boot falls back to B.
