@@ -13,10 +13,14 @@ NUUBOS_RECOVERY_LICENSE_FILES = LICENSE
 define NUUBOS_RECOVERY_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -std=c11 -D_GNU_SOURCE \
 		-Wall -Wextra -Werror $(@D)/boot-stages.c -o $(@D)/nuubos-boot-stages
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -std=c11 -D_GNU_SOURCE \
+		-Wall -Wextra -Werror $(@D)/dram-blob.c -o $(@D)/nuubos-dram-blob
 endef
 
 define NUUBOS_RECOVERY_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-boot-stages $(TARGET_DIR)/usr/libexec/nuubos-boot-stages
+	$(INSTALL) -D -m 0755 $(@D)/nuubos-dram-blob $(TARGET_DIR)/usr/libexec/nuubos-dram-blob
+	$(INSTALL) -D -m 0755 $(@D)/S04nuubos-dram-blob $(TARGET_DIR)/etc/init.d/S04nuubos-dram-blob
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-diag $(TARGET_DIR)/usr/bin/nuubos-diag
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-recoveryctl $(TARGET_DIR)/usr/sbin/nuubos-recoveryctl
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-ui-supervisor $(TARGET_DIR)/usr/bin/nuubos-ui-supervisor

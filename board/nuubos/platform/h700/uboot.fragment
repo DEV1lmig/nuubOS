@@ -5,3 +5,8 @@
 # good slot); with none left the good slot boots. Slot A = p1, B = p5.
 # A slot that cannot be loaded falls through to the good slot, then A.
 CONFIG_BOOTCOMMAND="setenv nuubos_slot a; setenv nuubos_try none; setenv nuubos_tries 0; if fatload mmc 0:2 ${kernel_addr_r} nuubos-slot.cfg; then env import -t ${kernel_addr_r} ${filesize} nuubos_slot nuubos_try nuubos_tries; fi; setenv nuubos_first ${nuubos_slot}; if test ${nuubos_try} != none; then if test ${nuubos_tries} -gt 0; then setexpr nuubos_tries ${nuubos_tries} - 1; setenv nuubos_first ${nuubos_try}; else setenv nuubos_try none; fi; env export -t ${kernel_addr_r} nuubos_slot nuubos_try nuubos_tries; fatwrite mmc 0:2 ${kernel_addr_r} nuubos-slot.cfg ${filesize} || setenv nuubos_first ${nuubos_slot}; fi; for s in ${nuubos_first} ${nuubos_slot} a; do if test $s = b; then setenv nuubos_boot b; setenv nuubos_part 5; else setenv nuubos_boot a; setenv nuubos_part 1; fi; setenv nuubos_root /dev/mmcblk0p${nuubos_part}; echo nuubOS: slot ${nuubos_boot}; sysboot mmc 0:${nuubos_part} any ${scriptaddr} /boot/extlinux/extlinux.conf; done; run distro_bootcmd"
+
+# The SPL console on the UART (nobody reads it on these consoles): its
+# printf and serial driver are the room U-Boot patch 0007 needs (the SPL
+# was 48,472 of 49,056 bytes).
+# CONFIG_SPL_SERIAL is not set

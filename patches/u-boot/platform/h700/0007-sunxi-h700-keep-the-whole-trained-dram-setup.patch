@@ -1,0 +1,238 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] sunxi: h700: keep the whole trained DRAM setup
+
+0006 skipped the DRAM training on a cold boot with the parameters kept
+in the RTC (GP1-GP4, GP7), and the universal-standby resume used the
+same ones. They are not the whole result of the training: the DST eye
+scans also write per-lane delays, ODT and the clock into para (tpr6,
+tpr10-tpr12, odt_en, clk), and both paths rebuilt para from the
+profile's defaults. The DRAM then ran with nominal delays: the RG CubeXX
+crashed within 1-3 minutes of a Dreamcast game (kernel pointers and
+page-table entries with flipped bits, undefined-instruction oopses on
+valid instructions), and ran clean for as long as tested after a full
+training (2026-10-23).
+
+After every DRAM init that passed its tests the SPL now leaves a blob
+(magic, version, the SoC's SID, GP1-GP4/GP7 and the whole struct
+dram_para, checksum) in BL31's reserved page 0x4003f000; Linux keeps it
+in sector 2040 of the boot card (1020 KiB, after the bootloader, before
+p1). A cold boot with the trained mark restores para from that sector,
+only for the same SoC and the same RTC parameters, and still accepts it
+only through the trained result's checks; without it the DRAM is
+trained. The resume restores para from it too; without one it resets
+into a cold boot, which trains (it cannot train over the sleeping
+system, and the profile's delays are what corrupted it).
+
+The SPL reads the sector before the DRAM is up, in board_init_f, where
+the MMC stack is not ready: the .bss (only the MMC state) is cleared by
+crt0 after board_init_f, so it held the last run's list and flags (warm
+restarts hung), and with SPL_STACK_R and the simple malloc the early
+pool's limit is still 0 (mmc_create's calloc failed). Both are set up
+before the read; the SPL redoes both before it loads U-Boot.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/arch/arm/mach-sunxi/dram_sun50i_h616.c
++++ b/arch/arm/mach-sunxi/dram_sun50i_h616.c
+@@ -29,6 +29,13 @@
+ #include <asm/gpio.h>
+ #include <hang.h>
+ #include <cpu_func.h>
++#include <mmc.h>
++#include <blk.h>
++#include <linux/stddef.h>
++#include <asm/sections.h>
++#include <asm/global_data.h>
++
++DECLARE_GLOBAL_DATA_PTR;
+ #endif
+ 
+ enum {
+@@ -3587,6 +3594,120 @@
+ }
+ 
+ /* Universal standby resume (see H700_RESUME_FLAG). Never returns. */
++/*
++ * The whole trained DRAM setup (2026-10-23). GP1-GP4/GP7 are not all of
++ * the training's result: the DST eye scans also leave per-lane delays,
++ * ODT and the clock in para (tpr6, tpr10-tpr12, odt_en, clk). A start
++ * that rebuilt para from the profile defaults (0006's cold boot with the
++ * mark, the universal-standby resume) ran the DRAM with nominal delays,
++ * and under GPU load bits flipped (kernel oopses within minutes of a
++ * Dreamcast game on the CubeXX; with a full training none). After a full
++ * training, or a start restored from it, the SPL leaves this blob in
++ * BL31's reserved page H700_BLOB_DRAM; Linux keeps it in a sector of the
++ * boot card before p1 (nuubos-dram-blob). A start with the mark, and a
++ * resume, restore para from that sector, only on the same SoC (SID) with
++ * the same RTC parameters; else a cold boot trains. Bump the version
++ * when struct dram_para changes.
++ */
++#define H700_BLOB_MAGIC		0x4e445442	/* "NDTB" */
++#define H700_BLOB_VERSION	1
++#define H700_BLOB_SECTOR	2040		/* 1020 KiB, before p1 at 1 MiB */
++#define H700_BLOB_DRAM		0x4003f000UL	/* after the resume block */
++
++struct h700_train_blob {
++	u32 magic;
++	u32 version;
++	u32 sid[4];
++	u32 rtc[5];		/* GP1, GP2, GP3, GP4, GP7 */
++	struct dram_para para;
++	u32 sum;
++};
++
++static u32 h700_blob_sum(const struct h700_train_blob *b)
++{
++	const u32 *w = (const u32 *)b;
++	u32 sum = 0x5a5a5a5a;
++	unsigned int i;
++
++	for (i = 0; i < offsetof(struct h700_train_blob, sum) / 4; i++)
++		sum = (sum << 5 | sum >> 27) ^ w[i];
++	return sum;
++}
++
++static void h700_blob_fill(struct h700_train_blob *b)
++{
++	b->magic = H700_BLOB_MAGIC;
++	b->version = H700_BLOB_VERSION;
++	b->sid[0] = b->sid[1] = b->sid[2] = b->sid[3] = 0;
++	sunxi_get_sid(b->sid);
++	b->rtc[0] = readl((void *)H700_RESUME_PARA1);
++	b->rtc[1] = readl((void *)H700_RESUME_PARA2);
++	b->rtc[2] = readl((void *)H700_RESUME_TPR13);
++	b->rtc[3] = readl((void *)H700_RESUME_GEOMETRY);
++	b->rtc[4] = readl((void *)H700_RESUME_SIZE);
++	b->para = para;
++	b->sum = h700_blob_sum(b);
++}
++
++/*
++ * Breadcrumbs of a start with the blob in RTC GP6 (kept by a cold boot):
++ * 0x5a5a0020 start, 0x26 MMC registered, 0x27 card initialised, 0x21
++ * sector read, 0x22 blob valid, 0x23 DRAM up with the blob, 0x24 tested;
++ * 0x29 no MMC device, 0x28 card init failed. A resume without the blob
++ * resets with 0x5a5a00f4.
++ */
++#define H700_BLOB_STEP(n)	writel(0x5a5a0020 | (n), (void *)H700_RESUME_STEP_REG)
++
++/* para from the boot card's blob of this SoC and these RTC parameters. */
++static bool h700_blob_load(void)
++{
++	u32 buf[128];
++	struct h700_train_blob *b = (void *)buf, ref;
++	struct mmc *mmc;
++
++	/*
++	 * The SPL's .bss is only the MMC state (the device list, its
++	 * initialised flag, the hosts), in SRAM, and crt0 clears it only after
++	 * board_init_f: here it holds whatever the last run left (a set
++	 * initialised flag skips the registration, a stale list hangs; the
++	 * warm restarts hung). Cleared here; crt0 clears it again before the
++	 * SPL loads U-Boot, which registers the controller anew.
++	 */
++	memset(__bss_start, 0, __bss_end - __bss_start);
++	/*
++	 * With SPL_STACK_R and the simple malloc the SPL allocates nothing
++	 * before spl_relocate_stack_gd, so spl_init leaves the early pool's
++	 * limit at 0 (board_init_f_init_reserve reserved and cleared it):
++	 * mmc_create's calloc failed. Opened here; the relocation sets up
++	 * the pool in DRAM anew.
++	 */
++	if (!gd->malloc_limit)
++		gd->malloc_limit = CONFIG_VAL(SYS_MALLOC_F_LEN);
++	if (mmc_initialize(NULL))
++		return false;
++	H700_BLOB_STEP(6);
++	mmc = find_mmc_device(0);
++	if (!mmc) {
++		H700_BLOB_STEP(9);
++		return false;
++	}
++	if (mmc_init(mmc)) {
++		H700_BLOB_STEP(8);
++		return false;
++	}
++	H700_BLOB_STEP(7);
++	if (blk_dread(mmc_get_blk_desc(mmc), H700_BLOB_SECTOR, 1, buf) != 1)
++		return false;
++	H700_BLOB_STEP(1);
++	h700_blob_fill(&ref);
++	if (memcmp(b, &ref, offsetof(struct h700_train_blob, para)) ||
++	    b->sum != h700_blob_sum(b))
++		return false;
++	H700_BLOB_STEP(2);
++	para = b->para;
++	return true;
++}
++
+ static void __noreturn h700_resume(void)
+ {
+ 	const struct h700_resume_block *blk = (void *)H700_RESUME_BLOCK;
+@@ -3613,6 +3734,14 @@
+ 		reset_cpu();
+ 	}
+ 
++	/*
++	 * The trained delays from the blob: with the profile's the DRAM came
++	 * back but corrupted under load. Without the blob, a cold boot.
++	 */
++	if (!h700_blob_load()) {
++		writel(0x5a5a00f4, (void *)H700_RESUME_STEP_REG);
++		reset_cpu();
++	}
+ 	h700_resume_mode = true;
+ 	ok = mctl_core_init(&para, &config);
+ 	h700_resume_mode = false;
+@@ -3676,8 +3805,10 @@
+ {
+ 	u32 geometry = readl((void *)H700_RESUME_GEOMETRY);
+ 	u32 saved_mib = readl((void *)H700_RESUME_SIZE);
++	struct dram_para nominal = para;
+ 	unsigned int size_mib;
+ 
++	H700_BLOB_STEP(0);
+ 	config->cols = geometry & 0xff;
+ 	config->rows = (geometry >> 8) & 0xff;
+ 	config->ranks = (geometry >> 16) & 0xff;
+@@ -3688,18 +3819,25 @@
+ 	h700_dram_runtime.current_para2 = readl((void *)H700_RESUME_PARA2);
+ 	h700_dram_runtime.current_tpr13 = readl((void *)H700_RESUME_TPR13);
+ 
+-	if (!mctl_core_init(&para, config))
+-		return 0;
++	/* The whole trained setup: GP1-GP4 alone are not enough. */
++	if (!h700_blob_load() || !mctl_core_init(&para, config))
++		goto fail;
++	H700_BLOB_STEP(3);
+ 	size_mib = h700_vendor_finalize_size();
+ 	if (size_mib != saved_mib)
+-		return 0;
++		goto fail;
+ 	if (!(h700_dram_runtime.current_tpr13 & BIT(27)))
+ 		mctl_set_master_priority();
+ 	if (!h700_vendor_validate((size_mib / 2) << 20, 0x8000, 8, true) ||
+ 	    !h700_vendor_final_memtest(size_mib))
+-		return 0;
++		goto fail;
++	H700_BLOB_STEP(4);
+ 
+ 	return size_mib;
++fail:
++	/* The training starts from the profile, not from the blob. */
++	para = nominal;
++	return 0;
+ }
+ #endif
+ 
+@@ -3791,6 +3929,10 @@
+ 		 */
+ 		writel(0, (void *)0x070001f8UL);
+ 
++		/* After every DRAM test: the blob for Linux to keep. */
++		h700_blob_fill((void *)H700_BLOB_DRAM);
++		flush_dcache_range(H700_BLOB_DRAM, H700_BLOB_DRAM +
++				   sizeof(struct h700_train_blob));
+ 		writel(H700_TRAINED_MAGIC, (void *)H700_RESUME_FLAG);
+ 		writel((start_ms & 0xffff) | h700_boot_ms() << 16,
+ 		       (void *)H700_BOOT_TIMES_REG);

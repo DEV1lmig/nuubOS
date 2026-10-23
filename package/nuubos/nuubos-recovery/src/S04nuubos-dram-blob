@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# The trained DRAM setup the SPL left in RAM goes to the boot card
+# (nuubos-dram-blob, U-Boot patch 0007): the next cold boots and every
+# resume from universal standby restore it instead of training for 5 s.
+# Writes only after a full training (the blob changed).
+
+case "$1" in
+start)
+    . /usr/lib/nuubos/partitions.sh
+    disk="$(nuubos_boot_disk)" || exit 0
+    /usr/libexec/nuubos-dram-blob "$disk" >/dev/null 2>&1
+    ;;
+stop|restart|reload)
+    ;;
+*)
+    echo "Usage: $0 {start|stop|restart}" >&2
+    exit 1
+    ;;
+esac
+
+exit 0
