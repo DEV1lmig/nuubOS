@@ -1,0 +1,862 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH 5/7] libretro: VDP rendering and emulation on their own threads
+
+The emulation thread ran both SH2s and then drew the frame (VDP1
+commands, VDP2 layers, the GL calls): about 45 % of its time in
+Virtua Fighter 2, which ran at 28 fps on a Cortex-A53 at 1.4 GHz.
+
+- The asynchronous renderer upstream has for its Android and SDL ports
+  (YAB_ASYNC_RENDERING: VdpProc draws VDP1/VDP2 while the SH2s run) is
+  built for the libretro core.
+- Frame N is drawn while the SH2s run frame N+1 (one frame of latency
+  more): the VDP thread has an EGL context of its own sharing
+  RetroArch's objects and composes each frame into one of two textures
+  (YuiSwapBuffers publishes it with a fence); retro_run copies the
+  newest into RetroArch's framebuffer and fences that copy before the
+  texture is reused. The renderer reads the VDP2 registers and line
+  tables through nuub_vdp2view.h from a copy taken at VBlank-IN, so the
+  SH2s can change them meanwhile.
+- The SH2s run on a thread of their own (emu_main, with a third context
+  for their reads of the VDP1 framebuffer) while the main thread
+  presents the previous frame; whatever touches the emulation from the
+  main thread (options, states, cheats, reset, unload, context loss)
+  waits for the running frame first.
+- The VDP1 draw-end sync no longer stops the SH2s while the VDP thread
+  is still composing the previous frame: they look again 10 lines
+  later, as the synchronous renderer does while VDP1 is busy, and wait
+  only before VBlank-IN.
+
+Virtua Fighter 2 fight: 28 -> ~57 fps (with 0006 and 0007).
+
+Upstream-Status: Pending
+---
+--- a/yabause/src/libretro/Makefile
++++ b/yabause/src/libretro/Makefile
+@@ -120,6 +120,10 @@
+ 	USE_AARCH64_DRC = 1
+ 	DYNAREC_DEVMIYAX = 1
+ 	FLAGS += -DAARCH64 -march=armv8-a+crc+fp+simd -mcpu=cortex-a53 -mtune=cortex-a53
++	# nuubOS: VDP1/VDP2 rendering on its own thread (libretro.c hands
++	# RetroArch's EGL context to it for each retro_run).
++	FLAGS += -DYAB_ASYNC_RENDERING
++	LDFLAGS += -lEGL
+ 
+ # Amlogic S922X Odroid-N2 / A311D Khadas VIM3 (AMLG12B) - 32-bit userspace
+ else ifneq (,$(findstring AMLG12B,$(platform)))
+--- a/yabause/src/libretro/libretro.c
++++ b/yabause/src/libretro/libretro.c
+@@ -13,6 +13,10 @@
+ #include <sys/stat.h>
+ 
+ #include <libretro.h>
++#if defined(YAB_ASYNC_RENDERING)
++#include <EGL/egl.h>
++#include <pthread.h>
++#endif
+ 
+ #include <file/file_path.h>
+ 
+@@ -210,7 +214,8 @@
+       return input_state_cb(port, device, index, id);
+ }
+ 
+-static int PERLIBRETROHandleEvents(void)
++/* The pads' state for the next frame (main thread). */
++static void per_poll(void)
+ {
+    unsigned i = 0;
+ 
+@@ -320,7 +325,11 @@
+                break;
+          }
+    }
++}
+ 
++static int PERLIBRETROHandleEvents(void)
++{
++   per_poll();
+    if ( YabauseExec() != 0 )
+       return -1;
+    return 0;
+@@ -506,8 +515,285 @@
+ 
+ static int first_ctx_reset = 1;
+ 
++#if defined(YAB_ASYNC_RENDERING)
++/*
++ * nuubOS: the VDP thread (vdp2.cpp VdpProc) draws frame N while the SH2s
++ * run frame N+1. Three contexts share their objects:
++ *  - RetroArch's (egl_ctx): the main thread's between runs and to present;
++ *  - egl_vdp: the VDP thread's, with every Ygl object, including the two
++ *    textures it composes the frames into (out_*);
++ *  - egl_sub: the main thread's during a run, for the SH2s' reads of the
++ *    VDP1 framebuffer (ygles.c VIDOGLVdp1ReadFrameBuffer), like the
++ *    Android port's g_Context_Sub.
++ * YuiSwapBuffers publishes each composed frame with a fence; at the end of
++ * retro_run the main thread copies the newest one into RetroArch's
++ * framebuffer and fences that copy before the VDP thread reuses the
++ * texture. Work between runs that touches Ygl's objects (states, reset,
++ * options, unload) takes egl_vdp over from the VDP thread (vdp_enter).
++ */
++static EGLDisplay egl_dpy = EGL_NO_DISPLAY;
++static EGLContext egl_ctx = EGL_NO_CONTEXT;
++static EGLSurface egl_draw = EGL_NO_SURFACE, egl_read = EGL_NO_SURFACE;
++static EGLContext egl_sub = EGL_NO_CONTEXT, egl_vdp = EGL_NO_CONTEXT;
++static pthread_t main_thread;
++int VdpProcRunning(void);
++
++#define OUT_N 2
++static GLuint out_tex[OUT_N], out_depth[OUT_N], out_fbo[OUT_N]; /* egl_vdp */
++static GLuint pres_fbo[OUT_N];                                  /* egl_ctx */
++static int out_cur;                 /* the buffer the VDP thread draws into */
++static pthread_mutex_t out_mtx = PTHREAD_MUTEX_INITIALIZER;
++static int out_ready = -1;          /* the newest composed frame */
++static int out_w[OUT_N], out_h[OUT_N];
++static GLsync out_fence[OUT_N];     /* composed (VDP thread) */
++static GLsync pres_fence[OUT_N];    /* copied out (main thread) */
++static unsigned out_seq, pres_seq;
++static bool geometry_changed;
++
++/* The SH2s run a frame on their own thread (emu_main, with egl_sub) while
++ * the main thread presents the previous one and RetroArch does its part
++ * of the frame. Whatever touches the emulation from the main thread
++ * waits for that frame first (emu_wait). */
++enum { EMU_IDLE, EMU_RUN, EMU_RELEASE, EMU_QUIT };
++static pthread_t emu_tid;
++static int emu_alive, emu_cmd = EMU_IDLE;
++static pthread_mutex_t emu_mtx = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t emu_cv = PTHREAD_COND_INITIALIZER;
++static void egl_use(EGLContext ctx);
++
++static void *emu_main(void *arg)
++{
++  int cmd;
++
++  (void)arg;
++  pthread_mutex_lock(&emu_mtx);
++  for (;;) {
++    while (emu_cmd == EMU_IDLE)
++      pthread_cond_wait(&emu_cv, &emu_mtx);
++    cmd = emu_cmd;
++    pthread_mutex_unlock(&emu_mtx);
++    if (cmd == EMU_RUN) {
++      egl_use(egl_sub);
++      YabauseExec();
++    } else
++      eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++    pthread_mutex_lock(&emu_mtx);
++    emu_cmd = EMU_IDLE;
++    pthread_cond_broadcast(&emu_cv);
++    if (cmd == EMU_QUIT)
++      break;
++  }
++  pthread_mutex_unlock(&emu_mtx);
++  return NULL;
++}
++
++static void emu_wait(void)
++{
++  pthread_mutex_lock(&emu_mtx);
++  while (emu_cmd != EMU_IDLE)
++    pthread_cond_wait(&emu_cv, &emu_mtx);
++  pthread_mutex_unlock(&emu_mtx);
++}
++
++static void emu_post(int cmd)
++{
++  if (!emu_alive) {
++    if (cmd != EMU_RUN || pthread_create(&emu_tid, NULL, emu_main, NULL))
++      return;
++    emu_alive = 1;
++  }
++  pthread_mutex_lock(&emu_mtx);
++  emu_cmd = cmd;
++  pthread_cond_broadcast(&emu_cv);
++  pthread_mutex_unlock(&emu_mtx);
++}
++
++/* Main thread: the emulation thread lets go of egl_sub (context_destroy)
++ * or ends (unload). */
++static void emu_stop(int cmd)
++{
++  emu_wait();
++  if (!emu_alive)
++    return;
++  emu_post(cmd);
++  emu_wait();
++  if (cmd == EMU_QUIT) {
++    pthread_join(emu_tid, NULL);
++    emu_alive = 0;
++  }
++}
++
++static EGLContext egl_create_shared(void)
++{
++  EGLint cfg_id = 0, version = 3, n = 0;
++  EGLConfig cfg = (EGLConfig)0;
++
++  eglQueryContext(egl_dpy, egl_ctx, EGL_CONFIG_ID, &cfg_id);
++  eglQueryContext(egl_dpy, egl_ctx, EGL_CONTEXT_CLIENT_VERSION, &version);
++  if (cfg_id) {
++    EGLint attrs[] = { EGL_CONFIG_ID, cfg_id, EGL_NONE };
++    eglChooseConfig(egl_dpy, attrs, &cfg, 1, &n);
++  }
++  {
++    EGLint ctx_attrs[] = { EGL_CONTEXT_CLIENT_VERSION, version, EGL_NONE };
++    return eglCreateContext(egl_dpy, n ? cfg : (EGLConfig)0, egl_ctx, ctx_attrs);
++  }
++}
++
++static void egl_use(EGLContext ctx)
++{
++  if (eglGetCurrentContext() == ctx)
++    return;
++  if (ctx == egl_ctx)
++    eglMakeCurrent(egl_dpy, egl_draw, egl_read, egl_ctx);
++  else
++    eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx);
++}
++
++/* Big enough for every frame of the resolution mode: the frames are
++ * composed into the lower left corner, as into RetroArch's framebuffer. */
++static void out_size(int *w, int *h);
++
++/* egl_vdp current. */
++static void out_create(void)
++{
++  int i, w, h;
++
++  out_size(&w, &h);
++  glGenTextures(OUT_N, out_tex);
++  glGenRenderbuffers(OUT_N, out_depth);
++  glGenFramebuffers(OUT_N, out_fbo);
++  for (i = 0; i < OUT_N; i++) {
++    glBindTexture(GL_TEXTURE_2D, out_tex[i]);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++    glBindRenderbuffer(GL_RENDERBUFFER, out_depth[i]);
++    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
++    glBindFramebuffer(GL_FRAMEBUFFER, out_fbo[i]);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out_tex[i], 0);
++    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, out_depth[i]);
++    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
++    glClear(GL_COLOR_BUFFER_BIT);
++  }
++  glBindTexture(GL_TEXTURE_2D, 0);
++  glBindRenderbuffer(GL_RENDERBUFFER, 0);
++  glBindFramebuffer(GL_FRAMEBUFFER, 0);
++  glFinish();
++  out_cur = 0;
++  out_ready = -1;
++  out_seq = pres_seq = 0;
++}
++
++/* egl_vdp current. */
++static void out_destroy(void)
++{
++  int i;
++
++  for (i = 0; i < OUT_N; i++) {
++    if (out_fence[i]) glDeleteSync(out_fence[i]);
++    if (pres_fence[i]) glDeleteSync(pres_fence[i]);
++    out_fence[i] = pres_fence[i] = 0;
++  }
++  if (out_fbo[0]) {
++    glDeleteFramebuffers(OUT_N, out_fbo);
++    glDeleteRenderbuffers(OUT_N, out_depth);
++    glDeleteTextures(OUT_N, out_tex);
++  }
++  memset(out_fbo, 0, sizeof(out_fbo));
++  memset(out_tex, 0, sizeof(out_tex));
++  out_ready = -1;
++}
++
++/* egl_ctx current: RetroArch's side reads the shared textures. */
++static void pres_create(void)
++{
++  int i;
++
++  glGenFramebuffers(OUT_N, pres_fbo);
++  for (i = 0; i < OUT_N; i++) {
++    glBindFramebuffer(GL_FRAMEBUFFER, pres_fbo[i]);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out_tex[i], 0);
++  }
++  glBindFramebuffer(GL_FRAMEBUFFER, hw_render.get_current_framebuffer());
++}
++
++static void pres_destroy(void)
++{
++  if (pres_fbo[0])
++    glDeleteFramebuffers(OUT_N, pres_fbo);
++  memset(pres_fbo, 0, sizeof(pres_fbo));
++}
++
++/* Main thread, between runs: egl_vdp from the VDP thread and back. */
++static void vdp_enter(void)
++{
++  emu_wait();
++  if (egl_vdp == EGL_NO_CONTEXT)
++    return;
++  if (VdpProcRunning())
++    VdpRevoke();
++  egl_use(egl_vdp);
++}
++
++static void vdp_leave(void)
++{
++  if (egl_vdp == EGL_NO_CONTEXT)
++    return;
++  egl_use(egl_ctx);
++  if (VdpProcRunning())
++    VdpResume();
++}
++
++/* Main thread, end of retro_run, egl_ctx current: the newest composed
++ * frame into RetroArch's framebuffer. 0: nothing new. */
++static int present_frame(void)
++{
++  int idx, w, h;
++  GLsync f;
++
++  pthread_mutex_lock(&out_mtx);
++  if (out_seq == pres_seq || out_ready < 0) {
++    pthread_mutex_unlock(&out_mtx);
++    return 0;
++  }
++  idx = out_ready;
++  f = out_fence[idx];
++  out_fence[idx] = 0;
++  w = out_w[idx];
++  h = out_h[idx];
++  pres_seq = out_seq;
++  pthread_mutex_unlock(&out_mtx);
++
++  if (f) {
++    glWaitSync(f, 0, GL_TIMEOUT_IGNORED);
++    glDeleteSync(f);
++  }
++  glBindFramebuffer(GL_READ_FRAMEBUFFER, pres_fbo[idx]);
++  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, hw_render.get_current_framebuffer());
++  glDisable(GL_SCISSOR_TEST);
++  glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++  glBindFramebuffer(GL_FRAMEBUFFER, hw_render.get_current_framebuffer());
++  f = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
++  glFlush();
++
++  pthread_mutex_lock(&out_mtx);
++  if (pres_fence[idx])
++    glDeleteSync(pres_fence[idx]);
++  pres_fence[idx] = f;
++  pthread_mutex_unlock(&out_mtx);
++  video_cb(RETRO_HW_FRAME_BUFFER_VALID, w, h, 0);
++  return 1;
++}
++#endif
++
+ int YuiUseOGLOnThisThread()
+ {
++#if defined(YAB_ASYNC_RENDERING)
++  /* The VDP thread; egl_vdp is free (vdp_enter gave it back). */
++  if (!eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_vdp))
++    return -1;
++#endif
+ #if !defined(_USEGLEW_)
+   return glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
+ #endif
+@@ -515,14 +801,28 @@
+ 
+ int YuiRevokeOGLOnThisThread()
+ {
++  int ret = 0;
+ #if !defined(_USEGLEW_)
+-  return glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
++  ret = glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
+ #endif
++#if defined(YAB_ASYNC_RENDERING)
++  /* The emulation thread keeps its context for its own GL calls. */
++  if (pthread_equal(pthread_self(), main_thread) ||
++      (emu_alive && pthread_equal(pthread_self(), emu_tid)))
++    egl_use(egl_sub);
++  else
++    eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++#endif
++  return ret;
+ }
+ 
+ int YuiGetFB(void)
+ {
++#if defined(YAB_ASYNC_RENDERING)
++  return out_fbo[out_cur];
++#else
+   return hw_render.get_current_framebuffer();
++#endif
+ }
+ 
+ void retro_reinit_av_info(void)
+@@ -562,10 +862,31 @@
+          break;
+    }
+    VIDCore->Resize(0, 0, current_width, current_height, 0, FULL);
++#if defined(YAB_ASYNC_RENDERING)
++   /* RetroArch hears of it on the main thread (end of retro_run). */
++   if (!pthread_equal(pthread_self(), main_thread))
++      geometry_changed = true;
++   else
++#endif
+    retro_reinit_av_info();
+    VIDCore->SetSettingValue(VDP_SETTING_RESOLUTION_MODE, resolution_mode);
+ }
+ 
++#if defined(YAB_ASYNC_RENDERING)
++static void out_size(int *w, int *h)
++{
++   switch (resolution_mode)
++   {
++      case RES_2x: *w = 704 * 2; *h = 512 * 2; break;
++      case RES_4x: *w = 704 * 4; *h = 512 * 4; break;
++      case RES_720P: *w = 1280; *h = 720; break;
++      case RES_1080P: *w = 1920; *h = 1080; break;
++      case RES_NATIVE: *w = 3840; *h = 2160; break;
++      default: *w = 704; *h = 512; break;
++   }
++}
++#endif
++
+ void YuiSwapBuffers(void)
+ {
+    int prev_game_width = game_width;
+@@ -574,16 +895,61 @@
+    if ((prev_game_width != game_width) || (prev_game_height != game_height))
+       retro_set_resolution();
+    audio_size = soundlen;
++#if defined(YAB_ASYNC_RENDERING)
++   {
++      /* The VDP thread: publish this frame, move to the other buffer
++       * once the main thread's copy out of it is done (GPU side). */
++      GLsync f = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0), wait;
++      int next = (out_cur + 1) % OUT_N;
++
++      glFlush();
++      pthread_mutex_lock(&out_mtx);
++      if (out_fence[out_cur])
++         glDeleteSync(out_fence[out_cur]);
++      out_fence[out_cur] = f;
++      out_w[out_cur] = current_width;
++      out_h[out_cur] = current_height;
++      out_ready = out_cur;
++      out_seq++;
++      wait = pres_fence[next];
++      pres_fence[next] = 0;
++      pthread_mutex_unlock(&out_mtx);
++      if (wait) {
++         glWaitSync(wait, 0, GL_TIMEOUT_IGNORED);
++         glDeleteSync(wait);
++      }
++      out_cur = next;
++      _Ygl->default_fbo = out_fbo[out_cur];
++   }
++#else
+    video_cb(RETRO_HW_FRAME_BUFFER_VALID, current_width, current_height, 0);
++#endif
+    one_frame_rendered = true;
+ }
+ 
+ static void context_reset(void)
+ {
++#if defined(YAB_ASYNC_RENDERING)
++   emu_wait();
++   egl_dpy = eglGetCurrentDisplay();
++   egl_ctx = eglGetCurrentContext();
++   egl_draw = eglGetCurrentSurface(EGL_DRAW);
++   egl_read = eglGetCurrentSurface(EGL_READ);
++   main_thread = pthread_self();
++   egl_sub = egl_create_shared();
++   egl_vdp = egl_create_shared();
++#endif
+ #if !defined(_USEGLEW_)
+    glsm_ctl(GLSM_CTL_STATE_CONTEXT_RESET, NULL);
+    glsm_ctl(GLSM_CTL_STATE_SETUP, NULL);
+ #endif
++#if defined(YAB_ASYNC_RENDERING)
++   /* Ygl's objects are egl_vdp's (VdpProc may be waiting for it). */
++   if (VdpProcRunning())
++      VdpRevoke();
++   egl_use(egl_vdp);
++   out_create();
++#endif
+    if (first_ctx_reset == 1)
+    {
+       first_ctx_reset = 0;
+@@ -599,13 +965,35 @@
+       renderer_running = true;
+       retro_set_resolution();
+    }
++#if defined(YAB_ASYNC_RENDERING)
++   _Ygl->default_fbo = out_fbo[out_cur];
++   glFinish();
++   egl_use(egl_ctx);
++   pres_create();
++   if (VdpProcRunning())
++      VdpResume();
++#endif
+ }
+ 
+ static void context_destroy(void)
+ {
++#if defined(YAB_ASYNC_RENDERING)
++   emu_stop(EMU_RELEASE);
++   pres_destroy();
++   if (VdpProcRunning())
++      VdpRevoke();
++   egl_use(egl_vdp);
++#endif
+    if (renderer_running)
+       VIDCore->DeInit();
+    renderer_running = false;
++#if defined(YAB_ASYNC_RENDERING)
++   out_destroy();
++   egl_use(egl_ctx);
++   eglDestroyContext(egl_dpy, egl_vdp);
++   eglDestroyContext(egl_dpy, egl_sub);
++   egl_vdp = egl_sub = EGL_NO_CONTEXT;
++#endif
+ #if !defined(_USEGLEW_)
+    glsm_ctl(GLSM_CTL_STATE_CONTEXT_DESTROY, NULL);
+ #endif
+@@ -865,8 +1253,17 @@
+    void *buffer;
+    size_t size;
+ 
++#if defined(YAB_ASYNC_RENDERING)
++   emu_wait();
++#endif
+    ScspMuteAudio(SCSP_MUTE_SYSTEM);
++#if defined(YAB_ASYNC_RENDERING)
++   vdp_enter();
++#endif
+    YabSaveStateBuffer (&buffer, &size);
++#if defined(YAB_ASYNC_RENDERING)
++   vdp_leave();
++#endif
+    ScspUnMuteAudio(SCSP_MUTE_SYSTEM);
+ 
+    free(buffer);
+@@ -882,7 +1279,13 @@
+    void *buffer;
+    size_t out_size;
+ 
++#if defined(YAB_ASYNC_RENDERING)
++   vdp_enter();
++#endif
+    int error = YabSaveStateBuffer (&buffer, &out_size);
++#if defined(YAB_ASYNC_RENDERING)
++   vdp_leave();
++#endif
+ 
+    memcpy(data, buffer, size);
+ 
+@@ -895,14 +1298,23 @@
+    // Disabling savestates until they are safe
+    if (!rendering_started)
+       return true;
++#if defined(YAB_ASYNC_RENDERING)
++   vdp_enter();
++#endif
+    int error = YabLoadStateBuffer(data, size);
+    retro_set_resolution();
++#if defined(YAB_ASYNC_RENDERING)
++   vdp_leave();
++#endif
+ 
+    return !error;
+ }
+ 
+ void retro_cheat_reset(void)
+ {
++#if defined(YAB_ASYNC_RENDERING)
++   emu_wait();
++#endif
+    CheatClearCodes();
+ }
+ 
+@@ -912,6 +1324,9 @@
+    (void)enabled;
+    (void)code;
+ 
++#if defined(YAB_ASYNC_RENDERING)
++   emu_wait();
++#endif
+    if (CheatAddARCode(code) == 0)
+       return;
+ }
+@@ -1315,9 +1730,17 @@
+ 
+ void retro_unload_game(void)
+ {
++#if defined(YAB_ASYNC_RENDERING)
++   /* YabauseDeInit ends the VDP thread (Vdp2DeInit) after this. */
++   emu_stop(EMU_QUIT);
++   vdp_enter();
++#endif
+    if (!renderer_running)
+       VIDCore->Init();
+    YabauseDeInit();
++#if defined(YAB_ASYNC_RENDERING)
++   egl_use(egl_ctx);
++#endif
+ }
+ 
+ unsigned retro_get_region(void)
+@@ -1347,8 +1770,14 @@
+ 
+ void retro_reset(void)
+ {
++#if defined(YAB_ASYNC_RENDERING)
++   vdp_enter();
++   YabauseReset();
++   vdp_leave();
++#else
+    YabauseReset();
+    VdpResume();
++#endif
+    // The following function crashes the core when you use "restart"
+    //YabauseResetButton();
+ }
+@@ -1375,10 +1804,17 @@
+    bool updated  = false;
+    rendering_started = true;
+    one_frame_rendered = false;
++#if defined(YAB_ASYNC_RENDERING)
++   /* The previous frame's emulation is done. */
++   emu_wait();
++#endif
+ 
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+    {
+       int prev_multitap[2] = {multitap[0],multitap[1]};
++#if defined(YAB_ASYNC_RENDERING)
++      vdp_enter();
++#endif
+       check_variables();
+       // Unlike Kronos, this core dislike changing tesselation on the fly
+       //VIDCore->SetSettingValue(VDP_SETTING_POLYGON_MODE, polygon_mode);
+@@ -1386,6 +1822,9 @@
+       VIDCore->SetSettingValue(VDP_SETTING_RBG_USE_COMPUTESHADER, g_rbg_use_compute_shader);
+       if(PERCore && (prev_multitap[0] != multitap[0] || prev_multitap[1] != multitap[1]))
+          PERCore->Init();
++#if defined(YAB_ASYNC_RENDERING)
++      vdp_leave();
++#endif
+    }
+ 
+    if (environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastforward) && fastforward)
+@@ -1397,12 +1836,25 @@
+    }
+ 
+    //YabauseExec(); runs from handle events
++#if defined(YAB_ASYNC_RENDERING)
++   /* This frame's input, then the SH2s run it on their thread while the
++    * newest frame the VDP thread has composed is presented (else a dupe). */
++   per_poll();
++   if (geometry_changed) {
++      geometry_changed = false;
++      retro_reinit_av_info();
++   }
++   emu_post(EMU_RUN);
++   if (!present_frame())
++      video_cb(NULL, current_width, current_height, 0);
++#else
+    if(PERCore)
+       PERCore->HandleEvents();
+ 
+    // If no frame rendered, dupe
+    if(!one_frame_rendered)
+       video_cb(NULL, current_width, current_height, 0);
++#endif
+ 
+    //reset_global_gl_state();
+ }
+--- a/yabause/src/vdp2.cpp
++++ b/yabause/src/vdp2.cpp
+@@ -90,6 +90,20 @@
+ YabEventQueue * vout_rcv_evqueue = NULL;
+ static u64 syncticks = 0;       // CPU time sync for real time.
+ static int vdp_proc_running = 0;
++#if defined(YAB_ASYNC_RENDERING)
++/* nuubOS: what the VDP thread composes frame N from, taken at its
++ * VBlank-IN (nuub_vdp2view.h); the SH2s go on with frame N+1 meanwhile.
++ * One composition in flight at a time: the next VBlank-IN waits for it
++ * before it overwrites the copy. */
++static Vdp2 vin_regs;
++static Vdp2 vin_lines[270];
++static int vin_inflight = 0;
++extern "C" {
++Vdp2 *nuub_vdp2_regs_view = NULL;
++Vdp2 *nuub_vdp2_lines_view = NULL;
++}
++extern Vdp2 *fixVdp2Regs;
++#endif
+ YabMutex * vrammutex = NULL;
+ int g_frame_count = 0;
+ 
+@@ -480,6 +494,7 @@
+      vdp1_rcv_evqueue = YabThreadCreateQueue(8);
+    }
+    yabsys.wait_line_count = -1;
++   vin_inflight = 0;
+ #endif
+ 
+ }
+@@ -536,6 +551,8 @@
+       break;
+     }
+   }
++  /* nuubOS: the context goes back before the thread ends. */
++  YuiRevokeOGLOnThisThread();
+   return NULL;
+ }
+ 
+@@ -688,7 +705,21 @@
+ 
+ 
+ //////////////////////////////////////////////////////////////////////////////
++
+ void vdp2VBlankIN(void) {
++#if defined(YAB_ASYNC_RENDERING)
++   nuub_vdp2_regs_view = &vin_regs;
++   nuub_vdp2_lines_view = vin_lines;
++   if (fixVdp2Regs >= Vdp2Lines && fixVdp2Regs < Vdp2Lines + 270)
++      fixVdp2Regs = vin_lines + (fixVdp2Regs - Vdp2Lines);
++   VIDCore->Vdp2DrawEnd();
++   VIDCore->Sync();
++   nuub_vdp2_regs_view = NULL;
++   nuub_vdp2_lines_view = NULL;
++   FRAMELOG("**** VIN(T) *****\n");
++   YabAddEventQueue(rcv_evqueue, 0);
++   return;
++#endif
+    /* this should be done after a frame change or a plot trigger */
+    //Vdp1Regs->COPR = 0;
+    //printf("COPR = 0 at %d\n", __LINE__);
+@@ -725,12 +756,18 @@
+   }
+ 
+   FrameProfileAdd("VIN event");
+-  YabAddEventQueue(evqueue,VDPEV_VBLANK_IN);
+-
+-   // sync
+-  //do {
++  /* nuubOS: no wait for this frame's composition (it overlaps the next
++   * frame); the previous one must be done before its copy is replaced. */
++  if (vin_inflight) {
+     YabWaitEventQueue(rcv_evqueue);
+-  //} while (YaGetQueueSize(rcv_evqueue) != 0);
++    vin_inflight = 0;
++  }
++  vin_regs = *Vdp2Regs;
++  memcpy(vin_lines, Vdp2Lines, sizeof(vin_lines));
++  YabAddEventQueue(evqueue,VDPEV_VBLANK_IN);
++  vin_inflight = 1;
++  Vdp2Regs->TVSTAT |= 0x0008;
++  ScuSendVBlankIN();
+    FrameProfileAdd("VIN sync");
+ 
+ #else
+@@ -912,6 +949,15 @@
+     //YabThreadUSleep(10000);
+ 
+   }
++  /* nuubOS: while the VDP thread has not read this frame's command list
++   * yet (it may still be composing the previous frame), the SH2s go on
++   * and look again 10 lines later, as the synchronous renderer does while
++   * VDP1 is busy; they wait for it only before VBlank-IN. */
++  if (yabsys.wait_line_count != -1 && yabsys.LineCount == yabsys.wait_line_count &&
++      YaGetQueueSize(vdp1_rcv_evqueue) == 0 &&
++      yabsys.LineCount + 10 < yabsys.VBlankLineCount) {
++      yabsys.wait_line_count += 10;
++  }
+   if (yabsys.wait_line_count != -1 && yabsys.LineCount == yabsys.wait_line_count) {
+       FRAMELOG("**WAIT START %d %d**", yabsys.wait_line_count, YaGetQueueSize(vdp1_rcv_evqueue));
+       YabWaitEventQueue(vdp1_rcv_evqueue); // sync VOUT
+@@ -2433,6 +2479,15 @@
+ 
+ 
+ 
++/* nuubOS: whether the VDP thread runs (libretro.c hands it the context). */
++extern "C" int VdpProcRunning( void ){
++#if defined(YAB_ASYNC_RENDERING)
++  return vdp_proc_running;
++#else
++  return 0;
++#endif
++}
++
+ void VdpResume( void ){
+ #if defined(YAB_ASYNC_RENDERING)
+ 	YabAddEventQueue(evqueue,VDPEV_MAKECURRENT);
+--- /dev/null
++++ b/yabause/src/nuub_vdp2view.h
+@@ -0,0 +1,32 @@
++/* nuubOS: the VDP thread composes frame N (VBlank-IN) while the SH2s
++ * already run frame N+1 and change the VDP2 registers. During that work
++ * the renderer reads the copy vdp2.cpp takes at VBlank-IN, otherwise the
++ * live state. Included last, by the renderer's own files only. */
++#ifndef NUUB_VDP2VIEW_H
++#define NUUB_VDP2VIEW_H
++
++#include "vdp2.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern Vdp2 *nuub_vdp2_regs_view;  /* NULL: the live registers */
++extern Vdp2 *nuub_vdp2_lines_view; /* NULL: the live per-line copies */
++#ifdef __cplusplus
++}
++#endif
++
++static inline Vdp2 *nuub_vdp2_regs(void)
++{
++  return nuub_vdp2_regs_view ? nuub_vdp2_regs_view : Vdp2Regs;
++}
++
++static inline Vdp2 *nuub_vdp2_lines(void)
++{
++  return nuub_vdp2_lines_view ? nuub_vdp2_lines_view : Vdp2Lines;
++}
++
++#define Vdp2Regs (nuub_vdp2_regs())
++#define Vdp2Lines (nuub_vdp2_lines())
++
++#endif
+--- a/yabause/src/ygles.c
++++ b/yabause/src/ygles.c
+@@ -25,6 +25,7 @@
+ #include "vidshared.h"
+ #include "debug.h"
+ #include "frameprofile.h"
++#include "nuub_vdp2view.h" /* nuubOS, last */
+ 
+ #define NUM_TEXTURE_BUFFER 1
+ 
+--- a/yabause/src/vidogl.c
++++ b/yabause/src/vidogl.c
+@@ -55,6 +55,7 @@
+ #include "ygl.h"
+ #include "yui.h"
+ #include "frameprofile.h"
++#include "nuub_vdp2view.h" /* nuubOS, last */
+ 
+ #define Y_MAX(a, b) ((a) > (b) ? (a) : (b))
+ #define Y_MIN(a, b) ((a) < (b) ? (a) : (b))
+--- a/yabause/src/yglshaderes.c
++++ b/yabause/src/yglshaderes.c
+@@ -26,6 +26,7 @@
+ #include "yui.h"
+ #include "vidshared.h"
+ #include "shaders/FXAA_DefaultES.h"
++#include "nuub_vdp2view.h" /* nuubOS, last */
+ 
+ extern void YuiMsg(const char *format, ...);
+ extern GLuint RBGGenerator_getTexture( int id );

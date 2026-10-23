@@ -1,0 +1,69 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH 7/7] SCSP: the SH2s no longer wait for the sound thread
+
+At VBlank-IN the SH2s waited for the SCSP thread to finish the frame's
+samples, and once 0005 overlapped the rendering, at VBlank-OUT as well
+(3.4 ms a frame in Virtua Fighter 2). They now go on: the M68K cycles
+of the following lines are counted from 0 as before and handed to the
+SCSP once it has finished the frame; a frame still unfinished at the
+next VBlank-IN is waited for there.
+
+Upstream-Status: Pending
+---
+--- a/yabause/src/yabause.c
++++ b/yabause/src/yabause.c
+@@ -639,6 +639,8 @@
+ 
+ //#define YAB_STATICS
+ void SyncCPUtoSCSP();
++static int scsp_sync_pending;
++static void FinishSyncCPUtoSCSP(void);
+ u64 getM68KCounter();
+ u64 g_m68K_dec_cycle = 0;
+ 
+@@ -852,6 +854,14 @@
+ #else
+       {
+         saved_m68k_cycles  += m68k_cycles_per_deciline;
++#if defined(ASYNC_SCSP)
++        /* nuubOS: until the SCSP has finished the frame, the following
++         * lines' cycles are kept here and handed over once it has. */
++        if (scsp_sync_pending) {
++          if (YaGetQueueSize(q_scsp_finish) > 0)
++            FinishSyncCPUtoSCSP();
++        } else
++#endif
+         setM68kCounter(saved_m68k_cycles);
+ #endif
+       }
+@@ -900,13 +910,27 @@
+ }
+ 
+ 
++/* nuubOS: at VBlank-IN the SH2s waited here for the SCSP thread to finish
++ * the frame's samples (1.4-3.4 ms a frame in Virtua Fighter 2). They now
++ * go on; their M68K cycles are counted from 0 as before and handed to the
++ * SCSP once it has finished (deciline loop), at the latest at the next
++ * VBlank-IN. */
++static int scsp_sync_pending = 0;
++
++static void FinishSyncCPUtoSCSP(void) {
++  YabWaitEventQueue(q_scsp_finish);
++  scsp_sync_pending = 0;
++  setM68kCounter(saved_m68k_cycles);
++  YabAddEventQueue(q_scsp_frame_start, 0);
++}
++
+ void SyncCPUtoSCSP() {
+   //LOG("[SH2] WAIT SCSP");
+   if (g_scsp_main_mode == 0) {
+-    YabWaitEventQueue(q_scsp_finish);
++    if (scsp_sync_pending)
++      FinishSyncCPUtoSCSP();
+     saved_m68k_cycles = 0;
+-    setM68kCounter(saved_m68k_cycles);
+-    YabAddEventQueue(q_scsp_frame_start, 0);
++    scsp_sync_pending = 1;
+   }
+   //LOG("[SH2] START SCSP");
+ }

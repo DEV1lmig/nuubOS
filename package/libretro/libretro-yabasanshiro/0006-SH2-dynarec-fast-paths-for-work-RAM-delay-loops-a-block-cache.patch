@@ -1,0 +1,443 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH 6/7] SH2 dynarec: fast paths for work RAM, delay loops, a block cache
+
+- The JIT's memory calls go to small handlers that read cached work RAM
+  directly and write cached high work RAM directly while no compiled
+  code comes from it (the setDirty bitmap of 0002).
+- A "dt Rn; bf <itself>" delay loop runs in one step for the cycles
+  left in the time slice (Virtua Fighter 2's slave SH2 polls the master
+  with one: 62 % of its blocks).
+- The dispatcher keeps the last blocks run by PC, with their flags, in
+  a small direct-mapped cache: it found each block in a 4 MB table and
+  read its flags 4 KB past its code, two cache misses per block. Every
+  table entry is cleared through kill(), which drops the cached one.
+
+Upstream-Status: Pending
+---
+--- a/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.h
++++ b/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.h
+@@ -105,6 +105,8 @@
+ 
+ #define BLOCK_LOOP  (0x01)
+ #define BLOCK_WRITE (0x02)
++/* nuubOS: the block is "dt Rn; bf <itself>", n in bits 8-11 */
++#define BLOCK_DTBF  (0x04)
+ 
+ #define IN_INFINITY_LOOP (-1)
+ 
+@@ -233,6 +235,19 @@
+   Block* LookupTableLow[0x100000>>1];
+   Block* LookupTableC[0x8000>>1];
+   Block * dCode;
++
++  /* nuubOS: the last blocks run, by PC, with their flags. The dispatcher
++   * found each block in a 4 MB table and read its flags 4 KB past its
++   * code: two cache misses per block (7 % of the emulation thread in
++   * Virtua Fighter 2). Every table entry is cleared through kill(),
++   * which drops the cached one with the same index. */
++  struct JcEntry { u32 pc; u32 flags; Block *b; };
++  enum { JC_SIZE = 8192 };
++  JcEntry jc_[JC_SIZE];
++  inline void kill(Block **table, u32 index) {
++    table[index] = NULL;
++    jc_[index & (JC_SIZE - 1)].pc = 0xFFFFFFFF;
++  }
+   
+   std::unordered_map<u32, int> self_modify_block;
+ 
+@@ -262,7 +277,7 @@
+          LOG("%d %08X is removed", LookupTable[*it]->id, (*it) << 1);
+         remove_count_++;
+         self_modify_block[ (((*it) << 1) | 0x06000000) ] = LookupTable[*it]->id;
+-        LookupTable[*it] = NULL;
++        kill(LookupTable, *it);
+       }
+     }
+     LookupParentTable[addr].clear();
+@@ -402,6 +417,13 @@
+   u8 memGetByte(u32);
+   u16 memGetWord(u32);
+   u32 memGetLong(u32);  
++  u8 memGetByteFast(u32);
++  u16 memGetWordFast(u32);
++  u32 memGetLongFast(u32);
++  void memSetByteFast(u32, u8);
++  void memSetWordFast(u32, u16);
++  void memSetLongFast(u32, u32);
++  extern CompileBlocks *nuubCompileBlocks;
+   
+ }
+ 
+--- a/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.cpp
++++ b/yabause/src/sh2_dynarec_devmiyax/DynarecSh2.cpp
+@@ -730,6 +730,7 @@
+   memset(LookupTableRom, 0, sizeof(LookupTableRom));
+   memset(LookupTableLow, 0, sizeof(LookupTableLow));
+   memset(LookupTableC, 0, sizeof(LookupTableC));
++  memset(jc_, 0xFF, sizeof(jc_));
+ 
+   blockCount = 0;
+   LastMakeBlock = 0;
+@@ -781,7 +782,7 @@
+   if (g_CompleBlock[blockCount].b_addr != 0x00) {
+     
+     if ((g_CompleBlock[blockCount].b_addr & 0xFF000000) == 0xC0000000) {
+-      LookupTableC[(g_CompleBlock[blockCount].b_addr & 0x000FFFFF) >> 1] = NULL;
++      kill(LookupTableC, (g_CompleBlock[blockCount].b_addr & 0x000FFFFF) >> 1);
+     }
+     else {
+       switch (g_CompleBlock[blockCount].b_addr & 0x0FF00000) {
+@@ -790,15 +791,15 @@
+           //return NULL; do nothing
+         }
+         else {
+-          LookupTableRom[(g_CompleBlock[blockCount].b_addr & 0x000FFFFF) >> 1] = NULL;
++          kill(LookupTableRom, (g_CompleBlock[blockCount].b_addr & 0x000FFFFF) >> 1);
+         }
+         break;
+       case 0x00200000:
+-        LookupTableLow[(g_CompleBlock[blockCount].b_addr & 0x000FFFFF) >> 1] = NULL;
++        kill(LookupTableLow, (g_CompleBlock[blockCount].b_addr & 0x000FFFFF) >> 1);
+         break;
+       case 0x06000000:
+         /*case 0x06100000:*/
+-        LookupTable[(g_CompleBlock[blockCount].b_addr & 0x000FFFFF) >> 1] = NULL;
++        kill(LookupTable, (g_CompleBlock[blockCount].b_addr & 0x000FFFFF) >> 1);
+         //LOG("%d, %08X is removed due to overflow", blockCount, g_CompleBlock[blockCount].b_addr);
+         break;
+       default:
+@@ -933,6 +934,14 @@
+   }
+   
+   page->flags = 0;
++  {
++    /* nuubOS: a delay loop "dt Rn; bf <itself>" ran one dispatch per
++     * iteration: Execute() runs it in one step (Virtua Fighter 2's slave
++     * SH2 waits for the master that way: 62 % of its blocks). */
++    u16 op0 = memGetWord(addr);
++    if ((op0 & 0xF0FF) == 0x4010 && memGetWord(addr + 2) == 0x8BFD)
++      page->flags |= BLOCK_DTBF | ((op0 & 0x0F00) /* n << 8 */);
++  }
+   
+ #ifdef BUILD_INFO  
+   if( show_code_ ) LOG("*********** start block %08X *************\n", addr );
+@@ -1272,15 +1281,16 @@
+ 
+ DynarecSh2::DynarecSh2() {
+   m_pDynaSh2     = new tagSH2;
+-  m_pDynaSh2->getmembyte = (uintptr_t)memGetByte;
+-  m_pDynaSh2->getmemword = (uintptr_t)memGetWord;
+-  m_pDynaSh2->getmemlong = (uintptr_t)memGetLong;
+-  m_pDynaSh2->setmembyte = (uintptr_t)memSetByte;
+-  m_pDynaSh2->setmemword = (uintptr_t)memSetWord;
+-  m_pDynaSh2->setmemlong = (uintptr_t)memSetLong;
++  m_pDynaSh2->getmembyte = (uintptr_t)memGetByteFast;
++  m_pDynaSh2->getmemword = (uintptr_t)memGetWordFast;
++  m_pDynaSh2->getmemlong = (uintptr_t)memGetLongFast;
++  m_pDynaSh2->setmembyte = (uintptr_t)memSetByteFast;
++  m_pDynaSh2->setmemword = (uintptr_t)memSetWordFast;
++  m_pDynaSh2->setmemlong = (uintptr_t)memSetLongFast;
+   m_pDynaSh2->eachclock = (uintptr_t)DebugEachClock;
+ 
+   m_pCompiler = CompileBlocks::getInstance();
++  nuubCompileBlocks = m_pCompiler;
+   m_ClockCounter = 0;
+   m_IntruptTbl.clear();
+   m_bIntruptSort = true;
+@@ -1401,6 +1411,10 @@
+ inline int DynarecSh2::Execute(){
+ 
+   Block * pBlock = NULL;
++  const u32 pc = GET_PC();
++  CompileBlocks::JcEntry *jce =
++    &m_pCompiler->jc_[(pc >> 1) & (CompileBlocks::JC_SIZE - 1)];
++  u32 bflags;
+ 
+   m_pCompiler->exec_count_++;
+ #if defined(EXECUTE_STAT)
+@@ -1408,6 +1422,12 @@
+ #endif
+ //#endif
+ 
++  if (jce->pc == pc) {
++    pBlock = jce->b;
++    bflags = jce->flags;
++    goto have_block;
++  }
++
+   if ((GET_PC() & 0xFF000000) == 0xC0000000)
+   {
+     pBlock = m_pCompiler->LookupTableC[(GET_PC() & 0x000FFFFF) >> 1];
+@@ -1420,6 +1440,7 @@
+         return IN_INFINITY_LOOP;
+       }
+     }
++    jce->pc = pc;
+   }
+   else {
+ 
+@@ -1473,6 +1494,7 @@
+         }
+         m_pCompiler->LookupTableLow[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
+       }
++      jce->pc = pc;
+       break;
+ 
+       // High Memory
+@@ -1489,6 +1511,7 @@
+         }
+         m_pCompiler->LookupTable[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
+       }
++      jce->pc = pc;
+       break;
+ 
+       // Cache
+@@ -1502,6 +1525,41 @@
+     }
+   }
+     
++  /* ROM blocks and the other areas are not kept: the BIOS hooks above
++   * must see their PCs. */
++  bflags = pBlock->flags;
++  if (jce->pc == pc) {
++    jce->b = pBlock;
++    jce->flags = bflags;
++  }
++have_block:
++
++  /* nuubOS: "dt Rn; bf <itself>" in one step, as many iterations as
++   * the time slice has cycles left (4 each: dt 1, bf 3, as compiled),
++   * so the loop ends, or is resumed in the next slice, exactly where
++   * the compiled block would have left it. */
++  if ((bflags & BLOCK_DTBF) && !m_pCompiler->debug_mode_) {
++    u32 *rn = &m_pDynaSh2->GenReg[(bflags >> 8) & 0xF];
++    u64 left = *rn ? *rn : 0x100000000ULL;
++    u32 now = m_pDynaSh2->SysReg[4];
++    u64 budget = m_pDynaSh2->exitcount > now ?
++      ((u64)(m_pDynaSh2->exitcount - now) + 3) >> 2 : 1;
++    u64 k = left < budget ? left : budget;
++    *rn -= (u32)k;
++    m_pDynaSh2->SysReg[4] = now + (u32)(k << 2);
++    if (*rn == 0) {
++      SET_SR(GET_SR() | 1);
++      SET_PC(pBlock->b_addr + 4);
++    } else {
++      SET_SR(GET_SR() & ~1u);
++      SET_PC(pBlock->b_addr);
++    }
++    if ((GET_SR() & 0xF0) < GET_ICOUNT()) {
++      this->CheckInterupt();
++    }
++    return 0;
++  }
++
+ #if 0
+     static FILE * fp = NULL;
+     char fname[64];
+@@ -1540,7 +1598,7 @@
+     this->CheckInterupt();
+   }
+ 
+-  if (!m_pCompiler->debug_mode_ && (pBlock->flags&BLOCK_LOOP) ){
++  if (!m_pCompiler->debug_mode_ && (bflags & BLOCK_LOOP) ){
+     if (m_pDynaSh2->SysReg[3] < pBlock->e_addr && m_pDynaSh2->SysReg[3] >= pBlock->b_addr) {
+       return IN_INFINITY_LOOP;
+     } else {
+--- a/yabause/src/sh2_dynarec_devmiyax/DynarecSh2CInterface.cpp
++++ b/yabause/src/sh2_dynarec_devmiyax/DynarecSh2CInterface.cpp
+@@ -348,13 +348,13 @@
+   switch (start & 0x0FF00000){
+     // ROM
+   case 0x00000000:
+-      block->LookupTableRom[ (start&0x000FFFFF)>>1 ] = NULL;
++      block->kill(block->LookupTableRom, (start&0x000FFFFF)>>1);
+     break;
+ 
+   // Low Memory
+   case 0x00200000:
+     for (u32 addr = start; addr< start + length; addr += 2)
+-      block->LookupTableLow[ (addr&0x000FFFFF)>>1 ] = NULL;
++      block->kill(block->LookupTableLow, (addr&0x000FFFFF)>>1);
+     break;
+     // High Memory
+   case 0x06000000:
+@@ -362,14 +362,14 @@
+ #if defined(SET_DIRTY)
+     block->setDirty(addr);
+ #else
+-    block->LookupTable[ (addr&0x000FFFFF)>>1 ] = NULL;
++    block->kill(block->LookupTable, (addr&0x000FFFFF)>>1);
+ #endif
+     break;
+ 
+     // Cache
+   default:
+     if ((start & 0xFF000000) == 0xC0000000){
+-      block->LookupTableC[ (start&0x000FFFFF)>>1 ] = NULL;
++      block->kill(block->LookupTableC, (start&0x000FFFFF)>>1);
+     }
+     break;
+   }
+@@ -407,7 +407,7 @@
+   {
+   // Low Memory
+   case 0x00200000:
+-    block->LookupTableLow[  (addr&0x000FFFFF)>>1 ] = NULL;
++    block->kill(block->LookupTableLow, (addr&0x000FFFFF)>>1);
+     T2WriteByte(LowWram, addr & 0xFFFFF, data);
+     if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 7;
+     dynaFree();
+@@ -418,7 +418,7 @@
+ #if defined(SET_DIRTY)
+     block->setDirty(addr);
+ #else
+-    block->LookupTable[ (addr&0x000FFFFF)>>1 ] = NULL;
++    block->kill(block->LookupTable, (addr&0x000FFFFF)>>1);
+ #endif
+     T2WriteByte(HighWram, addr & 0xFFFFF, data);
+     if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+@@ -430,7 +430,7 @@
+   default:
+     if ((addr & 0xFF000000) == 0xC0000000)
+     {
+-      block->LookupTableC[ (addr&0x000FFFFF)>>1] = NULL;
++      block->kill(block->LookupTableC, (addr&0x000FFFFF)>>1);
+     }
+   }
+   MappedMemoryWriteByte(addr, data, &cycle);
+@@ -449,7 +449,7 @@
+   {
+   // Low Memory
+    case 0x00200000:
+-    block->LookupTableLow[ (addr&0x000FFFFF)>>1 ] = NULL;
++    block->kill(block->LookupTableLow, (addr&0x000FFFFF)>>1);
+     T2WriteWord(LowWram, addr & 0xFFFFF, data);
+     if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 7;
+     dynaFree();
+@@ -460,7 +460,7 @@
+ #if defined(SET_DIRTY)
+      block->setDirty(addr);
+ #else
+-     block->LookupTable[(addr & 0x000FFFFF) >> 1] = NULL;
++     block->kill(block->LookupTable, (addr & 0x000FFFFF) >> 1);
+ #endif
+     T2WriteWord(HighWram, addr & 0xFFFFF, data);
+     if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+@@ -472,7 +472,7 @@
+   default:
+     if ((addr & 0xFF000000) == 0xC0000000)
+     {
+-      block->LookupTableC[ (addr&0x000FFFFF) >> 1] = NULL;
++      block->kill(block->LookupTableC, (addr&0x000FFFFF) >> 1);
+     }
+   }
+   MappedMemoryWriteWord(addr, data, &cycle);
+@@ -491,8 +491,8 @@
+   {  
+     // Low Memory
+   case 0x00200000:
+-    block->LookupTableLow[ (addr & 0x000FFFFF)>>1  ] = NULL;
+-    block->LookupTableLow[ ((addr & 0x000FFFFF)>>1) + 1 ] = NULL;
++    block->kill(block->LookupTableLow, (addr & 0x000FFFFF)>>1);
++    block->kill(block->LookupTableLow, ((addr & 0x000FFFFF)>>1) + 1);
+     T2WriteLong(LowWram, addr & 0xFFFFF, data);
+     if(addr&0x20000000) DynarecSh2::CurrentContext->memcycle_ += 7;
+     dynaFree();
+@@ -504,8 +504,8 @@
+     block->setDirty(addr);
+     block->setDirty(addr+2);
+ #else
+-    block->LookupTable[(addr & 0x000FFFFF) >> 1] = NULL;
+-    block->LookupTable[((addr & 0x000FFFFF) >> 1) + 1] = NULL;
++    block->kill(block->LookupTable, (addr & 0x000FFFFF) >> 1);
++    block->kill(block->LookupTable, ((addr & 0x000FFFFF) >> 1) + 1);
+ #endif
+     T2WriteLong(HighWram, addr & 0xFFFFF, data);
+     if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+@@ -517,7 +517,7 @@
+   default:
+     if ((addr & 0xFF000000) == 0xC0000000)
+     {
+-      block->LookupTableC[ (addr&0x000FFFFF)>>1 ] = NULL;
++      block->kill(block->LookupTableC, (addr&0x000FFFFF)>>1);
+     }
+   }
+   MappedMemoryWriteLong(addr, data, &cycle);
+@@ -615,6 +615,77 @@
+ #pragma GCC pop_options
+ #endif
+ 
++/* nuubOS: the JIT calls these for every SH2 load. Cached work RAM
++ * (0x06xxxxxx high, 0x002xxxxx low) costs no extra cycles there and is
++ * read here without a stack frame; anything else, including the
++ * cache-through mirrors, goes to the handlers above. memGetLong +
++ * memGetWord were 13 % of the emulation thread (Virtua Fighter 2). */
++u8 memGetByteFast(u32 addr)
++{
++  if ((addr & 0xFFF00000) == 0x06000000)
++    return T2ReadByte(HighWram, addr & 0xFFFFF);
++  if ((addr & 0xFFF00000) == 0x00200000)
++    return T2ReadByte(LowWram, addr & 0xFFFFF);
++  return memGetByte(addr);
++}
++
++u16 memGetWordFast(u32 addr)
++{
++  if ((addr & 0xFFF00000) == 0x06000000)
++    return T2ReadWord(HighWram, addr & 0xFFFFF);
++  if ((addr & 0xFFF00000) == 0x00200000)
++    return T2ReadWord(LowWram, addr & 0xFFFFF);
++  return memGetWord(addr);
++}
++
++/* Writes to cached high work RAM where no code was compiled from (the
++ * setDirty bitmap of patch 0002 is clear for those halfwords) need only
++ * the store; the rest goes to the handlers. */
++CompileBlocks *nuubCompileBlocks; /* set by DynarecSh2() */
++
++static inline bool hwramNoCode(u32 addr, u32 halfwords)
++{
++  u32 i = adress_mask(addr);
++  u32 mask = ((1u << halfwords) - 1) << (i & 7);
++  return !(nuubCompileBlocks->parent_bits_[i >> 3] & mask);
++}
++
++void memSetByteFast(u32 addr, u8 data)
++{
++  if ((addr & 0xFFF00000) == 0x06000000 && hwramNoCode(addr, 1)) {
++    T2WriteByte(HighWram, addr & 0xFFFFF, data);
++    return;
++  }
++  memSetByte(addr, data);
++}
++
++void memSetWordFast(u32 addr, u16 data)
++{
++  if ((addr & 0xFFF00001) == 0x06000000 && hwramNoCode(addr, 1)) {
++    T2WriteWord(HighWram, addr & 0xFFFFF, data);
++    return;
++  }
++  memSetWord(addr, data);
++}
++
++void memSetLongFast(u32 addr, u32 data)
++{
++  if ((addr & 0xFFF00003) == 0x06000000 && hwramNoCode(addr, 2)) {
++    T2WriteLong(HighWram, addr & 0xFFFFF, data);
++    return;
++  }
++  memSetLong(addr, data);
++}
++
++u32 memGetLongFast(u32 addr)
++{
++  if ((addr & 0xFFF00000) == 0x06000000)
++    return T2ReadLong(HighWram, addr & 0xFFFFF);
++  if ((addr & 0xFFF00000) == 0x00200000)
++    return T2ReadLong(LowWram, addr & 0xFFFFF);
++  return memGetLong(addr);
++}
++
+ 
+ void SH2DynOnFrame(SH2_struct *context) {
+   DynarecSh2 *pctx = (DynarecSh2*)context->ext;

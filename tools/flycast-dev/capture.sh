@@ -4,7 +4,7 @@
 # second and pcsample of the two busiest threads for SECONDS. Writes
 # /tmp/cap.maps and /tmp/cap.<tid>; never launches, pauses or kills.
 T=${1:-8}
-P=$(pidof retroarch) || { echo "no game running"; exit 1; }
+P=$(pidof retroarch.real || pidof retroarch) || { echo "no game running"; exit 1; }
 cp /proc/$P/maps /tmp/cap.maps
 tt() { for t in /proc/$P/task/*; do echo "${t##*/} $(cut -d' ' -f14,15 $t/stat)"; done; }
 tt > /tmp/cap.t1; sleep 2; tt > /tmp/cap.t2

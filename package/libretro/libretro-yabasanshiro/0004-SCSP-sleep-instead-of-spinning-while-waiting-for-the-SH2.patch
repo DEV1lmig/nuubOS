@@ -1,0 +1,34 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH 4/4] SCSP: sleep instead of spinning while waiting for the SH2
+
+The asynchronous SCSP thread waited for SH2 time by reading the M68K
+counter in a tight loop: 70 % of its samples (ScspAsynMainCpuTime +
+getM68KCounter), a whole Cortex-A53 core kept busy for the whole game.
+After 64 reads without progress it now sleeps 50 us: the sound runs at
+most that far behind the SH2, and SyncCPUtoSCSP still waits for the
+frame. Virtua Fighter 2 fight: SCSP thread 97 -> 32 % of a core, about
+0.4 fps fewer (28.6 -> 28.2, within the run-to-run spread).
+
+Upstream-Status: Pending
+---
+--- a/yabause/src/scsp.c
++++ b/yabause/src/scsp.c
+@@ -5527,10 +5527,18 @@
+     u64 m68k_done_counter = 0;
+     u64 m68k_integer_part = 0;
+     u64 m68k_cycle = 0;
++    /* nuubOS: wait for SH2 time without spinning a whole core. The
++     * loop read the counter the SH2 thread writes as fast as it could
++     * (70 % of this thread); after a short spin it sleeps 50 us: the
++     * sound runs at most that far behind the SH2, and SyncCPUtoSCSP
++     * still waits for the frame. */
++    int idle = 0;
+     do {
+       m68k_integer_part = getM68KCounter() >> SCSP_FRACTIONAL_BITS;
+       m68k_cycle = m68k_integer_part - pre_m68k_cycle;
+       if (thread_running == 0) break;
++      if (m68k_cycle == 0 && ++idle >= 64)
++        YabThreadUSleep(50);
+     } while (m68k_cycle == 0);
+ 
+     m68k_inc += m68k_cycle;
