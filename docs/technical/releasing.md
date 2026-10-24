@@ -47,7 +47,7 @@ tools/ota/add-image.sh ~/nuubos-release
   under Software Update → What's New.
 - `add-image.sh` adds the flashable `.img.xz`, `legal-info` (split into 1900 MB
   parts, below GitHub's 2 GiB asset limit; without `host-sources`, the build tools
-  that never reach the image, and without the linux-firmware tarball: only binary
+  that never reach the image, and without the linux-firmware source tarball: only binary
   firmware ships, its licenses stay), the third-party notices and
   `SHA256SUMS`.
 - Optional: `~/nuubos-release/github-notes.md` becomes the GitHub release text
