@@ -3105,6 +3105,7 @@ export component HomeWindow inherits Window {
     in-out property <[PlayerAssignmentEntry]> player-assignments: [];
     in-out property <[ControllerMappingEntry]> controller-mapping: [];
     in-out property <int> controllers-menu-index: 0;
+    in-out property <int> controllers-menu-scroll-offset: 0;
     /* Generic Settings choice dropdown: the default UI for every discrete
      * multi-value setting. Continuous values keep sliders/left-right. */
     in-out property <bool> settings-choice-open: false;
@@ -5605,11 +5606,13 @@ export component HomeWindow inherits Window {
                  * RUMBLE. */
                 SettingsSectionHeader {
                     x: root.settings-content-x;
-                    y: root.sec-row-y(3, 0, 3, 0, 0) - root.settings-section-gap;
+                    y: root.sec-row-y(3, root.controllers-menu-scroll-offset, 3, 0, 0) - root.settings-section-gap;
                     width: root.settings-content-width;
                     label: root.i18n-strings[root.lighting-supported ? 735 : 899];
                     scope-label: root.i18n-strings[312];
-                    visible: root.page-controllers && root.sec-row-visible(3, 0, 3, 0, 0);
+                    visible: root.page-controllers
+                        && root.controllers-menu-scroll-offset < 3
+                        && root.sec-row-visible(3, root.controllers-menu-scroll-offset, 3, 0, 0);
                 }
                 for row[k] in [
                     { title: root.i18n-strings[13], value: root.i18n-strings[111], enabled: true, toggle: false, detail: "" },
@@ -5637,7 +5640,7 @@ export component HomeWindow inherits Window {
                     },
                 ]: SettingsSelectableRow {
                     x: root.settings-content-x;
-                    y: root.sec-row-y(k, 0, 3, 0, 0);
+                    y: root.sec-row-y(k, root.controllers-menu-scroll-offset, 3, 0, 0);
                     width: root.settings-content-width;
                     height: root.settings-row-height;
                     title: row.title;
@@ -5648,7 +5651,8 @@ export component HomeWindow inherits Window {
                     enabled: row.enabled;
                     navigates: row.enabled && !row.toggle;
                     selected: root.settings-view == 10 && root.controllers-menu-index == k;
-                    visible: root.page-controllers && root.sec-row-visible(k, 0, 3, 0, 0)
+                    visible: root.page-controllers
+                        && root.sec-row-visible(k, root.controllers-menu-scroll-offset, 3, 0, 0)
                         && (k != 4 || root.lighting-supported);
                 }
 

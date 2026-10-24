@@ -557,6 +557,11 @@ fn keyboard_label(c:&str)->&'static str{match c{"uk"=>"English (UK)","it"=>"Ital
 fn apply_regional(ui:&HomeWindow,s:&RSnap){ui.set_timezone(s.timezone.clone().into());ui.set_automatic_time(s.auto_time);ui.set_manual_date_label(datetime::date_label(ui,&s.local_date).into());ui.set_manual_time_label(s.local_time.clone().into());ui.set_keyboard_layout_code(s.keyboard.clone().into());ui.set_keyboard_layout_label(keyboard_label(&s.keyboard).into());ui.set_keyboard_layout(virtual_layout(&s.keyboard).into());ui.set_last_time_sync_label(if s.last_sync>0{tr(ui,299,"Time synchronized").into()}else{tr(ui,302,"Never").into()});}
 fn refresh_regional(ui:&HomeWindow){if let Ok(r)=regional_command("STATUS"){apply_regional(ui,&parse_regional(&r));}}
 fn start_regional_listener(ui:&HomeWindow){let weak=ui.as_weak();thread::spawn(move||loop{match UnixStream::connect(REGIONAL_SOCKET){Ok(mut x)=>{if x.write_all(b"SUBSCRIBE\n").is_err(){thread::sleep(Duration::from_millis(500));continue;}let mut b=String::new();for l in BufReader::new(x).lines(){let Ok(l)=l else{break};b.push_str(&l);b.push('\n');if l.starts_with("local_time="){let q=parse_regional(&b);b.clear();let w=weak.clone();let _=slint::invoke_from_event_loop(move||if let Some(ui)=w.upgrade(){apply_regional(&ui,&q);});}}}Err(_)=>thread::sleep(Duration::from_millis(500))}});}
+fn update_controllers_menu_scroll(ui:&HomeWindow){
+    /* Controllers & Input: CONTROLLERS (0-2), then RUMBLE & LIGHTING (3-4,
+     * 3-3 without RGB hardware) - one section boundary at row 3. */
+    ui.set_controllers_menu_scroll_offset(sectioned_scroll(ui,ui.get_controllers_menu_index(),controllers_menu_rows(ui),ui.get_controllers_menu_scroll_offset(),(3,0,0)));
+}
 fn update_general_scroll(ui:&HomeWindow){
     /* General has 12 rows in four sections (PROFILE, USERS, DATE & TIME,
      * KEYBOARD). */
@@ -4810,6 +4815,7 @@ fn handle_settings_action(
                     gameui::reset_services(ui);
                 } else if ui.get_settings_selected_index() == 2 {
                     ui.set_controllers_menu_index(0);
+                    ui.set_controllers_menu_scroll_offset(0);
                     navigate_settings_view(ui, 10);
                 } else if ui.get_settings_selected_index() == 3 {
                     ui.set_gaming_index(0);
@@ -5087,12 +5093,18 @@ fn handle_settings_action(
         }
         /* No RGB Lighting row without RGB hardware. */
         10 => match action {
-            "menu_up" => ui.set_controllers_menu_index(
-                move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), -1)
-            ),
-            "menu_down" => ui.set_controllers_menu_index(
-                move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), 1)
-            ),
+            "menu_up" => {
+                ui.set_controllers_menu_index(
+                    move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), -1)
+                );
+                update_controllers_menu_scroll(ui);
+            }
+            "menu_down" => {
+                ui.set_controllers_menu_index(
+                    move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), 1)
+                );
+                update_controllers_menu_scroll(ui);
+            }
             "menu_confirm" => match ui.get_controllers_menu_index() {
                 0 => {
                     ui.set_player_assignment_index(0);
