@@ -52,3 +52,6 @@ COG_CONF_OPTS += -Dcog_dbus_system_owner=root
 # rtl_bt Bluetooth firmware, binary-only but redistributable (WHENCE).
 DEJAVU_LICENSE = Bitstream-Vera, Public-Domain (DejaVu changes), Arev fonts license
 LINUX_FIRMWARE_LICENSE = Redistributable binary firmware (LICENCE.rtlwifi_firmware.txt)
+# Binary-only firmware has no source to offer: legal-info keeps its license
+# files but not the whole linux-firmware tarball (~600 MB per release).
+LINUX_FIRMWARE_REDISTRIBUTE = NO

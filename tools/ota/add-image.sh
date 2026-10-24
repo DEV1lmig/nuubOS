@@ -36,7 +36,11 @@ xz -T0 -9 -c "$IMG" > "$DIR/$BASE-anbernic-h700.img.xz.tmp" && \
 
 echo "Packing legal-info..."
 rm -f "$DIR/$BASE-legal-info.tar.part"*
-tar -cf - -C "$(dirname "$LEGAL")" "$(basename "$LEGAL")" -C "$ROOT" LICENSE LICENSING.md licenses |
+# host-sources: build tools (compilers, generators) that never reach the
+# image, so there is no source to offer for them (~500 MB); their licenses
+# (host-licenses, host-manifest.csv) stay.
+tar -cf - --exclude="$(basename "$LEGAL")/host-sources" \
+    -C "$(dirname "$LEGAL")" "$(basename "$LEGAL")" -C "$ROOT" LICENSE LICENSING.md licenses |
     split -b 1900M -d -a 2 - "$DIR/$BASE-legal-info.tar.part" || exit 1
 
 echo "Packing third-party notices..."

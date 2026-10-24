@@ -28,11 +28,11 @@ releases on the devices.
 
 ## 2. Qualify
 
-Flash `output/h700/images/nuubOS-anbernic-h700.img` on a spare card and check on at
-least one device: first boot and setup wizard, a game, sleep and wake, Wi-Fi,
-Settings → System → Software Update shows the right version and channel. For an RC
-or Stable release, run the platform regression (`scripts/test-platform.sh`) on every
-qualified device.
+Every change is deployed and checked on the development console while it is made
+(RG CubeXX), so a Nightly or an RC needs no separate pass: its build is the tree
+already tested there (maintainer decision, 2026-10-24). For a Stable release, flash
+`output/h700/images/nuubOS-anbernic-h700.img` on a spare card and run the platform
+regression (`scripts/test-platform.sh`) on every qualified device.
 
 ## 3. Create the release files
 
@@ -46,7 +46,9 @@ tools/ota/add-image.sh ~/nuubos-release
   is plain text, at most 4000 bytes, one item per line: it appears on the console
   under Software Update → What's New.
 - `add-image.sh` adds the flashable `.img.xz`, `legal-info` (split into 1900 MB
-  parts, below GitHub's 2 GiB asset limit), the third-party notices and
+  parts, below GitHub's 2 GiB asset limit; without `host-sources`, the build tools
+  that never reach the image, and without the linux-firmware tarball: only binary
+  firmware ships, its licenses stay), the third-party notices and
   `SHA256SUMS`.
 - Optional: `~/nuubos-release/github-notes.md` becomes the GitHub release text
   (installation steps, checksums). Without it, the console notes are used.
