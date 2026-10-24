@@ -85,6 +85,10 @@ nuubOS uses [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 | RC | `X.Y.Z-rc.N` | `1.0.0-rc.1` | release candidate N of `X.Y.Z`: bug fixes only |
 | Nightly | `X.Y.Z-nightly.YYYYMMDD` | `1.0.0-nightly.20261020` | development build towards `X.Y.Z`, UTC build date |
 
+- Exception for 1.0.0 (maintainer decision, 2026-10-24): `1.0.0-rc.3` also brings
+  PortMaster, the A/B button swap in the menus and per-system settings, the most
+  requested features; `1.0.0-rc.4` follows after a week of feedback with bug fixes
+  only, then `1.0.0`.
 - `PATCH` = bug fixes only, `MINOR` = new features, `MAJOR` = an incompatible change
   (a new SD card layout, a reflash needed).
 - `VERSION` holds the release in preparation: `1.0.0-rc.1` while RC 1 of 1.0.0 is

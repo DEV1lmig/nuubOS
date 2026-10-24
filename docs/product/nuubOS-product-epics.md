@@ -6586,6 +6586,43 @@ EPIC-057 is a **product direction** recorded for the roadmap; refine and impleme
 
 ---
 
+## EPIC-058 — PortMaster
+
+**Status:** `PLANNED FOR 1.0.0-rc.3` (product decision 2026-10-24, the most requested community feature; exception to the RC rule, see `docs/technical/releasing.md`)
+
+### Product contract
+
+Players install and play PortMaster ports (native Linux games and engines packaged for handhelds) from the console, as on the other handheld distributions.
+
+**MUST**
+- PortMaster (open source) is installed or offered from nuubOS itself; its own client browses, installs, updates and removes ports over Wi-Fi with the built-in pad;
+- installed ports appear in the library as a Ports system and launch from Home like any game, with cover where the port provides one;
+- the session goes through emud like a game: launch screen, Quick Menu over it (pause), Quit returns to Home and leaves no stale process, Sleep/Restart/Power Off go through the central lifecycle path;
+- controls work with the built-in pad and external controllers (SDL game controller mapping, and keyboard/mouse emulation for ports that need it), the A/B swap and the Quick Menu hotkey included;
+- audio through PipeWire with the product volume; picture scaled to the screen on 640x480, 720x720, 720x480 and HDMI;
+- port files and their saves live on USERDATA, survive OTA updates and never need a reflash;
+- ports that need the user's own game data say so (PortMaster's own instructions) and nuubOS ships no game data;
+- every new visible string localized.
+
+**Product decisions**
+- nuubOS integrates PortMaster, it does not fork its catalogue or host ports; compatibility follows what PortMaster expects from a supported distribution (paths, device info, control script), so ports run unchanged.
+- a port that does not run is a known PortMaster limitation, not a release blocker; the launch path, the client and a representative set of ports are.
+
+**Acceptance baseline**
+From a fresh image the user opens PortMaster, installs a free port over Wi-Fi, it appears under Ports in Home, launches, plays with the built-in pad and an external controller, the Quick Menu pauses and quits it, sleep/resume and quit leave no stale process, at every supported resolution and on HDMI.
+
+**Platform/GAP**
+- the client (Python + its own UI) under labwc/Wayland; what PortMaster reads to recognise a distribution (control folder, device/CFW name, `control.txt`-style helpers, `gptokeyb`) and the ROM/ports folder layout nuubOS exposes;
+- runtimes the ports expect: SDL2 with KMS or Wayland, GLES vs GL through gl4es, the shared runtimes PortMaster downloads (Mono, Godot, love…), glibc/aarch64 compatibility;
+- pause/quit of a non-libretro process (SIGSTOP/SIGCONT, process group), the Quick Menu hotkey without a libretro frontend, input routing between Home and the port;
+- performance on the H700 with labwc composition; a representative port list per engine to qualify.
+
+### Refinement result
+
+EPIC-058 is a **product contract** for 1.0.0-rc.3; refine the GAP items before implementation.
+
+---
+
 # L. Platform / architecture enablers
 
 The following are not necessarily user-facing Product Epics, but they are required technical enablers for the final nuubOS platform contract.
@@ -6861,7 +6898,7 @@ At this stage:
 
 - **56 Product Epics identified**
 - **9 Technical Enablers identified**
-- **56 Product Epics refined** (`EPIC-001` through `EPIC-056`); `EPIC-057` recorded as a roadmap direction (2026-10-23)
+- **56 Product Epics refined** (`EPIC-001` through `EPIC-056`); `EPIC-057` recorded as a roadmap direction (2026-10-23); `EPIC-058` PortMaster planned for 1.0.0-rc.3 (2026-10-24)
 - **0 Epics frozen**
 - remaining Epics remain subject to refinement;
 - no new platform implementation should be derived from an unrefined Epic until it has been decomposed into explicit requirements.
@@ -7439,6 +7476,7 @@ Expand nuubOS beyond local emulation while exercising the mature hardware/servic
 - `EPIC-028` Local Video & Music Player
 - `EPIC-030` Web Mode
 - `EPIC-042` Bluetooth Audio
+- `EPIC-058` PortMaster (1.0.0-rc.3)
 
 ### Suggested implementation order
 
