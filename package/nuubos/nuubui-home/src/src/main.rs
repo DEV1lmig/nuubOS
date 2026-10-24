@@ -3656,7 +3656,7 @@ fn open_network_detail(ui: &HomeWindow, network: WifiNetworkEntry, return_view: 
 
 /* Controllers & Input rows: RGB Lighting (the last) only with RGB hardware. */
 fn controllers_menu_rows(ui: &HomeWindow) -> i32 {
-    if ui.get_lighting_supported() { 4 } else { 3 }
+    if ui.get_lighting_supported() { 5 } else { 4 }
 }
 
 fn move_model_selection(current: i32, count: i32, delta: i32) -> i32 {
@@ -4215,7 +4215,25 @@ fn face_position(code: i32) -> i32 {
     }
 }
 
+/*
+ * UI confirm/back swap (2026-10-24, user request): a preference for which
+ * face button confirms in nuubOS's own menus, entirely separate from
+ * controllersd's per-controller game mapping (BIND SET only touches
+ * inputd's own global bindings table, never a padmap); a game's own
+ * buttons are unaffected either way. nuubos-emud reads the same bindings
+ * file to keep RetroArch's own menu in agreement (emud.c
+ * ui_confirm_is_east()).
+ */
+fn toggle_action_button_swap(ui: &HomeWindow) {
+    let swapped = ui.get_action_button_swapped();
+    let (confirm, back) = if swapped { (304, 305) } else { (305, 304) };
+    let _ = input_command(&format!("BIND SET menu_confirm {confirm}"));
+    let _ = input_command(&format!("BIND SET menu_back {back}"));
+    refresh_hint_mapping(ui);
+}
+
 fn refresh_hint_mapping(ui: &HomeWindow) {
+    ui.set_action_button_swapped(binding_code("menu_confirm") == Some(305)); // BTN_EAST
     ui.set_select_face_position(
         binding_code("menu_confirm")
             .map(face_position)
@@ -5064,11 +5082,12 @@ fn handle_settings_action(
                     ui.set_controller_list_scroll_offset(0);
                     navigate_settings_view(ui, 12);
                 }
-                2 if ui.get_rumble_supported() => {
+                2 => toggle_action_button_swap(ui),
+                3 if ui.get_rumble_supported() => {
                     ui.set_rumble_index(0);
                     navigate_settings_view(ui, 16);
                 }
-                3 if ui.get_lighting_supported() => {
+                4 if ui.get_lighting_supported() => {
                     lighting::reset_page(ui);
                     navigate_settings_view(ui, 17);
                 }

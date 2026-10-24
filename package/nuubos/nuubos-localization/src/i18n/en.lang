@@ -1352,3 +1352,5 @@
 1351=Next {0} starts
 1352=Logs everything for the next 10 starts and saves a report at each restart or power off. Off by default: logging costs performance and card writes.
 1353=No battery: keep the power cable connected until the update is complete
+1354=Swap Confirm/Back Buttons
+1355=Use the opposite face button to confirm in menus. Games are not affected.

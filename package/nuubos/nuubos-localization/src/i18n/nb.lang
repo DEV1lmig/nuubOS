@@ -1352,3 +1352,5 @@
 1351=Neste {0} oppstarter
 1352=Logger alt ved de neste 10 oppstartene og lagrer en rapport ved hver omstart eller avslåing. Av som standard: logging koster ytelse og skriving til kortet.
 1353=Ikke noe batteri: hold strømkabelen tilkoblet til oppdateringen er ferdig
+1354=Bytt om på Bekreft/Tilbake-knappene
+1355=Bruk den motsatte knappen til å bekrefte i menyer. Spill påvirkes ikke.

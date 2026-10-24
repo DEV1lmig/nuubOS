@@ -950,6 +950,23 @@ static void configure_input_mapping(struct input_dev *input)
 				 stick_code[1], stick_dir[1], false);
 }
 
+/*
+ * BIND SET/RESET only update the global `bindings` table; each already-open
+ * input's own `mapped_codes` cache (read by action_for_code() on every key
+ * event) was derived from it once, at open/rescan time, and does not notice
+ * a later change on its own (user report 2026-10-24: a bind swap persisted
+ * and the hint icons updated at once through BIND GET, but physically
+ * pressing the new button did nothing until inputd was restarted). Re-run
+ * the same per-input setup a rescan would.
+ */
+static void refresh_all_controller_mappings(void)
+{
+	size_t i;
+
+	for (i = 0; i < input_count; i++)
+		configure_input_mapping(&inputs[i]);
+}
+
 static bool input_has_abs_binding(const struct input_dev *input)
 {
 	size_t i;
@@ -3257,6 +3274,7 @@ static void handle_command(struct client *client, const char *line)
 		}
 
 		load_bindings();
+		refresh_all_controller_mappings();
 
 		if (menu_open) {
 			set_menu_grab(false);
@@ -3303,6 +3321,8 @@ static void handle_command(struct client *client, const char *line)
 					"ERR persist failed\n");
 			return;
 		}
+
+		refresh_all_controller_mappings();
 
 		if (menu_open) {
 			set_menu_grab(false);

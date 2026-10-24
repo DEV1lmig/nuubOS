@@ -1352,3 +1352,5 @@
 1351=Seuraavat {0} käynnistystä
 1352=Tallentaa kaikki lokit seuraavien 10 käynnistyksen ajan ja tallentaa raportin jokaisessa uudelleenkäynnistyksessä tai sammutuksessa. Oletuksena pois: lokit maksavat suorituskykyä ja kirjoituksia kortille.
 1353=Ei akkua: pidä virtajohto kytkettynä, kunnes päivitys on valmis
+1354=Vaihda Vahvista/Takaisin-painikkeet
+1355=Käytä vastakkaista painiketta vahvistamiseen valikoissa. Pelit eivät vaikutu.
