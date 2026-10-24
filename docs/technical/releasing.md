@@ -28,11 +28,10 @@ releases on the devices.
 
 ## 2. Qualify
 
-Every change is deployed and checked on the development console while it is made
-(RG CubeXX), so a Nightly or an RC needs no separate pass: its build is the tree
-already tested there (maintainer decision, 2026-10-24). For a Stable release, flash
-`output/h700/images/nuubOS-anbernic-h700.img` on a spare card and run the platform
-regression (`scripts/test-platform.sh`) on every qualified device.
+No separate pass (maintainer decision, 2026-10-24): every change is deployed and
+checked on the development console while it is made (RG CubeXX), so a Nightly or an
+RC is the tree already tested there, and a Stable release follows the release
+candidates that the community has tested on their devices.
 
 ## 3. Create the release files
 
