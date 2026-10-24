@@ -1,0 +1,5 @@
+#!/bin/sh
+# nuubOS lifecycle pre-power hook (CLAUDE §20): Restart/Power Off end a
+# running port first; it sleeps with the console otherwise.
+# nuubos-portsctl returns at once when no port runs.
+exec /usr/bin/nuubos-portsctl pre-power "$1" >/dev/null
