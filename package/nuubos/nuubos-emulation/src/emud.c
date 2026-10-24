@@ -3095,21 +3095,32 @@ static const char *const ra_notification_keys[] = {
  */
 static bool ui_confirm_is_east(void)
 {
+	/* Same two layers and order as inputd's load_bindings(): image
+	 * defaults file first, then the persistent user override, which
+	 * wins when both set menu_confirm. */
+	static const char *const paths[] = {
+		"/etc/nuubos/input-bindings.conf",
+		"/state/config/nuubos-input.conf",
+	};
 	FILE *fp;
 	char line[128];
 	int code;
 	bool result = false;
+	size_t i;
 
-	fp = fopen("/state/config/nuubos-input.conf", "r");
-	if (!fp)
-		return false;
-	while (fgets(line, sizeof(line), fp)) {
-		if (sscanf(line, "menu_confirm=%d", &code) == 1) {
-			result = code == 305; /* BTN_EAST */
-			break;
+	for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		fp = fopen(paths[i], "r");
+		if (!fp)
+			continue;
+		while (fgets(line, sizeof(line), fp)) {
+			if (sscanf(line, "menu_confirm=%d", &code) == 1) {
+				result = code == 305; /* BTN_EAST */
+				break;
+			}
 		}
+		fclose(fp);
 	}
-	fclose(fp);
+
 	return result;
 }
 

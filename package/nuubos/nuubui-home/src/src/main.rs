@@ -3062,6 +3062,12 @@ fn navigate_settings_view(ui: &HomeWindow, next_view: i32) {
         cancel_controller_remap(ui);
         ui.set_controller_mapping_reset_armed(false);
     }
+    if next_view == 10 && previous_view != 10 {
+        /* Reset System Settings resets menu_confirm/menu_back in inputd
+         * out-of-process, without telling the running Home UI; resync on
+         * entry so a stale toggle state can't linger. */
+        refresh_hint_mapping(ui);
+    }
     if previous_view == 23 && next_view == 0 {
         /* Returning to the rail previews General from the top again. */
         ui.set_general_scroll_offset(0);
@@ -4227,8 +4233,24 @@ fn face_position(code: i32) -> i32 {
 fn toggle_action_button_swap(ui: &HomeWindow) {
     let swapped = ui.get_action_button_swapped();
     let (confirm, back) = if swapped { (304, 305) } else { (305, 304) };
-    let _ = input_command(&format!("BIND SET menu_confirm {confirm}"));
-    let _ = input_command(&format!("BIND SET menu_back {back}"));
+    let old_confirm = if swapped { 305 } else { 304 };
+
+    let confirm_ok = input_command(&format!("BIND SET menu_confirm {confirm}"))
+        .map(|reply| reply.trim() == "OK")
+        .unwrap_or(false);
+
+    if confirm_ok {
+        let back_ok = input_command(&format!("BIND SET menu_back {back}"))
+            .map(|reply| reply.trim() == "OK")
+            .unwrap_or(false);
+
+        if !back_ok {
+            /* Don't leave confirm and back on the same button: undo the
+             * confirm change that already went through. */
+            let _ = input_command(&format!("BIND SET menu_confirm {old_confirm}"));
+        }
+    }
+
     refresh_hint_mapping(ui);
 }
 
