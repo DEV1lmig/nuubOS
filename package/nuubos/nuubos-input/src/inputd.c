@@ -6,6 +6,7 @@
 #include <linux/input.h>
 #include <linux/uinput.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdarg.h>
@@ -3578,9 +3579,6 @@ static void process_events(struct input_dev *input,
 		if (input->accelerometer)
 			continue;
 
-		if (events[i].type == EV_KEY || events[i].type == EV_ABS)
-			broadcast_raw_event(input, &events[i]);
-
 		/*
 		 * Remapping owns the next raw key from one controller. Keep that
 		 * physical press from also navigating Settings while the Product
@@ -3732,7 +3730,14 @@ static void process_events(struct input_dev *input,
 		}
 	}
 
+	/* The game gamepads first: the raw stream (controllersd: activity,
+	 * Input Tester, remapping) is socket writes the game need not wait
+	 * for. */
 	flush_vpads();
+	if (!input->accelerometer)
+		for (i = 0; i < count; i++)
+			if (events[i].type == EV_KEY || events[i].type == EV_ABS)
+				broadcast_raw_event(input, &events[i]);
 }
 
 /*
@@ -3927,6 +3932,21 @@ int main(int argc, char **argv)
 	 * service on the next write: write() then fails with EPIPE and the
 	 * client is dropped. */
 	signal(SIGPIPE, SIG_IGN);
+
+	/*
+	 * Real-time priority (low): with a game on every core (Saturn,
+	 * Dreamcast) a press used to wait for the scheduler before reaching the
+	 * game gamepad: under Virtua Fighter 2 on the CubeXX p99 3.1 ms, max
+	 * 5.0 ms; SCHED_FIFO 10: p99 0.8 ms, max 1.4 ms (2026-10-24). The work
+	 * per event is microseconds; the kernel's RT throttling still bounds
+	 * a runaway loop.
+	 */
+	{
+		struct sched_param sp = { .sched_priority = 10 };
+
+		if (sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &sp) != 0)
+			log_message("sched_fifo failed errno=%d", errno);
+	}
 
 	load_bindings();
 	rescan_inputs();

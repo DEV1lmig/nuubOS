@@ -107,7 +107,9 @@ void main()
     float beam = exp(-(dy * dy) / (2.0 * width * width));
     /* Light scanlines everywhere (user request 2026-10-11: 0.55 read as
      * dark lines, on N64 and on fractional scales most). */
-    float strength = s >= 2.0 ? CRT_SCANLINES : 0.0;
+    /* 1.99: at exactly 2x (480 source rows on 480 lines, HDMI) the GPU's s
+     * could come out a hair below 2.0 and the scanlines vanished. */
+    float strength = s >= 1.99 ? CRT_SCANLINES : 0.0;
     float scan = 1.0 - strength * (1.0 - beam);
 
     /* Gain back the light the gaps take: at 2x a gap row keeps ~0.5, so

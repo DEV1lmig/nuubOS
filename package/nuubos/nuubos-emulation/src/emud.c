@@ -99,8 +99,8 @@
 /* Roots are overridable at build time for host tests. */
 #ifndef RUN_ROOT
 #define RUN_ROOT "/run/nuubos"
-#define UI_READY RUN_ROOT "/ui-ready"
 #endif
+#define UI_READY RUN_ROOT "/ui-ready"
 #define SOCKET_PATH RUN_ROOT "/emud.sock"
 #define PIDFILE RUN_ROOT "/emud.pid"
 #define SESSION_DIR RUN_ROOT "/emulation"
@@ -143,13 +143,6 @@
  * resolution, lower = cheaper for 3D-heavy systems). The panel never
  * uses it. */
 #define GAME_HDMI_LINES 720
-/* CRT look scanline strength on HDMI when the game renders fewer than 720
- * lines (crt.glsl CRT_SCANLINES; the panel and 720 lines keep the
- * shaders' 0.25, user request 2026-10-11, 720p upscaled to 1080p approved
- * 2026-10-18). The display engine scales a 480-line buffer 2.25x to 1080p
- * with a filtering scaler, which smooths the 2-row beam/gap pattern away
- * at 0.25 (user report 2026-10-17: "almost no CRT effect on HDMI"). */
-#define CRT_SCANLINES_HDMI 0.55
 #ifndef HDMI_ENABLED
 #define HDMI_ENABLED "/sys/class/drm/card0-HDMI-A-1/enabled"
 #endif
@@ -2262,8 +2255,8 @@ static void restore_user_keys(void)
 	free_restore();
 }
 
-/* Shader preset of the session: one pass, its parameters. */
-static int write_session_shader(const char *shader, const char *params)
+/* Shader preset of the session: one pass. */
+static int write_session_shader(const char *shader)
 {
 	char tmp[] = SESSION_SHADER ".tmp";
 	FILE *fp = fopen(tmp, "w");
@@ -2272,7 +2265,6 @@ static int write_session_shader(const char *shader, const char *params)
 	if (!fp)
 		return -1;
 	fprintf(fp, "shaders = \"1\"\nshader0 = \"%s\"\nfilter_linear0 = \"false\"\n", shader);
-	fputs(params, fp);
 	rc = ferror(fp) ? -1 : 0;
 	if (fclose(fp) != 0)
 		rc = -1;
@@ -2307,8 +2299,6 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 		"video_shader_enable", "video_smooth", NULL,
 	};
 	char screen[16];
-	char scan[64] = "";
-	int render;
 	bool crt;
 	bool bezel = false;
 	bool integer = true;
@@ -2343,9 +2333,6 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 		!strcmp(o->filter, "smooth") ? "true" : "false");
 
 	shader[0] = '\0';
-	render = game_render_height(session.system);
-	if (crt && render > 0 && render < 720)
-		snprintf(scan, sizeof(scan), "CRT_SCANLINES = \"%.2f\"\n", CRT_SCANLINES_HDMI);
 	session.bezel_env[0] = '\0';
 	if (bezel) {
 		char icon[PATH_MAX];
@@ -2365,12 +2352,12 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 			 mood.text[0], mood.text[1], mood.text[2],
 			 mood.accent[0], mood.accent[1], mood.accent[2]);
 	}
+	/* One CRT strength everywhere, HDMI below 720 lines too: the stronger
+	 * 0.55 used there since 2026-10-17 answered scanlines that were missing
+	 * because crt.glsl dropped them at exactly 2x (user, 2026-10-24: 0.25 at
+	 * 540 lines "ora meglio decisamente"). */
 	if (crt) {
-		char params[128] = "";
-
-		if (scan[0])
-			snprintf(params, sizeof(params), "parameters = \"CRT_SCANLINES\"\n%s", scan);
-		if (write_session_shader(SHADER_DIR "/crt.glsl", params) == 0)
+		if (write_session_shader(SHADER_DIR "/crt.glsl") == 0)
 			copy_text(shader, sizeof(shader), SESSION_SHADER);
 	} else if (!o->filter[0] || !strcmp(o->filter, "sharp")) {
 		copy_text(shader, sizeof(shader), DEFAULT_SHADER_PRESET);

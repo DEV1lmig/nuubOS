@@ -2339,11 +2339,34 @@ macro_rules! apply_theme {
     }};
 }
 
-/* At every menu open: the user may have switched or changed theme. */
+/* Active user and the mtime of their settings.conf (which holds THEME=):
+ * the tokens are read again only when one of them changed. */
+fn theme_key() -> (String, Option<std::time::SystemTime>) {
+    let user = fs::read_to_string("/run/nuubos/user/active").unwrap_or_default().trim().to_owned();
+    let mtime = fs::metadata(format!("/state/users/{user}/settings.conf"))
+        .and_then(|m| m.modified())
+        .ok();
+    (user, mtime)
+}
+
+thread_local! {
+    static THEME_KEY: RefCell<Option<(String, Option<std::time::SystemTime>)>> = const { RefCell::new(None) };
+}
+
+/* Before any surface of this process appears (menu, Power OSD, volume OSD,
+ * notification card): the user may have switched or changed Mood since,
+ * and only Home is told (themectl's ui-control `mood`). The notification
+ * card used to keep the Mood of the last menu open (user report
+ * 2026-10-24). */
 fn refresh_theme(ui: &QuickMenuWindow) {
+    let key = theme_key();
+    if THEME_KEY.with(|k| k.borrow().as_ref() == Some(&key)) {
+        return;
+    }
     let tokens = read_theme_tokens();
     apply_theme!(ui, tokens);
     THEME_TOKENS.with(|t| *t.borrow_mut() = tokens);
+    THEME_KEY.with(|k| *k.borrow_mut() = Some(key));
 }
 
 struct Notifier {
@@ -2357,6 +2380,7 @@ struct Notifier {
 
 impl Notifier {
     fn apply(&mut self, ui: &QuickMenuWindow) {
+        refresh_theme(ui);
         THEME_TOKENS.with(|t| {
             let t = t.borrow();
             if !t.is_empty() {
@@ -5000,6 +5024,7 @@ fn map_passive(
      * grab controller input. Presentation only: the owning services hold
      * the policy.
      */
+    refresh_theme(ui);
     ui.set_lifecycle_active(false);
     ui.set_menu_panel_visible(false);
     ui.set_surface_mode(kind.slint_mode());
