@@ -41,6 +41,8 @@ define NUUBOS_PORTS_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/S49nuubos-portsd $(TARGET_DIR)/etc/init.d/S49nuubos-portsd
 	$(INSTALL) -D -m 0755 $(@D)/57-ports \
 		$(TARGET_DIR)/usr/lib/nuubos/lifecycle-hooks/pre-power.d/57-ports
+	$(INSTALL) -D -m 0644 $(@D)/app/portmaster.app \
+		$(TARGET_DIR)/usr/share/nuubos/applications/portmaster.app
 	ln -sfn /userdata/roms $(TARGET_DIR)/roms
 endef
 

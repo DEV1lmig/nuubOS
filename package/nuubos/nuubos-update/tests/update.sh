@@ -40,7 +40,7 @@ cc_updatectl() # OUTPUT [EXTRA...]
 {
     out="$1"; shift
     gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-format-truncation \
-        -DUPDATE_URL="\"http://127.0.0.1:$PORT\"" -DUPDATE_DIR="\"$U\"" -DOS_RELEASE="\"$R/etc/os-release\"" \
+        -DUPDATE_URL="\"http://127.0.0.1:$PORT\"" -DUPDATE_DIR="\"$U\"" -DUPDATE_LOCK="\"$T/update.lock\"" -DOS_RELEASE="\"$R/etc/os-release\"" \
         -DBUILD_ID_FILE="\"$R/usr/share/nuubos/build-id\"" -DBUILD_SERIAL_FILE="\"$R/usr/share/nuubos/build-serial\"" \
         -DCHANNEL_FILE="\"$R/state/update/channel\"" -DAUTO_FILE="\"$R/state/update/auto-off\"" -DUPDATE_DEFAULT_CHANNEL='"nightly"' "$@" \
         "$SRC/updatectl.c" -o "$out" -lcurl -lsodium -lz
@@ -49,6 +49,8 @@ cc_updatectl "$T/updatectl" -DUPDATE_PUBKEY_HEX="\"$PUB\"" || exit 1
 cc_updatectl "$T/updatectl-nokey" || exit 1
 C="$T/updatectl"
 
+ck "one update command at a time" 'flock "$T/update.lock" $C check | grep -q "ERR busy" && flock "$T/update.lock" $C download | grep -q "ERR busy"'
+ck "status while busy" 'flock "$T/update.lock" $C status | grep -q "^channel="'
 ck "no key: unavailable" '"$T/updatectl-nokey" check | grep -q "ERR unavailable"'
 ck "default channel nightly" '[ "$($C channel)" = nightly ] && $C status | grep -q "channel=nightly"'
 # Nightly sees nightly, rc and stable; the newest wins (rc, serial 300).

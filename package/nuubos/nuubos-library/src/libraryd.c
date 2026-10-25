@@ -986,6 +986,192 @@ static int sniff_system(const char *rel)
 	return -1;
 }
 
+/*
+ * PortMaster ports (EPIC-058): the scripts directly in roms/ports of the
+ * console's own card, the only folder nuubos-portsd's sandbox sees. The
+ * folder of a port beside its script holds the port's data (archives,
+ * images, its own runtimes), never games, so the scan does not enter it.
+ */
+#define PORTS_SYSTEM "ports"
+static bool regular_file(const char *path);
+#define PORTS_ROOT ROMS_ROOT "/ports"
+
+static bool is_ports(int sys)
+{
+	return sys >= 0 && !strcmp(systems[sys].id, PORTS_SYSTEM);
+}
+
+/* What PortMaster's gameinfo.xml (EmulationStation gamelist) says of one
+ * port script. */
+struct port_info {
+	char *script;
+	char *image;
+	char *desc;
+	char *developer;
+	char *genre;
+	int year;
+};
+
+/* Text of <tag> in one <game> block, entities decoded and on one line;
+ * NULL when absent or empty. */
+static char *xml_text(const char *block, const char *end, const char *tag)
+{
+	char open_tag[32], close_tag[32];
+	const char *a, *b;
+	char *out;
+	size_t o = 0;
+
+	snprintf(open_tag, sizeof(open_tag), "<%s>", tag);
+	snprintf(close_tag, sizeof(close_tag), "</%s>", tag);
+	a = strstr(block, open_tag);
+	if (!a || a >= end)
+		return NULL;
+	a += strlen(open_tag);
+	b = strstr(a, close_tag);
+	if (!b || b > end || b == a)
+		return NULL;
+	out = xrealloc(NULL, (size_t)(b - a) + 1);
+	while (a < b) {
+		static const char *const ents[][2] = {
+			{ "&amp;", "&" }, { "&lt;", "<" }, { "&gt;", ">" }, { "&quot;", "\"" }, { "&apos;", "'" },
+		};
+		bool done = false;
+
+		for (size_t i = 0; i < sizeof(ents) / sizeof(ents[0]) && !done; i++) {
+			size_t n = strlen(ents[i][0]);
+
+			if ((size_t)(b - a) >= n && !strncmp(a, ents[i][0], n)) {
+				out[o++] = ents[i][1][0];
+				a += n;
+				done = true;
+			}
+		}
+		if (done)
+			continue;
+		if (a[0] == '&' && a[1] == '#') {
+			char *q;
+			long c = strtol(a + 2, &q, 10);
+
+			if (q < b && *q == ';' && c >= 32 && c < 127) {
+				out[o++] = (char)c;
+				a = q + 1;
+				continue;
+			}
+		}
+		/* One line, tab-free: the catalog and the details are TSV. */
+		out[o++] = (*a == '\n' || *a == '\r' || *a == '\t') ? ' ' : *a;
+		a++;
+	}
+	out[o] = '\0';
+	trim(out);
+	if (!out[0]) {
+		free(out);
+		return NULL;
+	}
+	return out;
+}
+
+/* Every gameinfo.xml in the ports' folders (roms/ports/<port>/), and
+ * roms/ports/gamelist.xml when one is there. */
+static struct port_info *load_port_infos(size_t *count)
+{
+	struct port_info *list = NULL;
+	size_t cap = 0;
+	DIR *dir = opendir(PORTS_ROOT);
+	struct dirent *de;
+
+	*count = 0;
+	if (!dir)
+		return NULL;
+	while ((de = readdir(dir)) != NULL) {
+		char path[PATH_MAX];
+		static char text[1 << 16];
+		size_t len;
+		const char *p;
+		FILE *fp;
+
+		if (de->d_name[0] == '.')
+			continue;
+		if (!strcmp(de->d_name, "gamelist.xml"))
+			snprintf(path, sizeof(path), PORTS_ROOT "/gamelist.xml");
+		else if (!pathf(path, sizeof(path), PORTS_ROOT "/%s/gameinfo.xml", de->d_name))
+			continue;
+		if (!(fp = fopen(path, "r")))
+			continue;
+		len = fread(text, 1, sizeof(text) - 1, fp);
+		fclose(fp);
+		text[len] = '\0';
+		for (p = strstr(text, "<game>"); p; p = strstr(p, "<game>")) {
+			const char *end = strstr(p, "</game>");
+			char *script, *image, *release;
+			struct port_info info = { 0 };
+
+			if (!end)
+				break;
+			script = xml_text(p, end, "path");
+			if (script && !strncmp(script, "./", 2) && !strchr(script + 2, '/') && tsv_safe(script + 2)) {
+				info.script = xstrdup(script + 2);
+				/* Image paths are relative to roms/ports, inside it. */
+				image = xml_text(p, end, "image");
+				if (image && !strncmp(image, "./", 2) && !strstr(image, "..") && tsv_safe(image)) {
+					char full[PATH_MAX];
+
+					if (pathf(full, sizeof(full), PORTS_ROOT "/%s", image + 2) && regular_file(full))
+						info.image = xstrdup(full);
+				}
+				free(image);
+				info.desc = xml_text(p, end, "desc");
+				info.developer = xml_text(p, end, "developer");
+				info.genre = xml_text(p, end, "genre");
+				release = xml_text(p, end, "releasedate");
+				if (release && strlen(release) >= 4) {
+					/* "20200423T000000" */
+					char four[5];
+					int y;
+
+					memcpy(four, release, 4);
+					four[4] = '\0';
+					y = atoi(four);
+					if (y > 1950 && y < 2100)
+						info.year = y;
+				}
+				free(release);
+				if (*count == cap) {
+					cap = cap ? cap * 2 : 16;
+					list = xrealloc(list, cap * sizeof(*list));
+				}
+				list[(*count)++] = info;
+			}
+			free(script);
+			p = end;
+		}
+	}
+	closedir(dir);
+	return list;
+}
+
+static void free_port_infos(struct port_info *list, size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		free(list[i].script);
+		free(list[i].image);
+		free(list[i].desc);
+		free(list[i].developer);
+		free(list[i].genre);
+	}
+	free(list);
+}
+
+static const struct port_info *port_info_for(const struct port_info *list, size_t count, const char *rel)
+{
+	const char *name = rel_name(rel);
+
+	for (size_t i = 0; i < count; i++)
+		if (!strcasecmp(list[i].script, name))
+			return &list[i];
+	return NULL;
+}
+
 static bool skip_directory(const char *name)
 {
 	static const char *const skipped[] = {
@@ -1086,7 +1272,7 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 		if (S_ISDIR(st.st_mode)) {
 			int here;
 
-			if (depth >= MAX_SCAN_DEPTH || skip_directory(de->d_name))
+			if (depth >= MAX_SCAN_DEPTH || skip_directory(de->d_name) || is_ports(folder_sys))
 				continue;
 			here = system_by_folder(de->d_name);
 			walk(ctx, rel, depth + 1, here >= 0 ? here : folder_sys);
@@ -1108,6 +1294,8 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 			ref_add(&ctx->unclassified, rel);
 			continue;
 		}
+		if (is_ports(sys) && strcasecmp(sub, systems[sys].dir))
+			continue; /* a script anywhere else is not a port */
 		if (ctx->out->count == ctx->out->cap) {
 			ctx->out->cap = ctx->out->cap ? ctx->out->cap * 2 : 256;
 			ctx->out->items = xrealloc(ctx->out->items, ctx->out->cap * sizeof(*ctx->out->items));
@@ -1188,9 +1376,15 @@ static void *scan_main(void *arg)
 	ctx.out = calloc(1, sizeof(*ctx.out));
 	if (!ctx.out)
 		abort();
+	size_t port_count = 0;
+	struct port_info *ports = NULL;
+
 	walk(&ctx, "", 0, -1);
 	if (sd2_roms[0])
 		walk(&ctx, SD2_PREFIX, 0, -1);
+	for (size_t i = 0; i < ctx.out->count && !ports; i++)
+		if (is_ports(ctx.out->items[i].sys))
+			ports = load_port_infos(&port_count);
 
 	/* Files referenced by a .m3u/.cue belong to that logical game. */
 	qsort(ctx.refs.items, ctx.refs.count, sizeof(char *), ref_compare);
@@ -1205,9 +1399,21 @@ static void *scan_main(void *arg)
 		}
 		it->cover = find_cover(it->sys, it->rel);
 		read_meta_index(it);
+		if (is_ports(it->sys)) {
+			const struct port_info *info = port_info_for(ports, port_count, it->rel);
+
+			/* A scraped or user cover first, then PortMaster's image. */
+			if (info && !it->cover && info->image)
+				it->cover = xstrdup(info->image);
+			if (info && !it->year)
+				it->year = info->year;
+			if (info && !it->genre && info->genre)
+				it->genre = xstrdup(info->genre);
+		}
 		ctx.out->items[keep++] = *it;
 	}
 	ctx.out->count = keep;
+	free_port_infos(ports, port_count);
 	/* Report shared-format files nobody could place (track files of a
 	 * descriptor are not missing anything). */
 	for (size_t i = 0; i < ctx.unclassified.count; i++) {
@@ -2559,6 +2765,21 @@ static void append_metadata(struct strbuf *b, const struct game *g)
 	if (!pathf(path, sizeof(path), METADATA_ROOT "/%s/%s.txt", systems[g->sys].id, stem))
 		return;
 	fp = fopen(path, "r");
+	if (!fp && is_ports(g->sys)) {
+		/* No scraped metadata: what PortMaster installed with the port. */
+		size_t count;
+		struct port_info *list = load_port_infos(&count);
+		const struct port_info *info = port_info_for(list, count, g->rel);
+
+		if (info && info->desc)
+			sb_append(b, "meta_description=%s\n", info->desc);
+		if (info && info->developer)
+			sb_append(b, "meta_developer=%s\n", info->developer);
+		if (info && info->year)
+			sb_append(b, "meta_release=%d\n", info->year);
+		free_port_infos(list, count);
+		return;
+	}
 	if (!fp)
 		return;
 	user_language(lang);

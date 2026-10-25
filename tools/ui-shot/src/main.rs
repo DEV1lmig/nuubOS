@@ -305,6 +305,18 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
     qm.set_stream_steamlink(false);
     qm.set_stream_section_visible(false);
     qm.set_game_confirm_index(-1);
+    /* PortMaster port (EPIC-058): Resume and Quit Game; PortMaster's own
+     * interface: Quit PortMaster. */
+    qm.set_port_section_visible(true);
+    for (name, sel, portmaster) in [("qm_port", 44, false), ("qm_portmaster", 45, true)] {
+        qm.set_port_portmaster(portmaster);
+        qm.set_selected_index(sel);
+        for (w, h) in sizes {
+            shot(win, w, h, name);
+        }
+    }
+    qm.set_port_portmaster(false);
+    qm.set_port_section_visible(false);
     /* Game closing screen (surface-mode 3): with a cover (a synthetic
      * 3:4 gradient), then without. */
     let mut cover = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(300, 400);
@@ -1377,6 +1389,32 @@ fn main() {
             (5, "Check for Updates".into(), false, false, false), (10, "Remove Steam Link".into(), false, false, false)]));
         ui.set_app_page_captions(captions(&["Choose and pair your PC in Steam Link", "Version 1.3.9.300", ""]));
         ui.set_steamlink_index(1);
+    })));
+    /* PortMaster (EPIC-058, settings-view 74). */
+    let ap = app_page.clone();
+    scenes.push(("portmaster_installed", Box::new(move |ui| {
+        ap(ui, "PORTMASTER", "PortMaster", &format!("{} 2026.06.23-0015", s(ui, 485)));
+        ui.set_steamlink_active(false); ui.set_moonlight_active(false); ui.set_netplay_active(false);
+        ui.set_portmaster_active(true); ui.set_settings_view(74); ui.set_gen_index(0); ui.set_gen_notice("".into());
+        ui.set_app_page_chips(chips(&[(6, &s(ui, 489), false)]));
+        ui.set_app_page_entries(entries(&[]));
+        ui.set_app_page_description(s(ui, 1367).into());
+        ui.set_app_page_actions(actions(&[(0, s(ui, 1362), true, false, false), (5, s(ui, 487), false, false, false),
+            (4, s(ui, 852), false, true, false), (10, s(ui, 1364), false, false, false)]));
+        ui.set_app_page_captions(captions(&[&s(ui, 1363), "", &s(ui, 1368), &s(ui, 1365)]));
+    })));
+    let ap = app_page.clone();
+    scenes.push(("portmaster_absent", Box::new(move |ui| {
+        ap(ui, "PORTMASTER", "PortMaster", "");
+        ui.set_portmaster_active(true); ui.set_settings_view(74); ui.set_gen_index(0);
+        ui.set_app_page_chips(chips(&[(13, &s(ui, 494), true)]));
+        ui.set_app_page_entries(entries(&[]));
+        ui.set_app_page_description(s(ui, 1367).into());
+        ui.set_app_page_actions(actions(&[(4, s(ui, 1359), true, false, false)]));
+        ui.set_app_page_captions(captions(&[&s(ui, 494)]));
+    })));
+    scenes.push(("portmaster_leave", Box::new(|ui| {
+        ui.set_portmaster_active(false);
     })));
     let ap = app_page.clone();
     scenes.push(("netplay", Box::new(move |ui| {

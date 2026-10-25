@@ -48,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <linux/fs.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -80,6 +81,9 @@
 #endif
 #ifndef AUTO_FILE
 #define AUTO_FILE "/state/update/auto-off"
+#endif
+#ifndef UPDATE_LOCK
+#define UPDATE_LOCK "/run/nuubos-update.lock"
 #endif
 #ifndef UPDATE_DEFAULT_CHANNEL
 #define UPDATE_DEFAULT_CHANNEL "stable"
@@ -858,6 +862,20 @@ static int cmd_write(const char *device)
 	return 0;
 }
 
+/*
+ * check, download and write change UPDATE_DIR: one at a time. Two downloads
+ * appending to the same payload.part (2026-10-25: a manual one next to the
+ * Settings job) made a part longer than the payload, which failed its
+ * checksum at 100 %; a check during a download replaces the manifest the
+ * download verifies against. The lock goes with the process.
+ */
+static bool take_lock(void)
+{
+	int fd = open(UPDATE_LOCK, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+
+	return fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct sigaction sa;
@@ -870,6 +888,9 @@ int main(int argc, char **argv)
 	as_job = getenv("NUUBOS_JOB_ID") != NULL;
 	if (sodium_init() < 0)
 		return fail("crypto");
+	if (argc >= 2 && (!strcmp(argv[1], "check") || !strcmp(argv[1], "download") || !strcmp(argv[1], "write")) &&
+	    !take_lock())
+		return fail("busy");
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 	if (argc == 2 && !strcmp(argv[1], "status"))
 		rc = cmd_status();

@@ -27,10 +27,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const LIBRARY_SOCKET: &str = "/run/nuubos/libraryd.sock";
 const EMULATION_SOCKET: &str = "/run/nuubos/emud.sock";
+const PORTS_SOCKET: &str = "/run/nuubos/portsd.sock";
 
 /* A game session runs (nuubos-emud): RetroArch is fullscreen above Home and
  * owns the controllers through the nuubOS game gamepads. */
 pub static GAME_RUNNING: AtomicBool = AtomicBool::new(false);
+/* A PortMaster port (nuubos-portsd session) runs. */
+pub static PORT_RUNNING: AtomicBool = AtomicBool::new(false);
 /* libraryd lists unavailable games (Settings → Gaming → LIBRARY). */
 pub static SHOW_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 /* The first library snapshot reached Home (home_covers_settled). */
@@ -181,10 +184,25 @@ fn library_command(command: &str) -> std::io::Result<String> {
     Ok(reply)
 }
 
+/* Games of the Ports system (EPIC-058) seen in any libraryd list: they
+ * launch through nuubos-portsd, not emud. */
+static PORT_GAMES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn port_games() -> &'static Mutex<HashSet<String>> {
+    PORT_GAMES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn is_port_game(id: &str) -> bool {
+    port_games().lock().unwrap().contains(id)
+}
+
 fn parse_game(value: &str) -> Option<LibGame> {
     let f: Vec<&str> = value.split('\t').collect();
     if f.len() < 9 {
         return None;
+    }
+    if f[1] == "ports" {
+        port_games().lock().unwrap().insert(f[0].to_owned());
     }
     Some(LibGame {
         id: f[0].into(),
@@ -930,6 +948,7 @@ fn build_home(ui: &HomeWindow) {
                         "media" => tr(ui, 665, "Media").into(),
                         "web" => tr(ui, 678, "Web").into(),
                         "netplay" => tr(ui, 1239, "Netplay").into(),
+                        "portmaster" => tr(ui, 1358, "PortMaster").into(),
                         _ => a.name.clone().into(),
                     },
                     cover_path: a.icon.clone().into(),
@@ -1312,15 +1331,18 @@ pub fn launch_with_mode(ui: &HomeWindow, id: &str, available: bool, mode: &str) 
         show_notice(ui, unavailable_text(ui, id));
         return;
     }
-    if GAME_RUNNING.load(Ordering::SeqCst) {
+    if GAME_RUNNING.load(Ordering::SeqCst) || PORT_RUNNING.load(Ordering::SeqCst) {
         return;
     }
-    let command = format!("LAUNCH\t{}\t{}", id, mode);
+    /* A port has no save states: always its own start. */
+    let port = is_port_game(id);
+    let command = if port { format!("LAUNCH_GAME\t{}", id) } else { format!("LAUNCH\t{}\t{}", id, mode) };
     play_ui_sound("launch");
     show_launch_screen(ui, id);
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let reason = match emulation_command(&command) {
+        let reply = if port { ports_command(&command) } else { emulation_command(&command) };
+        let reason = match reply {
             Ok(reply) if reply.trim() == "OK" => return,
             Ok(reply) => reply.trim().strip_prefix("ERR ").unwrap_or("").to_owned(),
             Err(error) => {
@@ -1337,12 +1359,74 @@ pub fn launch_with_mode(ui: &HomeWindow, id: &str, available: bool, mode: &str) 
                 /* A double press while the game is starting. */
                 "busy" => return,
                 "no-core" => tr(&ui, 433, "No emulator is installed for this system"),
+                /* portsd: PortMaster is missing or being installed. */
+                "unavailable" if port => tr(&ui, 1357, "Install PortMaster first"),
                 "unavailable" | "game" => tr(&ui, 434, "This game is not available"),
                 _ => tr(&ui, 431, "The game could not be started"),
             };
             play_ui_sound("error");
             show_notice(&ui, text);
         });
+    });
+}
+
+fn ports_command(command: &str) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(PORTS_SOCKET)?;
+    stream.set_read_timeout(Some(Duration::from_secs(8)))?;
+    stream.write_all(command.as_bytes())?;
+    stream.write_all(b"\n")?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply)?;
+    Ok(reply)
+}
+
+/* Follows nuubos-portsd: a port (or PortMaster's interface) covers Home
+ * like a game. */
+pub fn start_ports_listener(ui: &HomeWindow) {
+    let weak = ui.as_weak();
+    thread::spawn(move || loop {
+        if let Ok(mut stream) = UnixStream::connect(PORTS_SOCKET) {
+            if stream.write_all(b"SUBSCRIBE\n").is_ok() {
+                let mut running = false;
+                let mut block = String::new();
+                for line in BufReader::new(stream).lines() {
+                    let Ok(line) = line else { break };
+                    block.push_str(&line);
+                    block.push('\n');
+                    if let Some(state) = line.strip_prefix("state=") {
+                        running = state != "idle";
+                        continue;
+                    }
+                    if line != "end=1" {
+                        continue;
+                    }
+                    let snapshot = crate::portmasterui::parse(&block);
+                    block.clear();
+                    let changed = PORT_RUNNING.swap(running, Ordering::SeqCst) != running;
+                    let weak = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            crate::portmasterui::apply(&ui, snapshot);
+                            if changed {
+                                launch_session(&ui, running);
+                                on_game_session(&ui, running);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        /* portsd restarted or absent (an image without ports). */
+        if PORT_RUNNING.swap(false, Ordering::SeqCst) {
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    launch_session(&ui, false);
+                    on_game_session(&ui, false);
+                }
+            });
+        }
+        thread::sleep(Duration::from_secs(2));
     });
 }
 
@@ -1658,6 +1742,10 @@ pub fn handle_home_action(ui: &HomeWindow, action: &str) {
                     crate::mediaui::open(ui)
                 }
                 _ if card.key.as_str() == "web" => crate::webui::open(ui),
+                _ if card.key.as_str() == "portmaster" => {
+                    app_page_icon(ui, &card);
+                    crate::portmasterui::open(ui)
+                }
                 _ if card.key.as_str() == "netplay" => {
                     app_page_icon(ui, &card);
                     crate::netplayui::open(ui)

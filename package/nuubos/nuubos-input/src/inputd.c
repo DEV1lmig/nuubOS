@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 #include <poll.h>
@@ -1103,6 +1104,28 @@ static void close_inputs(void)
 /* An input of the last scan that is still the device at @path: the kernel
  * answers on its fd (a removed device gives ENODEV) and the node is the
  * same one. */
+/*
+ * A uinput device another program created (its sysfs device is under
+ * /devices/virtual/input; Bluetooth pads come through uhid, under
+ * /devices/virtual/misc): an output of that program, never a controller.
+ * PortMaster's gptokeyb turns the game gamepad into a "Fake Keyboard" for
+ * the port's window (or a fake Xbox 360 pad the port reads): grabbed here,
+ * its keys reached nobody (2026-10-25, ports without controls). nuubOS's
+ * own development pads ("nuubOS bench pad") stay inputs.
+ */
+static bool foreign_uinput(const char *event, const char *name)
+{
+	char link[PATH_MAX];
+	char target[PATH_MAX];
+
+	if (strncmp(name, "nuubOS ", 7) == 0)
+		return false;
+	snprintf(link, sizeof(link), "/sys/class/input/%s/device", event);
+	if (!realpath(link, target))
+		return false;
+	return strncmp(target, "/sys/devices/virtual/input/", 27) == 0;
+}
+
 static bool input_still_there(const struct input_dev *input, const char *path)
 {
 	struct stat by_fd, by_path;
@@ -1188,6 +1211,11 @@ static void rescan_inputs(void)
 		if (strncmp(name, VPAD_NAME, strlen(VPAD_NAME)) == 0 ||
 		    strcmp(name, WEB_DEV_NAME) == 0 ||
 		    strcmp(name, STREAM_KEYS_NAME) == 0) {
+			close(fd);
+			continue;
+		}
+		if (foreign_uinput(entry->d_name, name)) {
+			log_message("input-skip path=%s name=%s (uinput output)", path, name);
 			close(fd);
 			continue;
 		}

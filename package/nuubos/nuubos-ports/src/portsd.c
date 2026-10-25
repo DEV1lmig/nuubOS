@@ -7,7 +7,9 @@
  * stable release into /userdata/roms/ports/PortMaster, where ports look for
  * it (PM_CHECK, PM_INSTALL, PM_CANCEL, PM_REMOVE, PM_ROLLBACK, automatic
  * updates on a check, PM_AUTO_UPDATE). OPEN runs PortMaster's own interface,
- * LAUNCH <script> a port (a "<name>.sh" of the ports folder): both are a
+ * LAUNCH <script> a port (a "<name>.sh" of the ports folder), LAUNCH_GAME
+ * <id> the port of a library game (Home; Recently Played and play time go
+ * to libraryd like emud's games): all are a
  * session like a game, with the nuubOS game gamepads on for its lifetime
  * (inputd connection); PAUSE/RESUME freeze and thaw it, QUIT ends it,
  * Restart/Power Off end it first (PRE_POWER); Sleep keeps it.
@@ -75,6 +77,7 @@
 #define PIDFILE RUN_ROOT "/portsd.pid"
 #define SESSION_LOG RUN_ROOT "/ports.log"
 #define INPUT_SOCKET RUN_ROOT "/inputd.sock"
+#define LIBRARY_SOCKET RUN_ROOT "/libraryd.sock"
 #define WAYLAND_SOCKET RUN_ROOT "/wayland-runtime/wayland-0"
 #define PIPEWIRE_SOCKET RUN_ROOT "/pipewire/pipewire-0"
 
@@ -147,6 +150,7 @@ struct session {
 	int input_fd;       /* inputd connection holding game gamepads on */
 	bool portmaster;    /* PortMaster's interface, not a port */
 	char port[256];     /* script name of the port */
+	char game[17];      /* its library game id, "" for LAUNCH by name */
 	bool paused;
 	bool user_quit;
 	long long kill_ms;  /* cgroup.kill after SIGTERM, 0 when none */
@@ -422,6 +426,7 @@ static char *build_status(size_t *len_out)
 	APPEND("session=%s\n", session.state == SESSION_IDLE ? "" :
 	       session.portmaster ? "portmaster" : "port");
 	APPEND("session_port=%s\n", session.state == SESSION_IDLE ? "" : session.port);
+	APPEND("session_game=%s\n", session.state == SESSION_IDLE ? "" : session.game);
 	APPEND("paused=%d\n", session.paused ? 1 : 0);
 	APPEND("portmaster=%s\n", pm_version[0] ? "installed" : "absent");
 	APPEND("portmaster_version=%s\n", pm_version);
@@ -606,6 +611,40 @@ static int input_gamepads_on(void)
 	}
 	(void)fcntl(fd, F_SETFL, O_NONBLOCK);
 	return fd;
+}
+
+/* One request to libraryd, its first line back ("" on failure). */
+static void library_request(const char *command, char *answer, size_t size)
+{
+	int fd = connect_socket(LIBRARY_SOCKET, 1000);
+	size_t used = 0;
+
+	answer[0] = '\0';
+	if (fd < 0)
+		return;
+	if (write_all(fd, command, strlen(command)) == 0 && write_all(fd, "\n", 1) == 0) {
+		while (used + 1 < size) {
+			char ch;
+
+			if (read(fd, &ch, 1) != 1 || ch == '\n')
+				break;
+			answer[used++] = ch;
+		}
+	}
+	answer[used] = '\0';
+	close(fd);
+}
+
+/* Recently Played and play time, as for a game of emud. */
+static void library_session(const char *verb, const char *game)
+{
+	char command[64];
+	char answer[64];
+
+	snprintf(command, sizeof(command), "%s\t%s", verb, game);
+	library_request(command, answer, sizeof(answer));
+	if (strcmp(answer, "OK") != 0)
+		log_msg("portsd: libraryd %s %s failed: %s", verb, game, answer[0] ? answer : "no reply");
 }
 
 /* What the sandbox sees, then the command (inside paths). */
@@ -1248,6 +1287,8 @@ static void finish_job(int slot, int status)
 		/* Nothing of the session survives it. */
 		cgroup_freeze(false);
 		cgroup_signal(SIGKILL);
+		if (session.game[0])
+			library_session("SESSION_END", session.game);
 		reset_session();
 		/* PortMaster may have updated itself. */
 		read_portmaster();
@@ -1333,6 +1374,41 @@ static void handle_command(struct client *c, char *line)
 			reply(c, text);
 			return;
 		}
+		reply(c, "OK\n");
+		notify_subscribers();
+	} else if (!strcmp(line, "LAUNCH_GAME") && argc == 1) {
+		/* A library game of the Ports system (Home): its script must be
+		 * one of the ports folder itself. */
+		char command[64], answer[PATH_MAX + 64], text[64];
+		const char *error = NULL;
+		const char *name = NULL;
+		char *path;
+
+		if (strlen(args[0]) != 16 || strspn(args[0], "0123456789abcdef") != 16) {
+			reply(c, "ERR game\n");
+			return;
+		}
+		snprintf(command, sizeof(command), "RESOLVE\t%s", args[0]);
+		library_request(command, answer, sizeof(answer));
+		/* "unavailable" stays PortMaster's absence: a game whose card
+		 * is gone is just not there. */
+		if (strncmp(answer, "OK ports\t", 9) != 0)
+			error = "game";
+		else if (strncmp((path = answer + 9), PORTS_ROOT "/", sizeof(PORTS_ROOT)) != 0 ||
+			 strchr(path + sizeof(PORTS_ROOT), '/'))
+			error = "port";
+		else
+			name = path + sizeof(PORTS_ROOT);
+		if (!error)
+			error = launch_session(name);
+		if (error) {
+			log_msg("portsd: launch of game %s refused: %s", args[0], error);
+			snprintf(text, sizeof(text), "ERR %s\n", error);
+			reply(c, text);
+			return;
+		}
+		copy_text(session.game, sizeof(session.game), args[0]);
+		library_session("SESSION_BEGIN", session.game);
 		reply(c, "OK\n");
 		notify_subscribers();
 	} else if (!strcmp(line, "PAUSE") || !strcmp(line, "RESUME")) {

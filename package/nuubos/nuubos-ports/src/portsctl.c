@@ -26,6 +26,7 @@ static void usage(void)
 		"  status | watch\n"
 		"  open                           PortMaster's interface\n"
 		"  launch SCRIPT                  a port (\"<name>.sh\" of the ports folder)\n"
+		"  launch-game ID                 the port of a library game\n"
 		"  pause | resume | quit\n"
 		"  portmaster check|install|cancel|remove|rollback\n"
 		"  auto-update 0|1\n"
@@ -54,6 +55,8 @@ int main(int argc, char **argv)
 		snprintf(command, sizeof(command), "OPEN\n");
 	} else if (!strcmp(verb, "launch") && argc == 3) {
 		snprintf(command, sizeof(command), "LAUNCH\t%s\n", argv[2]);
+	} else if (!strcmp(verb, "launch-game") && argc == 3) {
+		snprintf(command, sizeof(command), "LAUNCH_GAME\t%s\n", argv[2]);
 	} else if ((!strcmp(verb, "pause") || !strcmp(verb, "resume") || !strcmp(verb, "quit")) && argc == 2) {
 		snprintf(command, sizeof(command), "%s\n",
 			 verb[0] == 'p' ? "PAUSE" : verb[0] == 'r' ? "RESUME" : "QUIT");

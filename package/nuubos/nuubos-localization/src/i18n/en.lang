@@ -1355,3 +1355,17 @@
 1354=Fast Startup
 1355=Starts about 5 seconds faster.
 1356=Checks the memory at every start. Can help if the console freezes or restarts by itself.
+1357=Install PortMaster first
+1358=PortMaster
+1359=Download PortMaster
+1360=Downloading PortMaster
+1361=PortMaster could not be downloaded
+1362=Open PortMaster
+1363=Browse, install and update ports over Wi-Fi
+1364=Remove PortMaster
+1365=The installed ports stay, but need PortMaster to start
+1366=PortMaster could not be started
+1367=Open-source manager of ports: games and engines made for handhelds, downloaded over Wi-Fi. Some ports need files from a game you own.
+1368=New versions install when this page checks for updates
+1369=PORTMASTER
+1370=Quit PortMaster

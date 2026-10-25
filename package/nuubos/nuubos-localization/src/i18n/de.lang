@@ -1355,3 +1355,17 @@
 1354=Schnellstart
 1355=Startet etwa 5 Sekunden schneller.
 1356=Prüft den Speicher bei jedem Start. Kann helfen, wenn die Konsole einfriert oder von selbst neu startet.
+1357=Zuerst PortMaster installieren
+1358=PortMaster
+1359=PortMaster herunterladen
+1360=PortMaster wird heruntergeladen
+1361=PortMaster konnte nicht heruntergeladen werden
+1362=PortMaster öffnen
+1363=Ports über WLAN durchsuchen, installieren und aktualisieren
+1364=PortMaster entfernen
+1365=Installierte Ports bleiben erhalten, brauchen zum Starten aber PortMaster
+1366=PortMaster konnte nicht gestartet werden
+1367=Open-Source-Verwaltung für Ports: Spiele und Engines für Handhelds, per WLAN heruntergeladen. Manche Ports brauchen Dateien eines eigenen Spiels.
+1368=Neue Versionen werden installiert, wenn diese Seite nach Updates sucht
+1369=PORTMASTER
+1370=PortMaster beenden

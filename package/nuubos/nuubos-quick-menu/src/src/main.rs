@@ -72,6 +72,10 @@ const NOTIFY_SOCKET: &str = "/run/nuubos/notifyd.sock";
 const EMULATION_SOCKET: &str = "/run/nuubos/emud.sock";
 const LIBRARY_SOCKET: &str = "/run/nuubos/libraryd.sock";
 const STREAM_SOCKET: &str = "/run/nuubos/streamd.sock";
+const PORTS_SOCKET: &str = "/run/nuubos/portsd.sock";
+/* PORT section (EPIC-058): a PortMaster port or PortMaster's interface. */
+const PORT_RESUME_ROW: i32 = 44;
+const PORT_QUIT_ROW: i32 = 45;
 const WEB_SOCKET: &str = "/run/nuubos/webd.sock";
 const MEDIA_SOCKET: &str = "/run/nuubos/mediad.sock";
 const CAST_SOCKET: &str = "/run/nuubos/castd.sock";
@@ -824,6 +828,18 @@ fn operation_screen() -> bool {
     fs::read_to_string(UI_CONTEXT).is_ok_and(|c| c.trim() == "operation")
 }
 
+/* Switch User is never offered over a session (game, port, stream, web):
+ * a session's end shows it again only when no other one runs. */
+fn refresh_switch_user(ui: &QuickMenuWindow) {
+    ui.set_switch_user_visible(
+        !ui.get_game_section_visible()
+            && !ui.get_port_section_visible()
+            && !ui.get_stream_section_visible()
+            && !ui.get_web_section_visible()
+            && switch_user_available(),
+    );
+}
+
 fn switch_user_available()->bool{let c=fs::read_to_string(UI_CONTEXT).unwrap_or_default();if !matches!(c.trim(),"home"|"settings"){return false;}let Ok(r)=users_command("STATUS") else{return false;};r.lines().find_map(|l|l.strip_prefix("count=")).and_then(|v|v.parse::<i32>().ok()).unwrap_or(0)>1}
 
 fn lifecycle_action(action: &'static str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1425,6 +1441,8 @@ enum AppEvent {
     GameInfo(ClosingInfo),
     /* PC Game Streaming Service: a stream runs (nuubos-streamd). */
     Stream(StreamState),
+    /* Ports Service: a port or PortMaster runs (nuubos-portsd). */
+    Port(PortState),
     /* One statistics sample of the stream for the performance overlay
      * (streamd SUBSCRIBE_STATS, key=value fields). */
     StreamStats(String),
@@ -3528,6 +3546,78 @@ fn refresh_stream_stats(ui: &QuickMenuWindow) {
     });
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct PortState {
+    running: bool,
+    /* PortMaster's own interface, not a port */
+    portmaster: bool,
+}
+
+fn port_state_from(reply: &str) -> PortState {
+    let running = reply.lines().any(|line| line == "state=running");
+    PortState { running, portmaster: running && reply.lines().any(|line| line == "session=portmaster") }
+}
+
+fn port_command(command: &str) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(PORTS_SOCKET)?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
+    stream.write_all(command.as_bytes())?;
+    stream.write_all(b"\n")?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply)?;
+    Ok(reply)
+}
+
+fn read_port_state() -> PortState {
+    let Ok(mut stream) = UnixStream::connect(PORTS_SOCKET) else { return PortState::default() };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
+    if stream.write_all(b"STATUS\n").is_err() {
+        return PortState::default();
+    }
+    let mut reply = String::new();
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { break };
+        reply.push_str(&line);
+        reply.push('\n');
+        if line == "end=1" {
+            break;
+        }
+    }
+    port_state_from(&reply)
+}
+
+fn apply_port_running(ui: &QuickMenuWindow, port: PortState) {
+    if !port.running && (PORT_RESUME_ROW..=PORT_QUIT_ROW).contains(&ui.get_selected_index()) {
+        ui.set_selected_index(3);
+    }
+    ui.set_port_portmaster(port.portmaster);
+    ui.set_port_section_visible(port.running);
+}
+
+fn start_port_subscription(tx: Sender<AppEvent>) {
+    thread::spawn(move || loop {
+        if let Ok(mut stream) = UnixStream::connect(PORTS_SOCKET) {
+            if stream.write_all(b"SUBSCRIBE\n").is_ok() {
+                let mut block = String::new();
+                for line in BufReader::new(stream).lines() {
+                    let Ok(line) = line else { break };
+                    block.push_str(&line);
+                    block.push('\n');
+                    if line == "end=1" {
+                        let state = port_state_from(&block);
+                        block.clear();
+                        if tx.send(AppEvent::Port(state)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        /* Only reached while portsd is absent or restarting. */
+        thread::sleep(Duration::from_secs(2));
+    });
+}
+
 fn start_stream_subscription(tx: Sender<AppEvent>) {
     thread::spawn(move || loop {
         if let Ok(mut stream) = UnixStream::connect(STREAM_SOCKET) {
@@ -3996,7 +4086,7 @@ fn cast_protocol_label(ui: &QuickMenuWindow, protocol: &str) -> String {
 }
 
 fn cast_options(ui: &QuickMenuWindow, state: &CastState) -> Vec<(CastEntry, String)> {
-    let playing = ui.get_game_section_visible() || ui.get_stream_section_visible();
+    let playing = ui.get_game_section_visible() || ui.get_stream_section_visible() || ui.get_port_section_visible();
     let mut options = Vec::new();
     if state.state != "idle" && !state.state.is_empty() {
         options.push((CastEntry::Stop, tr(ui, 1195, "Stop Casting")));
@@ -4476,6 +4566,9 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
         }
         indices.extend_from_slice(&[12, CHEATS_ROW, NET_ROW, 13, 18, 28, 14]);
     }
+    if ui.get_port_section_visible() {
+        indices.extend_from_slice(&[PORT_RESUME_ROW, PORT_QUIT_ROW]);
+    }
     if ui.get_stream_section_visible() {
         indices.extend_from_slice(if ui.get_stream_steamlink() { &[15, 36, 37, 38, 16] } else { &[15, 36, 37, 38, 16, 17] });
     }
@@ -4514,6 +4607,8 @@ fn first_selectable_index(ui: &QuickMenuWindow) -> i32 {
      * control, the first Display/Audio row. */
     if ui.get_game_section_visible() {
         8
+    } else if ui.get_port_section_visible() {
+        PORT_RESUME_ROW
     } else if ui.get_stream_section_visible() {
         15
     } else if ui.get_web_section_visible() {
@@ -4528,6 +4623,8 @@ fn first_selectable_index(ui: &QuickMenuWindow) -> i32 {
 fn first_selectable_index_without_music(ui: &QuickMenuWindow) -> i32 {
     if ui.get_game_section_visible() {
         8
+    } else if ui.get_port_section_visible() {
+        PORT_RESUME_ROW
     } else if ui.get_stream_section_visible() {
         15
     } else if ui.get_web_section_visible() {
@@ -4940,9 +5037,17 @@ fn map_overlay(
     if streaming && !steamlink {
         refresh_stream_stats(ui);
     }
+    /* A port waits underneath like a game (portsd freezes it). */
+    let port = read_port_state();
+    apply_port_running(ui, port);
+    if port.running {
+        if let Err(error) = port_command("PAUSE") {
+            eprintln!("quick-menu: port PAUSE failed={error}");
+        }
+    }
     let (web, zoom) = read_web_state();
     apply_web_state(ui, web, zoom);
-    ui.set_switch_user_visible(!game.running && !streaming && !web && switch_user_available());
+    ui.set_switch_user_visible(!game.running && !streaming && !port.running && !web && switch_user_available());
     refresh_players(ui);
     ui.set_selected_index(first_selectable_index(ui));
 
@@ -5233,6 +5338,11 @@ fn unmap_overlay(
     set_menu_capture(false);
     if ui.get_game_section_visible() {
         game_action("RESUME");
+    }
+    if ui.get_port_section_visible() {
+        if let Err(error) = port_command("RESUME") {
+            eprintln!("quick-menu: port RESUME failed={error}");
+        }
     }
 
     eprintln!("quick-menu: unmapped");
@@ -5804,6 +5914,22 @@ fn handle_event(
         }
         "menu_confirm" if *mapped
             && !ui.get_lifecycle_active()
+            && ui.get_port_section_visible()
+            && (PORT_RESUME_ROW..=PORT_QUIT_ROW).contains(&ui.get_selected_index()) =>
+        {
+            if ui.get_selected_index() == PORT_QUIT_ROW {
+                if let Err(error) = port_command("QUIT") {
+                    eprintln!("quick-menu: port QUIT failed={error}");
+                }
+                /* Nothing to resume: the port is ending. */
+                ui.set_port_section_visible(false);
+            }
+            flush_brightness(ui, brightness_dirty)?;
+            unmap_overlay(ui, queue, state, conn);
+            *mapped = false;
+        }
+        "menu_confirm" if *mapped
+            && !ui.get_lifecycle_active()
             && ui.get_stream_section_visible()
             && ui.get_selected_index() >= 15 =>
         {
@@ -6008,6 +6134,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     start_audio_subscription(tx.clone());
     start_game_subscription(tx.clone());
     start_stream_subscription(tx.clone());
+    start_port_subscription(tx.clone());
     start_stream_stats_subscription(tx.clone());
     start_web_subscription(tx.clone());
     start_media_subscription(tx.clone());
@@ -6199,7 +6326,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         hide_keyboard(&ui, &mut keyboard);
                     }
                     if mapped && !running {
-                        ui.set_switch_user_visible(switch_user_available());
+                        refresh_switch_user(&ui);
                     }
                     dirty = true;
                 }
@@ -6221,6 +6348,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     dirty = true;
                 }
+                AppEvent::Port(port) => {
+                    apply_port_running(&ui, port);
+                    if mapped {
+                        if !port.running {
+                            refresh_switch_user(&ui);
+                        }
+                        dirty = true;
+                    }
+                }
                 AppEvent::Stream(state) => {
                     let running = state.running;
                     apply_stream_running(&ui, state);
@@ -6232,7 +6368,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     stream = state;
                     if mapped {
                         if !running {
-                            ui.set_switch_user_visible(switch_user_available());
+                            refresh_switch_user(&ui);
                         }
                         dirty = true;
                     }
@@ -6279,7 +6415,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     game = snapshot.clone();
                     if mapped {
                         if !snapshot.running {
-                            ui.set_switch_user_visible(switch_user_available());
+                            refresh_switch_user(&ui);
                         }
                         dirty = true;
                     }

@@ -10,6 +10,7 @@ mod lighting;
 mod mediaui;
 mod moonlight;
 mod netplayui;
+mod portmasterui;
 mod qr;
 mod splash;
 mod splash_core;
@@ -535,6 +536,7 @@ fn apply_users(ui:&HomeWindow,s:&USnap,picker:&Arc<AtomicBool>){
     if open&&moonlight::ACTIVE.load(Ordering::SeqCst){moonlight::leave(ui);}
     if open&&steamlink::ACTIVE.load(Ordering::SeqCst){steamlink::leave(ui);}
     if open&&netplayui::ACTIVE.load(Ordering::SeqCst){netplayui::leave(ui);}
+    if open&&portmasterui::ACTIVE.load(Ordering::SeqCst){portmasterui::leave(ui);}
     /* Web bookmarks and history are the active user's too. */
     if open&&webui::ACTIVE.load(Ordering::SeqCst){webui::leave(ui);}
     if open&&findui::ACTIVE.load(Ordering::SeqCst){findui::leave(ui);}
@@ -5551,6 +5553,19 @@ fn route_input_action(
         return;
     }
 
+    if portmasterui::ACTIVE.load(Ordering::SeqCst) {
+        if matches!(action, "menu_up" | "menu_down" | "menu_left" | "menu_right" | "menu_confirm" | "menu_back") {
+            let action = action.to_owned();
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    portmasterui::handle_action(&ui, &action);
+                }
+            });
+        }
+        return;
+    }
+
     if netplayui::ACTIVE.load(Ordering::SeqCst) {
         if matches!(action, "menu_up" | "menu_down" | "menu_left" | "menu_right" | "menu_confirm" | "menu_back") {
             let action = action.to_owned();
@@ -6118,6 +6133,7 @@ fn main() -> Result<(), slint::PlatformError> {
     library::start_cover_loader(&ui);
     library::start_library_listener(&ui);
     library::start_game_listener(&ui);
+    library::start_ports_listener(&ui);
     moonlight::start_listener(&ui);
     mediaui::start_listener(&ui);
     webui::start_listener(&ui);

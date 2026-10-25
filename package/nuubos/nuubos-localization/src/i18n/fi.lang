@@ -1355,3 +1355,17 @@
 1354=Pikakäynnistys
 1355=Käynnistyy noin 5 sekuntia nopeammin.
 1356=Tarkistaa muistin jokaisella käynnistyskerralla. Voi auttaa, jos konsoli jumittuu tai käynnistyy itsestään uudelleen.
+1357=Asenna ensin PortMaster
+1358=PortMaster
+1359=Lataa PortMaster
+1360=Ladataan PortMasteria
+1361=PortMasteria ei voitu ladata
+1362=Avaa PortMaster
+1363=Selaa, asenna ja päivitä portteja Wi-Fin kautta
+1364=Poista PortMaster
+1365=Asennetut portit säilyvät, mutta niiden käynnistäminen vaatii PortMasterin
+1366=PortMasteria ei voitu käynnistää
+1367=Avoimen lähdekoodin porttien hallinta: käsikonsoleille tehtyjä pelejä ja pelimoottoreita, ladataan Wi-Fin kautta. Jotkin portit tarvitsevat tiedostoja omistamastasi pelistä.
+1368=Uudet versiot asentuvat, kun tämä sivu tarkistaa päivitykset
+1369=PORTMASTER
+1370=Lopeta PortMaster
