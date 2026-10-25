@@ -1352,5 +1352,8 @@
 1351={0} lần khởi động tới
 1352=Ghi lại mọi thứ trong 10 lần khởi động tới và lưu một báo cáo mỗi khi khởi động lại hoặc tắt máy. Tắt theo mặc định: ghi nhật ký tốn hiệu năng và lượt ghi thẻ nhớ.
 1353=Không có pin: giữ cáp nguồn được kết nối cho đến khi cập nhật hoàn tất
-1354=Đổi nút Xác nhận/Quay lại
-1355=Dùng nút đối diện để xác nhận trong menu. Trò chơi không bị ảnh hưởng.
+1354=Khởi động nhanh
+1355=Khởi động nhanh hơn khoảng 5 giây.
+1356=Kiểm tra bộ nhớ mỗi lần khởi động. Có thể giúp ích nếu máy bị treo hoặc tự khởi động lại.
+1357=Đổi nút Xác nhận/Quay lại
+1358=Dùng nút đối diện để xác nhận trong menu. Trò chơi không bị ảnh hưởng.

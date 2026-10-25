@@ -1352,5 +1352,8 @@
 1351=Następne uruchomienia: {0}
 1352=Zapisuje wszystkie logi przez następne 10 uruchomień i tworzy raport przy każdym ponownym uruchomieniu lub wyłączeniu. Domyślnie wyłączony: logi kosztują wydajność i zapisy na karcie.
 1353=Brak baterii: nie odłączaj zasilania, dopóki aktualizacja się nie zakończy
-1354=Zamień przyciski Potwierdź/Wstecz
-1355=Użyj przeciwnego przycisku do potwierdzania w menu. Gry nie są dotknięte.
+1354=Szybkie uruchamianie
+1355=Uruchamia się około 5 sekund szybciej.
+1356=Sprawdza pamięć przy każdym uruchomieniu. Może pomóc, gdy konsola się zawiesza lub sama restartuje.
+1357=Zamień przyciski Potwierdź/Wstecz
+1358=Użyj przeciwnego przycisku do potwierdzania w menu. Gry nie są dotknięte.

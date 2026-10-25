@@ -36,6 +36,7 @@ source "$BR2_EXTERNAL_NUUBOS_PATH/package/nuubos/nuubos-media/Config.in"
 source "$BR2_EXTERNAL_NUUBOS_PATH/package/nuubos/nuubos-cast/Config.in"
 source "$BR2_EXTERNAL_NUUBOS_PATH/package/nuubos/nuubos-sync/Config.in"
 source "$BR2_EXTERNAL_NUUBOS_PATH/package/nuubos/nuubos-tailscale/Config.in"
+source "$BR2_EXTERNAL_NUUBOS_PATH/package/nuubos/nuubos-ports/Config.in"
 source "$BR2_EXTERNAL_NUUBOS_PATH/package/nuubos/nuubos-web/Config.in"
 
 source "$BR2_EXTERNAL_NUUBOS_PATH/package/libretro/Config.in"

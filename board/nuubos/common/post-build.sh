@@ -92,7 +92,7 @@ NUUBOS_BUILD="$(git -C "$NUUBOS_TOP" describe --always --dirty --abbrev=12 2>/de
 # Buildroot's /etc/os-release is a link to /usr/lib/os-release: replace both.
 rm -f "$TARGET_DIR/etc/os-release" "$TARGET_DIR/usr/lib/os-release"
 cat > "$TARGET_DIR/etc/os-release" <<OS_RELEASE_EOF
-NAME=nuubOS
+NAME="nuubOS"
 ID=nuubos
 VERSION_ID=$NUUBOS_VERSION
 BUILD_ID=$NUUBOS_BUILD

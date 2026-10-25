@@ -45,7 +45,7 @@ if opt('--includefrom'):
 known = {'Mario.sfc': 'Super Mario World', 'Zelda.sfc': 'Zelda', 'Quota.sfc': None, 'Mario Paint (Japan).sfc': 'Mario Paint'}
 if opt('-s'):
     for i, f in enumerate(files):
-        print('#%d/%d ---- Game found ----' % (i + 1, len(files)), flush=True)
+        print("#%d/%d (T1) ---- Game '%s' found! :) ----" % (i + 1, len(files), os.path.splitext(os.path.basename(f))[0]), flush=True)
         print('#%d/%d, (%d/0)' % (i + 1, len(files), i + 1), flush=True)
         if f.endswith('Quota.sfc'):
             print('Your daily ScreenScraper request limit has been reached, exiting nicely...')
@@ -236,6 +236,9 @@ try:
     sc('provider', 'set', 'screenscraper')
     out = job('bulk', 'all')
     check('bulk: one Skyscraper run per system, progress', '@progress' in out and "'--includefrom'" in calls())
+    pct = [int(l.split()[1]) for l in out.splitlines() if l.startswith('@progress ')]
+    check('bulk progress never goes backwards', pct == sorted(pct))
+    check('bulk progress names the game just done', any(l.startswith('@progress ') and l.endswith(' Mario') for l in out.splitlines()))
     check('bulk stops on quota', '@error quota' in out)
     check('bulk applied games found before the stop', 'title=Super Mario World' in meta('Mario'))
     check('bulk skipped rejected game', meta('Zelda') == '')

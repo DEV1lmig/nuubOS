@@ -17,7 +17,7 @@ DIR=/run/nuubos/diagnostics
 # services start (S10 on), and syslogd/klogd (S01/S02, before STATE) stop:
 # no diagnostics at all (user decision 2026-10-22). S99 replaces any log
 # not in this list. Logs of a service started later go to /dev/null too.
-LOGS="castd charge emud inputd jobd labwc libraryd mediad notifyd pipewire
+LOGS="audiod castd charge emud inputd jobd labwc libraryd mediad notifyd pipewire
 quick-menu-action regionald retroarch splash status-time-sync streamd syncd
 syncthing systemd tsd ui-bootstrap usersd wifi-dhcp wireplumber"
 
@@ -31,9 +31,57 @@ logs_off()
     rm -f /var/log/messages
 }
 
+# Freezes and resets leave no log (RAM is lost, no pstore; community
+# report 2026-10-25): every start, diagnostic mode or not, leaves a small
+# mark on STATE that only a clean Restart / Power Off removes (stop, from
+# rcK). A start that finds it records the previous start's facts next to
+# this one's in /state/diagnostics/unclean (last 5, in the support bundle).
+MARK=/state/diagnostics/session
+UNCLEAN=/state/diagnostics/unclean
+# Diagnostic mode only: heartbeat + kernel log kept on STATE through a
+# freeze (nuubos-diag-persist).
+PERSIST=/state/diagnostics/persist
+
+start_facts()
+{
+    echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    grep -E '^(VERSION_ID|BUILD_ID)=' /etc/os-release 2>/dev/null
+    echo "model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)"
+    # DRAM path of this start (rtc_gp6) and the time before Linux.
+    /usr/libexec/nuubos-boot-stages 2>&1
+    # AXP717 REG 20/21: power-on / power-off source of this start.
+    for r in 0x00 0x20 0x21; do echo "axp717_$r=$(i2cget -f -y 0 0x34 $r 2>&1)"; done
+}
+
+record_unclean()
+{
+    mkdir -p /state/diagnostics
+    if [ -f "$MARK" ]; then
+        mkdir -p "$UNCLEAN"
+        rec="$UNCLEAN/$(date -u +%Y%m%d-%H%M%S)"
+        for f in "$PERSIST"/*.log; do
+            [ -f "$f" ] && mv "$f" "$rec-${f##*/}"
+        done
+        {
+            echo "# The previous start ended without Restart or Power Off"
+            echo "# (freeze then power key, watchdog, kernel panic, battery cut)."
+            echo "=== previous start ==="
+            cat "$MARK"
+            echo "=== this start ==="
+            start_facts
+        } > "$rec.txt" 2>&1
+        ls -1 "$UNCLEAN"/*.txt 2>/dev/null | sort -r | tail -n +6 | while read -r f; do
+            rm -f "$f" "${f%.txt}"-*.log
+        done
+    fi
+    rm -rf "$PERSIST"
+    start_facts > "$MARK.tmp" 2>&1 && mv "$MARK.tmp" "$MARK"
+}
+
 case "$1" in
 start)
     mkdir -p /run/nuubos
+    record_unclean
     [ -f "$BOOTS" ] || { logs_off; exit 0; }
     n="$(cat "$BOOTS" 2>/dev/null)"
     case "$n" in
@@ -83,8 +131,15 @@ start)
         echo "=== $f ==="
         cat "$f"
     done > "$DIR/boot/06-drm-status.txt" 2>&1
+    /usr/libexec/nuubos-diag-persist start
     ;;
-stop|restart|reload) ;;
-*) echo "Usage: $0 {start}"; exit 1 ;;
+stop)
+    /usr/libexec/nuubos-diag-persist stop
+    rm -rf "$PERSIST"
+    rm -f "$MARK"
+    sync
+    ;;
+restart|reload) ;;
+*) echo "Usage: $0 {start|stop}"; exit 1 ;;
 esac
 exit 0

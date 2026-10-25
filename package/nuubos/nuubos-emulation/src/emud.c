@@ -4079,8 +4079,10 @@ static void handle_hotkey(const char *action)
 		 * controller used; the hotkey turns the stylus on and off. */
 		const char *control = action[6] == ' ' ? action + 7 : "right";
 
-		if (strcmp(session.core, MELONDS_NUUBOS) != 0)
+		if (strcmp(session.core, MELONDS_NUUBOS) != 0) {
+			log_msg("stylus hotkey ignored: core %s", session.core);
 			return;
+		}
 		if (strcmp(control, "right") && strcmp(control, "left") && strcmp(control, "dpad"))
 			control = "right";
 		session.stylus = !session.stylus;
@@ -4088,6 +4090,9 @@ static void handle_hotkey(const char *action)
 		ra_command("SET_CORE_OPTION melonds_nuubos_stylus %s",
 			   session.stylus ? control : "off");
 		notify_stylus(session.stylus ? control : "off");
+		/* Community report 2026-10-25 ("the DS stylus does not work"): the
+		 * control inputd chose for this controller is the first suspect. */
+		log_msg("stylus %s (requested control %s)", session.stylus ? control : "off", action + 6);
 		save_nds_choice();
 		notify_subscribers();
 	} else if (!strcmp(action, "fast_forward")) {

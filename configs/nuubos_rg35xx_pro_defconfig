@@ -135,7 +135,7 @@ BR2_PACKAGE_HOST_RUSTC=y
 BR2_PACKAGE_HOST_CARGO=y
 
 BR2_PACKAGE_RSYNC=y
-BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_NUUBOS_PATH)/board/nuubos/common/busybox-ntp.config"
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_NUUBOS_PATH)/board/nuubos/common/busybox-ntp.config $(BR2_EXTERNAL_NUUBOS_PATH)/board/nuubos/common/busybox-ports.config"
 BR2_PACKAGE_NUUBOS_RGB=y
 BR2_PACKAGE_NUUBOS_DISPLAYD=y
 BR2_PACKAGE_NUUBOS_AUDIO=y
@@ -175,6 +175,9 @@ BR2_PACKAGE_NUUBOS_CAST=y
 BR2_PACKAGE_SYNCTHING=y
 BR2_PACKAGE_NUUBOS_SYNC=y
 BR2_PACKAGE_NUUBOS_TAILSCALE=y
+# Ports (EPIC-058): PortMaster is downloaded on the device; the image holds
+# the sandbox and what ports expect (bash, Python 3, SDL2 + extras).
+BR2_PACKAGE_NUUBOS_PORTS=y
 # Web Mode (EPIC-030): parked until after the RC (user decision
 # 2026-10-07). Re-enable with BR2_PACKAGE_NUUBOS_WEB=y and
 # BR2_PACKAGE_COG_PROGRAMS_HOME_URI="" (CLAUDE.md §37.27).

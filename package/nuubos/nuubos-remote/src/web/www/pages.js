@@ -1441,7 +1441,10 @@ page('power', 'settings', () => C(813, 'Power'), async () => {
       on: () => pickAndAct(C(56, 'Sleep After'), [0, 1, 2, 5, 10, 15, 30, 45, 60, 120].map((v) => ({ value: String(v), label: v ? v + C(215, ' min') : C(54, 'Off') })), s.sleep_after_min, 'system.sleep') }),
     row({ key: 'hypersleep', title: C(1347, 'HyperSleep'), toggle: s.hypersleep !== '0',
       detail: s.hypersleep !== '0' ? C(1348, 'Almost no battery use. Wake with the power button.') : C(1349, 'START and the lid also wake it. Uses more battery.'),
-      set: (v) => act('system.hypersleep', { v: v ? '1' : '0' }, { topics: ['system'] }) })),
+      set: (v) => act('system.hypersleep', { v: v ? '1' : '0' }, { topics: ['system'] }) }),
+    row({ key: 'faststartup', title: C(1354, 'Fast Startup'), toggle: s.fast_startup !== '0',
+      detail: s.fast_startup !== '0' ? C(1355, 'Starts about 5 seconds faster.') : C(1356, 'Checks the memory at every start. Can help if the console freezes or restarts by itself.'),
+      set: (v) => act('system.faststartup', { v: v ? '1' : '0' }, { topics: ['system'] }) })),
   section(C(814, 'BATTERY'), 'device'), group(
     ...(bstate === 'absent' ? [row({ key: 'charge', title: C(816, 'Charge'), value: C(1301, 'No battery') })] : [
     row({ key: 'charge', title: C(816, 'Charge'), value: s['battery.percent'] + '%', detail: bstate === 'charging' ? C(382, 'Charging') : bstate === 'full' ? C(383, 'Fully charged') : bstate === 'not-charging' ? C(819, 'Not charging') : C(818, 'Discharging') }),

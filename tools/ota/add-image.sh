@@ -36,7 +36,15 @@ xz -T0 -9 -c "$IMG" > "$DIR/$BASE-anbernic-h700.img.xz.tmp" && \
 
 echo "Packing legal-info..."
 rm -f "$DIR/$BASE-legal-info.tar.part"*
-tar -cf - -C "$(dirname "$LEGAL")" "$(basename "$LEGAL")" -C "$ROOT" LICENSE LICENSING.md licenses |
+# Left out, their licenses stay (licenses/, host-licenses/, the manifests):
+# host-sources, build tools (compilers, generators) that never reach the
+# image (~500 MB); linux-firmware's source tarball (~600 MB), the image ships
+# only binary-only Realtek firmware, which has no source. (Buildroot's
+# LINUX_FIRMWARE_REDISTRIBUTE cannot be set from external.mk: it is read
+# when the package is evaluated, before external.mk is included.)
+tar -cf - --exclude="$(basename "$LEGAL")/host-sources" \
+    --exclude="$(basename "$LEGAL")/sources/linux-firmware-*" \
+    -C "$(dirname "$LEGAL")" "$(basename "$LEGAL")" -C "$ROOT" LICENSE LICENSING.md licenses |
     split -b 1900M -d -a 2 - "$DIR/$BASE-legal-info.tar.part" || exit 1
 
 echo "Packing third-party notices..."

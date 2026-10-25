@@ -28,11 +28,10 @@ releases on the devices.
 
 ## 2. Qualify
 
-Flash `output/h700/images/nuubOS-anbernic-h700.img` on a spare card and check on at
-least one device: first boot and setup wizard, a game, sleep and wake, Wi-Fi,
-Settings → System → Software Update shows the right version and channel. For an RC
-or Stable release, run the platform regression (`scripts/test-platform.sh`) on every
-qualified device.
+No separate pass (maintainer decision, 2026-10-24): every change is deployed and
+checked on the development console while it is made (RG CubeXX), so a Nightly or an
+RC is the tree already tested there, and a Stable release follows the release
+candidates that the community has tested on their devices.
 
 ## 3. Create the release files
 
@@ -46,7 +45,9 @@ tools/ota/add-image.sh ~/nuubos-release
   is plain text, at most 4000 bytes, one item per line: it appears on the console
   under Software Update → What's New.
 - `add-image.sh` adds the flashable `.img.xz`, `legal-info` (split into 1900 MB
-  parts, below GitHub's 2 GiB asset limit), the third-party notices and
+  parts, below GitHub's 2 GiB asset limit; without `host-sources`, the build tools
+  that never reach the image, and without the linux-firmware source tarball: only binary
+  firmware ships, its licenses stay), the third-party notices and
   `SHA256SUMS`.
 - Optional: `~/nuubos-release/github-notes.md` becomes the GitHub release text
   (installation steps, checksums). Without it, the console notes are used.
@@ -84,6 +85,10 @@ nuubOS uses [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 | RC | `X.Y.Z-rc.N` | `1.0.0-rc.1` | release candidate N of `X.Y.Z`: bug fixes only |
 | Nightly | `X.Y.Z-nightly.YYYYMMDD` | `1.0.0-nightly.20261020` | development build towards `X.Y.Z`, UTC build date |
 
+- Exception for 1.0.0 (maintainer decision, 2026-10-24): `1.0.0-rc.3` also brings
+  PortMaster, the A/B button swap in the menus and per-system settings, the most
+  requested features; `1.0.0-rc.4` follows after a week of feedback with bug fixes
+  only, then `1.0.0`.
 - `PATCH` = bug fixes only, `MINOR` = new features, `MAJOR` = an incompatible change
   (a new SD card layout, a reflash needed).
 - `VERSION` holds the release in preparation: `1.0.0-rc.1` while RC 1 of 1.0.0 is

@@ -1352,5 +1352,8 @@
 1351=Seuraavat {0} käynnistystä
 1352=Tallentaa kaikki lokit seuraavien 10 käynnistyksen ajan ja tallentaa raportin jokaisessa uudelleenkäynnistyksessä tai sammutuksessa. Oletuksena pois: lokit maksavat suorituskykyä ja kirjoituksia kortille.
 1353=Ei akkua: pidä virtajohto kytkettynä, kunnes päivitys on valmis
-1354=Vaihda Vahvista/Takaisin-painikkeet
-1355=Käytä vastakkaista painiketta vahvistamiseen valikoissa. Pelit eivät vaikutu.
+1354=Pikakäynnistys
+1355=Käynnistyy noin 5 sekuntia nopeammin.
+1356=Tarkistaa muistin jokaisella käynnistyskerralla. Voi auttaa, jos konsoli jumittuu tai käynnistyy itsestään uudelleen.
+1357=Vaihda Vahvista/Takaisin-painikkeet
+1358=Käytä vastakkaista painiketta vahvistamiseen valikoissa. Pelit eivät vaikutu.

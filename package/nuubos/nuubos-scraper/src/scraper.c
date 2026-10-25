@@ -182,6 +182,14 @@ static void on_term(int sig)
 
 static void job_progress(int percent, const char *step)
 {
+	/* Never backwards: the second chance re-runs games of a system whose
+	 * first pass already counted them (community report 2026-10-25: the
+	 * bar jumped back and then looked stuck for hours). */
+	static int reported = -1;
+
+	if (percent < reported)
+		percent = reported;
+	reported = percent;
 	if (as_job) {
 		printf("@progress %d %s\n", percent, step ? step : "");
 		fflush(stdout);
@@ -1244,16 +1252,88 @@ static int sky_prepare(void)
 }
 
 /*
+ * The title of the game a "#n/m (Tn) ---- Game '<file name>' found! ----"
+ * line names (Skyscraper's base name: the file name without its last
+ * extension), else that name itself; "" when the line names no game.
+ */
+static void sky_line_title(const char *line, const struct sky_item *items, size_t count,
+			   char *title, size_t size)
+{
+	static const char *const ends[] = { "' found!", "' not found", "' match (", "' since " };
+	const char *p = strstr(line, "---- Game '"), *end = NULL;
+	char name[512];
+	size_t len;
+
+	title[0] = '\0';
+	if (!p)
+		return;
+	p += 11;
+	for (size_t i = 0; i < sizeof(ends) / sizeof(ends[0]); i++) {
+		const char *e = strstr(p, ends[i]);
+
+		if (e && (!end || e < end))
+			end = e;
+	}
+	len = end ? (size_t)(end - p) : 0;
+	if (len == 0 || len >= sizeof(name))
+		return;
+	memcpy(name, p, len);
+	name[len] = '\0';
+	for (size_t i = 0; i < count; i++) {
+		const char *b = strrchr(items[i].file, '/'), *dot;
+
+		b = b ? b + 1 : items[i].file;
+		dot = strrchr(b, '.');
+		if ((dot ? (size_t)(dot - b) : strlen(b)) == len && !strncmp(b, name, len)) {
+			copy_text(title, size, items[i].g->title);
+			return;
+		}
+	}
+	copy_text(title, size, name);
+}
+
+/*
+ * Diagnostic mode (docs/dev/system.md): Skyscraper's whole output, for the
+ * support bundle (community report 2026-10-25, a scrape that looked stuck).
+ * At most 4 MiB a start, in RAM.
+ */
+#define SKY_DIAG_LOG "/run/nuubos/diagnostics/skyscraper.log"
+#define SKY_DIAG_MAX (4L << 20)
+
+static FILE *sky_diag_open(char *const argv[])
+{
+	FILE *f;
+
+	if (access("/run/nuubos/diagnostics/active", F_OK) != 0)
+		return NULL;
+	f = fopen(SKY_DIAG_LOG, "a");
+	if (!f)
+		return NULL;
+	if (fseek(f, 0, SEEK_END) != 0 || ftell(f) >= SKY_DIAG_MAX) {
+		fclose(f);
+		return NULL;
+	}
+	fprintf(f, "=== %ld", (long)time(NULL));
+	for (size_t i = 0; argv[i]; i++)
+		fprintf(f, " %s", argv[i]);
+	fputc('\n', f);
+	return f;
+}
+
+/*
  * Run Skyscraper with argv, following its "#n/m, (found/missed)" lines as job
- * progress (offset + n of total) and its messages for the stop reason.
+ * progress (offset + n of total, the title of the game of items just done as
+ * the step) and its messages for the stop reason.
  * Returns the exit status, -1 when it could not run.
  */
-static int sky_run(char *const argv[], size_t offset, size_t total)
+static int sky_run(char *const argv[], const struct sky_item *items, size_t count,
+		   size_t offset, size_t total)
 {
 	int pipefd[2], status = -1;
 	pid_t pid;
 	FILE *out;
-	char line[4096];
+	char line[4096], title[256] = "";
+	FILE *diag;
 
 	if (pipe(pipefd) != 0)
 		return -1;
@@ -1278,18 +1358,27 @@ static int sky_run(char *const argv[], size_t offset, size_t total)
 		_exit(127);
 	}
 	close(pipefd[1]);
+	diag = sky_diag_open(argv);
 	out = fdopen(pipefd[0], "r");
 	while (out && fgets(line, sizeof(line), out)) {
 		unsigned n, m;
+
+		if (diag)
+			fputs(line, diag);
 
 		if (cancelled) {
 			kill(pid, SIGTERM);
 			break;
 		}
-		/* "#n/m, (found/missed)" closes each game. */
-		if (line[0] == '#' && sscanf(line, "#%u/%u", &n, &m) == 2 && n > 0 && total &&
-		    strstr(line, ", ("))
-			job_progress((int)((offset + n) * 100 / total), NULL);
+		/* "#n/m (Tn) ---- Game '...'" opens each game's output,
+		 * "#n/m, (found/missed)" closes it. */
+		if (line[0] == '#' && sscanf(line, "#%u/%u", &n, &m) == 2 && n > 0 && total) {
+			if (strstr(line, ", (")) {
+				job_progress((int)((offset + n) * 100 / total), title[0] ? title : NULL);
+				title[0] = '\0';
+			} else
+				sky_line_title(line, items, count, title, sizeof(title));
+		}
 		if (strstr(line, "request limit"))
 			stop_reason = "quota";
 		else if (strstr(line, "login error"))
@@ -1306,6 +1395,8 @@ static int sky_run(char *const argv[], size_t offset, size_t total)
 		fclose(out);
 	else
 		close(pipefd[0]);
+	if (diag)
+		fclose(diag);
 	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
 		if (cancelled)
 			kill(pid, SIGTERM);
@@ -1504,7 +1595,7 @@ static enum outcome sky_lookup(int provider, const struct system_map *s, struct 
 		argv[argc++] = list;
 	}
 	argv[argc] = NULL;
-	rc = sky_run(argv, offset, total);
+	rc = sky_run(argv, items, count, offset, total);
 	if (cancelled) {
 		remove_tree(outdir);
 		return STOP;
@@ -1541,7 +1632,7 @@ static enum outcome sky_lookup(int provider, const struct system_map *s, struct 
 		argv[argc++] = list;
 	}
 	argv[argc] = NULL;
-	(void)sky_run(argv, 0, 0);
+	(void)sky_run(argv, NULL, 0, 0, 0);
 	snprintf(pegasus, sizeof(pegasus), "%s/metadata.pegasus.txt", outdir);
 	pegasus_read(pegasus, items, count);
 	{

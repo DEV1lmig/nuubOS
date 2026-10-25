@@ -311,6 +311,7 @@ pub fn action(b: &Value) -> R {
         "system.chargelimit" => { sock_ok("systemd", &format!("SET CHARGE_LIMIT {}", int(&a("v"), 80, 100)?))?; ok() }
         "system.sleep" => { sock_ok("systemd", &format!("SET SLEEP {}", int(&a("v"), 0, 240)?))?; ok() }
         "system.hypersleep" => { sock_ok("systemd", &format!("SET HYPERSLEEP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
+        "system.faststartup" => { sock_ok("systemd", &format!("SET FAST_STARTUP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
         /* The games card (SD2) and the console backup. */
         "storage.eject" => { sock_ok("systemd", "STORAGE SD2 EJECT")?; ok() }
         "storage.use" => { sock_ok("systemd", "STORAGE SD2 USE")?; ok() }

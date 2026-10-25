@@ -193,6 +193,7 @@ struct SystemSnapshot {
     charge_limit: i32,
     charge_limit_supported: bool,
     hypersleep: bool,
+    fast_startup: bool,
     /* Diagnostic mode (nuubos-systemd): boots still to log, running boot. */
     diag_boots: i32,
     diag_active: bool,
@@ -222,6 +223,7 @@ impl Default for SystemSnapshot {
             charge_limit: 100,
             charge_limit_supported: false,
             hypersleep: true,
+            fast_startup: true,
             diag_boots: 0,
             diag_active: false,
             cpu_freq_khz: -1,
@@ -642,6 +644,7 @@ fn parse_system_snapshot(reply: &str) -> SystemSnapshot {
             "charge_limit" => s.charge_limit = value.parse().unwrap_or(100),
             "charge_limit.supported" => s.charge_limit_supported = value == "1",
             "hypersleep" => s.hypersleep = value != "0",
+            "fast_startup" => s.fast_startup = value != "0",
             "diagnostics.boots" => s.diag_boots = value.parse().unwrap_or(0),
             "diagnostics.active" => s.diag_active = value == "1",
             "cpu.freq_khz" => s.cpu_freq_khz = value.parse().unwrap_or(-1),
@@ -685,6 +688,7 @@ fn apply_system_snapshot(ui: &HomeWindow, s: &SystemSnapshot) {
     }
     ui.set_system_charge_limit(s.charge_limit);
     ui.set_system_hypersleep(s.hypersleep);
+    ui.set_system_fast_startup(s.fast_startup);
     /* Diagnostic Mode row: Off, or the starts still to log (1351); On (222)
      * for the last logged start. */
     ui.set_diag_mode_on(s.diag_active || s.diag_boots > 0);
@@ -4555,16 +4559,18 @@ fn safe_confirm(ui: &HomeWindow, row: i32, settings_active: &Arc<AtomicBool>) {
  * Information) | TROUBLESHOOTING (3 Diagnostics, 4 Backup, 5 Recovery). */
 const SYSTEM_ROWS: i32 = 6;
 /* Settings → Power (settings-view 69, category 5): POWER (0 Performance
- * Profile, 1 Automatic Battery Saver, 2 Sleep After, 3 Hypersleep) |
- * BATTERY (4 Charge, 5 Health, read-only; 6 Charge Limit when the battery
- * driver has one) | CONNECTED DEVICES (after them, read-only, at least one
- * row: "none"). */
+ * Profile, 1 Automatic Battery Saver, 2 Sleep After, 3 Hypersleep, 4 Fast
+ * Startup) | BATTERY (5 Charge, 6 Health, read-only; 7 Charge Limit when the
+ * battery driver has one) | CONNECTED DEVICES (after them, read-only, at
+ * least one row: "none"). */
 const POWER_VIEW: i32 = 69;
 const POWER_HYPERSLEEP_ROW: i32 = 3;
-const POWER_CHARGE_LIMIT_ROW: i32 = 6;
+const POWER_FAST_STARTUP_ROW: i32 = 4;
+const POWER_BATTERY_START: i32 = 5;
+const POWER_CHARGE_LIMIT_ROW: i32 = 7;
 
 fn power_devices_start(ui: &HomeWindow) -> i32 {
-    if ui.get_system_charge_limit_supported() { 7 } else { 6 }
+    if ui.get_system_charge_limit_supported() { 8 } else { 7 }
 }
 
 fn power_row_count(ui: &HomeWindow) -> i32 {
@@ -4577,7 +4583,7 @@ fn update_power_scroll(ui: &HomeWindow) {
         ui.get_power_index(),
         power_row_count(ui),
         ui.get_power_scroll_offset(),
-        (4, power_devices_start(ui), 0),
+        (POWER_BATTERY_START, power_devices_start(ui), 0),
     ));
 }
 
@@ -5292,6 +5298,11 @@ fn handle_settings_action(
                 POWER_HYPERSLEEP_ROW => {
                     let next = if ui.get_system_hypersleep() { 0 } else { 1 };
                     system_set(ui, format!("SET HYPERSLEEP {next}"));
+                }
+                /* Fast Startup on/off: the cached DRAM training (platform.md). */
+                POWER_FAST_STARTUP_ROW => {
+                    let next = if ui.get_system_fast_startup() { 0 } else { 1 };
+                    system_set(ui, format!("SET FAST_STARTUP {next}"));
                 }
                 POWER_CHARGE_LIMIT_ROW if ui.get_system_charge_limit_supported() => open_charge_limit_dropdown(ui),
                 /* Battery and device rows are read-only. */

@@ -9,7 +9,7 @@ nuubOS boots straight into a controller-first home screen, plays games through
 RetroArch, streams from your PC, plays music and video, and keeps itself up to date
 with signed, rollback-safe updates.
 
-> **Status: release candidate (1.0.0-rc.1).** Bug fixes only until 1.0.0; nightly
+> **Status: release candidate (1.0.0-rc.2).** Bug fixes only until 1.0.0; nightly
 > images are for testers. Keep a backup of your saves. See [Known issues](https://github.com/baf93/nuubOS/wiki/Known-Issues).
 
 **[Download](https://github.com/baf93/nuubOS/releases)** ·
@@ -53,7 +53,8 @@ prepare the SD card.
 | RG40XX-V, RG40XX-V V2 | Tested |
 | RG CubeXX | Tested |
 | RG35XX Pro | Tested (new backlight driver not tested yet) |
-| RG35XX 2024, RG35XX Plus, RG35XX H, RG35XX SP, RG34XX, RG34XX SP, RG40XX H, RG28XX, RG SP | Supported, not tested on hardware yet |
+| RG35XX H, RG35XX SP, RG40XX H, RG SP | Community tested |
+| RG35XX 2024, RG35XX Plus, RG34XX, RG34XX SP, RG28XX | Supported, not tested on hardware yet |
 
 Details and the exact device names: [Supported Devices](https://github.com/baf93/nuubOS/wiki/Supported-Devices).
 

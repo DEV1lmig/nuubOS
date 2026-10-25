@@ -22,6 +22,7 @@ define NUUBOS_RECOVERY_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-dram-blob $(TARGET_DIR)/usr/libexec/nuubos-dram-blob
 	$(INSTALL) -D -m 0755 $(@D)/S04nuubos-dram-blob $(TARGET_DIR)/etc/init.d/S04nuubos-dram-blob
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-diag $(TARGET_DIR)/usr/bin/nuubos-diag
+	$(INSTALL) -D -m 0755 $(@D)/nuubos-diag-persist $(TARGET_DIR)/usr/libexec/nuubos-diag-persist
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-recoveryctl $(TARGET_DIR)/usr/sbin/nuubos-recoveryctl
 	$(INSTALL) -D -m 0755 $(@D)/nuubos-ui-supervisor $(TARGET_DIR)/usr/bin/nuubos-ui-supervisor
 	$(INSTALL) -D -m 0644 $(@D)/support-bundle.job $(TARGET_DIR)/usr/share/nuubos/jobs/support-bundle.job

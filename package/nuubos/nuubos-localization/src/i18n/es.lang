@@ -1352,5 +1352,8 @@
 1351=Próximos {0} inicios
 1352=Registra todo durante los próximos 10 inicios y guarda un informe en cada reinicio o apagado. Desactivado por defecto: los registros cuestan rendimiento y escrituras en la tarjeta.
 1353=Sin batería: mantén el cable de alimentación conectado hasta que termine la actualización
-1354=Intercambiar botones de Confirmar/Atrás
-1355=Usa el botón opuesto para confirmar en los menús. Los juegos no se ven afectados.
+1354=Inicio rápido
+1355=Arranca unos 5 segundos antes.
+1356=Comprueba la memoria en cada inicio. Puede ayudar si la consola se congela o se reinicia sola.
+1357=Intercambiar botones de Confirmar/Atrás
+1358=Usa el botón opuesto para confirmar en los menús. Los juegos no se ven afectados.
