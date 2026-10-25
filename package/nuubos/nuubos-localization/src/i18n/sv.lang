@@ -1353,7 +1353,7 @@
 1352=Loggar allt under de nästa 10 starterna och sparar en rapport vid varje omstart eller avstängning. Av som standard: loggning kostar prestanda och skrivningar till kortet.
 1353=Inget batteri: håll strömkabeln ansluten tills uppdateringen är klar
 1354=Snabbstart
-1355=Startar cirka 5 sekunder snabbare.
+1355=Experimentellt: startar cirka 5 sekunder snabbare, men kan få konsolen att frysa eller starta om av sig själv.
 1356=Kontrollerar minnet vid varje start. Kan hjälpa om konsolen fryser eller startar om av sig själv.
 1357=Installera PortMaster först
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=Avsluta PortMaster
 1371=Byt Bekräfta/Tillbaka-knapparna
 1372=Använd den motsatta knappen för att bekräfta i menyer. Spel påverkas inte.
+1373=Experimentellt: kan göra konsolen instabil. Tryck igen för att slå på.

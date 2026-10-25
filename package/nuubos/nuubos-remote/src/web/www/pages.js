@@ -1443,7 +1443,7 @@ page('power', 'settings', () => C(813, 'Power'), async () => {
       detail: s.hypersleep !== '0' ? C(1348, 'Almost no battery use. Wake with the power button.') : C(1349, 'START and the lid also wake it. Uses more battery.'),
       set: (v) => act('system.hypersleep', { v: v ? '1' : '0' }, { topics: ['system'] }) }),
     row({ key: 'faststartup', title: C(1354, 'Fast Startup'), toggle: s.fast_startup !== '0',
-      detail: s.fast_startup !== '0' ? C(1355, 'Starts about 5 seconds faster.') : C(1356, 'Checks the memory at every start. Can help if the console freezes or restarts by itself.'),
+      detail: s.fast_startup !== '0' ? C(1355, 'Experimental: starts about 5 seconds faster, but can make the console freeze or restart by itself.') : C(1356, 'Checks the memory at every start. Can help if the console freezes or restarts by itself.'),
       set: (v) => act('system.faststartup', { v: v ? '1' : '0' }, { topics: ['system'] }) })),
   section(C(814, 'BATTERY'), 'device'), group(
     ...(bstate === 'absent' ? [row({ key: 'charge', title: C(816, 'Charge'), value: C(1301, 'No battery') })] : [

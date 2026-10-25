@@ -1353,7 +1353,7 @@
 1352=Mindent naplóz a következő 10 indításig, és minden újraindításkor vagy kikapcsoláskor jelentést ment. Alapból kikapcsolva: a naplózás teljesítménybe és kártyaírásba kerül.
 1353=Nincs akkumulátor: hagyd csatlakoztatva a tápkábelt, amíg a frissítés be nem fejeződik
 1354=Gyorsindítás
-1355=Körülbelül 5 másodperccel gyorsabban indul.
+1355=Kísérleti: körülbelül 5 másodperccel gyorsabban indul, de a konzol lefagyhat vagy magától újraindulhat.
 1356=Minden indításkor ellenőrzi a memóriát. Segíthet, ha a konzol lefagy vagy magától újraindul.
 1357=Előbb telepítsd a PortMastert
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=Kilépés a PortMasterből
 1371=Megerősítés/Vissza gombok felcserélése
 1372=A menükben a megerősítéshez használd az ellentétes gombot. A játékokat nem érinti.
+1373=Kísérleti: instabillá teheti a konzolt. Nyomd meg újra a bekapcsoláshoz.

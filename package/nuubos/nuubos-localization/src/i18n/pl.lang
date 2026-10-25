@@ -1353,7 +1353,7 @@
 1352=Zapisuje wszystkie logi przez następne 10 uruchomień i tworzy raport przy każdym ponownym uruchomieniu lub wyłączeniu. Domyślnie wyłączony: logi kosztują wydajność i zapisy na karcie.
 1353=Brak baterii: nie odłączaj zasilania, dopóki aktualizacja się nie zakończy
 1354=Szybkie uruchamianie
-1355=Uruchamia się około 5 sekund szybciej.
+1355=Eksperymentalne: uruchamia się około 5 sekund szybciej, ale może powodować zawieszanie się lub samoczynny restart konsoli.
 1356=Sprawdza pamięć przy każdym uruchomieniu. Może pomóc, gdy konsola się zawiesza lub sama restartuje.
 1357=Najpierw zainstaluj PortMaster
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=Zamknij PortMaster
 1371=Zamień przyciski Potwierdź/Wstecz
 1372=Użyj przeciwnego przycisku do potwierdzania w menu. Gry nie są dotknięte.
+1373=Eksperymentalne: może sprawić, że konsola będzie niestabilna. Naciśnij ponownie, aby włączyć.

@@ -76,7 +76,7 @@ struct config_state {
     int sleep_after_min;        /* 0=off */
     int charge_limit;           /* 80..100 %, 100=off */
     bool hypersleep;            /* sleep with the SoC off (default) */
-    bool fast_startup;          /* cold starts reuse the DRAM training (default) */
+    bool fast_startup;          /* cold starts reuse the DRAM training (experimental, off) */
 };
 
 struct runtime_state {
@@ -282,7 +282,7 @@ static int atomic_save_config(const struct config_state *cfg)
     fprintf(f, "SLEEP_AFTER_MIN=%d\n", cfg->sleep_after_min);
     fprintf(f, "CHARGE_LIMIT=%d\n", cfg->charge_limit);
     fprintf(f, "HYPERSLEEP=%d\n", cfg->hypersleep ? 1 : 0);
-    fprintf(f, "FAST_STARTUP=%d\n", cfg->fast_startup ? 1 : 0);
+    fprintf(f, "EXPERIMENTAL_FAST_STARTUP=%d\n", cfg->fast_startup ? 1 : 0);
     if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
         fclose(f); unlink(tmp); return -1;
     }
@@ -310,7 +310,9 @@ static void config_defaults(struct config_state *cfg)
     cfg->sleep_after_min = DEFAULT_SLEEP_AFTER_MIN;
     cfg->charge_limit = DEFAULT_CHARGE_LIMIT;
     cfg->hypersleep = true;
-    cfg->fast_startup = true;
+    /* Off until it is qualified on every board (user decision 2026-10-25:
+     * an RG SP froze and restarted with it on, ran clean with it off). */
+    cfg->fast_startup = false;
 }
 
 /* Charge limit: 80..100 in steps of 5 (100 = charge to full). */
@@ -349,7 +351,9 @@ static void load_config(struct config_state *cfg)
             if (valid_charge_limit(x)) cfg->charge_limit = x;
         } else if (!strcmp(key, "HYPERSLEEP")) {
             cfg->hypersleep = strcmp(val, "0") != 0;
-        } else if (!strcmp(key, "FAST_STARTUP")) {
+        } else if (!strcmp(key, "EXPERIMENTAL_FAST_STARTUP")) {
+            /* A new key: FAST_STARTUP=1 was written for everyone while
+             * it was on by default, so it is not a choice; ignored. */
             cfg->fast_startup = strcmp(val, "0") != 0;
         }
     }

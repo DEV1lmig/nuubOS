@@ -1353,7 +1353,7 @@
 1352=Sonraki 10 açılış boyunca her şeyi kaydeder ve her yeniden başlatma veya kapatmada bir rapor saklar. Varsayılan olarak kapalı: kayıt tutmak performansa ve kart yazımına mal olur.
 1353=Pil yok: güncelleme tamamlanana kadar güç kablosunu takılı tut
 1354=Hızlı Başlatma
-1355=Yaklaşık 5 saniye daha hızlı açılır.
+1355=Deneysel: yaklaşık 5 saniye daha hızlı açılır, ancak konsolun donmasına veya kendiliğinden yeniden başlamasına neden olabilir.
 1356=Her açılışta belleği denetler. Konsol donuyor veya kendiliğinden yeniden başlıyorsa yardımcı olabilir.
 1357=Önce PortMaster'ı yükleyin
 1358=PortMaster
@@ -1370,4 +1370,5 @@
 1369=PORTMASTER
 1370=PortMaster'dan çık
 1371=Onayla/Geri Düğmelerini Değiştir
-1372=Menülerde onaylamak için karşı düğmeyi kullan. Oyunlar etkilenmez.
+1372=Menülerde onaylamak için karşı düğmeyi kullanın. Oyunlar etkilenmez.
+1373=Deneysel: konsolu kararsız hale getirebilir. Açmak için tekrar basın.

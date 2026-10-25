@@ -1353,7 +1353,7 @@
 1352=Registra tudo nas próximas 10 inicializações e salva um relatório a cada reinício ou desligamento. Desligado por padrão: os registros custam desempenho e gravações no cartão.
 1353=Sem bateria: mantenha o cabo de energia conectado até a atualização terminar
 1354=Inicialização rápida
-1355=Liga cerca de 5 segundos mais rápido.
+1355=Experimental: liga cerca de 5 segundos mais rápido, mas pode fazer o console travar ou reiniciar sozinho.
 1356=Verifica a memória a cada inicialização. Pode ajudar se o console travar ou reiniciar sozinho.
 1357=Instale o PortMaster primeiro
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=Sair do PortMaster
 1371=Trocar Botões de Confirmar/Voltar
 1372=Use o botão oposto para confirmar nos menus. Os jogos não são afetados.
+1373=Experimental: pode deixar o console instável. Pressione de novo para ativar.

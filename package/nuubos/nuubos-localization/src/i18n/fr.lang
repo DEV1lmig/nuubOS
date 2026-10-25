@@ -1353,7 +1353,7 @@
 1352=Enregistre tout pendant les 10 prochains démarrages et sauvegarde un rapport à chaque redémarrage ou extinction. Désactivé par défaut : les journaux coûtent en performances et en écritures sur la carte.
 1353=Pas de batterie : laisse le câble d'alimentation branché jusqu'à la fin de la mise à jour
 1354=Démarrage rapide
-1355=Démarre environ 5 secondes plus vite.
+1355=Expérimental : démarre environ 5 secondes plus vite, mais peut figer la console ou la faire redémarrer seule.
 1356=Vérifie la mémoire à chaque démarrage. Peut aider si la console se fige ou redémarre seule.
 1357=Installez d'abord PortMaster
 1358=PortMaster
@@ -1370,4 +1370,5 @@
 1369=PORTMASTER
 1370=Quitter PortMaster
 1371=Échanger les boutons Confirmer/Retour
-1372=Utilise le bouton opposé pour confirmer dans les menus. Les jeux ne sont pas affectés.
+1372=Utilisez le bouton opposé pour confirmer dans les menus. Les jeux ne sont pas affectés.
+1373=Expérimental : peut rendre la console instable. Appuyez à nouveau pour l'activer.

@@ -1353,7 +1353,7 @@
 1352=Protokolliert alles für die nächsten 10 Starts und speichert bei jedem Neustart oder Ausschalten einen Bericht. Standardmäßig aus: Protokolle kosten Leistung und Schreibvorgänge auf der Karte.
 1353=Kein Akku: Lass das Stromkabel angeschlossen, bis das Update abgeschlossen ist
 1354=Schnellstart
-1355=Startet etwa 5 Sekunden schneller.
+1355=Experimentell: startet etwa 5 Sekunden schneller, kann die Konsole aber einfrieren oder von selbst neu starten lassen.
 1356=Prüft den Speicher bei jedem Start. Kann helfen, wenn die Konsole einfriert oder von selbst neu startet.
 1357=Zuerst PortMaster installieren
 1358=PortMaster
@@ -1370,4 +1370,5 @@
 1369=PORTMASTER
 1370=PortMaster beenden
 1371=Bestätigen/Zurück-Tasten tauschen
-1372=Verwende die entgegengesetzte Taste zum Bestätigen in Menüs. Spiele sind nicht betroffen.
+1372=Bestätigt in Menüs mit der anderen Taste. Spiele sind nicht betroffen.
+1373=Experimentell: kann die Konsole instabil machen. Zum Einschalten erneut drücken.

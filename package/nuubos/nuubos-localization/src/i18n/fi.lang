@@ -1353,7 +1353,7 @@
 1352=Tallentaa kaikki lokit seuraavien 10 käynnistyksen ajan ja tallentaa raportin jokaisessa uudelleenkäynnistyksessä tai sammutuksessa. Oletuksena pois: lokit maksavat suorituskykyä ja kirjoituksia kortille.
 1353=Ei akkua: pidä virtajohto kytkettynä, kunnes päivitys on valmis
 1354=Pikakäynnistys
-1355=Käynnistyy noin 5 sekuntia nopeammin.
+1355=Kokeellinen: käynnistyy noin 5 sekuntia nopeammin, mutta voi saada konsolin jumittumaan tai käynnistymään itsestään uudelleen.
 1356=Tarkistaa muistin jokaisella käynnistyskerralla. Voi auttaa, jos konsoli jumittuu tai käynnistyy itsestään uudelleen.
 1357=Asenna ensin PortMaster
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=Lopeta PortMaster
 1371=Vaihda Vahvista/Takaisin-painikkeet
 1372=Käytä vastakkaista painiketta vahvistamiseen valikoissa. Pelit eivät vaikutu.
+1373=Kokeellinen: voi tehdä konsolista epävakaan. Ota käyttöön painamalla uudelleen.

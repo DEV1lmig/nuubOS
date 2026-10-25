@@ -1353,7 +1353,7 @@
 1352=Logs everything for the next 10 starts and saves a report at each restart or power off. Off by default: logging costs performance and card writes.
 1353=No battery: keep the power cable connected until the update is complete
 1354=Fast Startup
-1355=Starts about 5 seconds faster.
+1355=Experimental: starts about 5 seconds faster, but can make the console freeze or restart by itself.
 1356=Checks the memory at every start. Can help if the console freezes or restarts by itself.
 1357=Install PortMaster first
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=Quit PortMaster
 1371=Swap Confirm/Back Buttons
 1372=Use the opposite face button to confirm in menus. Games are not affected.
+1373=Experimental: it can make the console unstable. Press again to turn it on.

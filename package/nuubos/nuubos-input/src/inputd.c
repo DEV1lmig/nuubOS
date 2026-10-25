@@ -34,6 +34,10 @@
 #define DEFAULT_CONFIG "/etc/nuubos/input-bindings.conf"
 #define STATE_CONFIG "/state/config/nuubos-input.conf"
 #define STATE_CONFIG_TMP "/state/config/.nuubos-input.conf.tmp"
+/* The active user's own bindings (Swap Confirm/Back is a user preference,
+ * 2026-10-25): over the device file, written by BIND SET. */
+#define USER_CONFIG_NAME "nuubos-input.conf"
+#define USER_DIR "/run/nuubos/user"
 
 #define MAX_INPUTS 32
 #define MAX_CLIENTS 16
@@ -664,29 +668,70 @@ static void log_bindings(void)
 	}
 }
 
+static void read_active_user(char *out, size_t out_size);
+
+/* The active user's bindings file; false without an active user. */
+static bool user_config_path(char *out, size_t size, bool tmp)
+{
+	char user[128];
+
+	read_active_user(user, sizeof(user));
+	if (!strcmp(user, "default") || strchr(user, '/') || user[0] == '.')
+		return false;
+	snprintf(out, size, "/state/users/%s/%s" USER_CONFIG_NAME, user, tmp ? "." : "");
+	return true;
+}
+
 static void load_bindings(void)
 {
+	char path[256];
+
 	memcpy(bindings, default_bindings, sizeof(bindings));
 
 	load_config_file(DEFAULT_CONFIG);
 	load_config_file(STATE_CONFIG);
+	if (user_config_path(path, sizeof(path), false))
+		load_config_file(path);
 	log_bindings();
 }
 
 static int persist_bindings(void)
 {
+	char user_path[256], user_tmp[256];
+	const char *path = STATE_CONFIG, *tmp_path = STATE_CONFIG_TMP;
+	struct binding device[sizeof(bindings) / sizeof(bindings[0])];
+	struct binding mine[sizeof(bindings) / sizeof(bindings[0])];
+	bool user = false;
 	FILE *fp;
 	size_t i;
 	int fd;
 
-	if (mkdir("/state/config", 0755) != 0 && errno != EEXIST)
+	/* The active user's file when there is one (its folder exists),
+	 * else the device's. */
+	if (user_config_path(user_path, sizeof(user_path), false) &&
+	    user_config_path(user_tmp, sizeof(user_tmp), true)) {
+		path = user_path;
+		tmp_path = user_tmp;
+		user = true;
+		/* The user keeps only what differs from the device's
+		 * bindings, so a later device change still reaches them. */
+		memcpy(mine, bindings, sizeof(mine));
+		memcpy(bindings, default_bindings, sizeof(bindings));
+		load_config_file(DEFAULT_CONFIG);
+		load_config_file(STATE_CONFIG);
+		memcpy(device, bindings, sizeof(device));
+		memcpy(bindings, mine, sizeof(bindings));
+	} else if (mkdir("/state/config", 0755) != 0 && errno != EEXIST) {
 		return -1;
+	}
 
-	fp = fopen(STATE_CONFIG_TMP, "w");
+	fp = fopen(tmp_path, "w");
 	if (!fp)
 		return -1;
 
 	for (i = 0; i < sizeof(bindings) / sizeof(bindings[0]); i++) {
+		if (user && bindings[i].code == device[i].code)
+			continue;
 		if (fprintf(fp, "%s=%d\n",
 			    bindings[i].name, bindings[i].code) < 0)
 			goto fail;
@@ -700,13 +745,13 @@ static int persist_bindings(void)
 		goto fail;
 
 	if (fclose(fp) != 0) {
-		unlink(STATE_CONFIG_TMP);
+		unlink(tmp_path);
 		return -1;
 	}
 
-	if (chmod(STATE_CONFIG_TMP, 0644) != 0 ||
-	    rename(STATE_CONFIG_TMP, STATE_CONFIG) != 0) {
-		unlink(STATE_CONFIG_TMP);
+	if (chmod(tmp_path, 0644) != 0 ||
+	    rename(tmp_path, path) != 0) {
+		unlink(tmp_path);
 		return -1;
 	}
 
@@ -714,7 +759,7 @@ static int persist_bindings(void)
 
 fail:
 	fclose(fp);
-	unlink(STATE_CONFIG_TMP);
+	unlink(tmp_path);
 	return -1;
 }
 
@@ -3925,6 +3970,7 @@ int main(int argc, char **argv)
 	int server_fd = -1;
 	int inotify_fd = -1;
 	int run_watch_fd = -1;
+	int user_watch_fd = -1;
 	int watch_fd = -1;
 	size_t i;
 	bool handoff = false;
@@ -4025,6 +4071,9 @@ int main(int argc, char **argv)
 	run_watch_fd = inotify_add_watch(inotify_fd, RUN_DIR,
 					 IN_CREATE | IN_DELETE |
 					 IN_MOVED_FROM | IN_MOVED_TO);
+	/* The active user (usersd renames user/active into place): their
+	 * own bindings. The folder may appear after inputd starts. */
+	user_watch_fd = inotify_add_watch(inotify_fd, USER_DIR, IN_MOVED_TO | IN_CLOSE_WRITE);
 	refresh_screen_off();
 
 	while (!stop_requested) {
@@ -4113,7 +4162,7 @@ int main(int argc, char **argv)
 			case 1: {
 				char buffer[4096]
 					__attribute__((aligned(__alignof__(struct inotify_event))));
-				bool rescan = false, screen = false;
+				bool rescan = false, screen = false, user_changed = false;
 				ssize_t len;
 
 				while ((len = read(inotify_fd, buffer,
@@ -4127,6 +4176,12 @@ int main(int argc, char **argv)
 						if (ev->wd == run_watch_fd) {
 							if (ev->len && !strcmp(ev->name, SCREEN_OFF_NAME))
 								screen = true;
+							if (ev->len && !strcmp(ev->name, "user") && user_watch_fd < 0)
+								user_watch_fd = inotify_add_watch(inotify_fd, USER_DIR,
+												  IN_MOVED_TO | IN_CLOSE_WRITE);
+						} else if (ev->wd == user_watch_fd) {
+							if (ev->len && !strcmp(ev->name, "active"))
+								user_changed = true;
 						} else {
 							rescan = true;
 						}
@@ -4138,6 +4193,10 @@ int main(int argc, char **argv)
 					rescan_inputs();
 				if (screen)
 					refresh_screen_off();
+				if (user_changed) {
+					load_bindings();
+					refresh_all_controller_mappings();
+				}
 				break;
 			}
 			case 2:

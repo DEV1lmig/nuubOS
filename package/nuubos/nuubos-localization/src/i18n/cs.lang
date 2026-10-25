@@ -1353,7 +1353,7 @@
 1352=Zaznamenává vše při dalších 10 spuštěních a při každém restartu nebo vypnutí uloží zprávu. Ve výchozím stavu vypnuto: záznamy stojí výkon a zápisy na kartu.
 1353=Bez baterie: nech napájecí kabel připojený, dokud aktualizace neskončí
 1354=Rychlé spuštění
-1355=Spustí se asi o 5 sekund rychleji.
+1355=Experimentální: spustí se asi o 5 sekund rychleji, ale konzole může zamrzat nebo se sama restartovat.
 1356=Kontroluje paměť při každém spuštění. Může pomoci, když konzole zamrzá nebo se sama restartuje.
 1357=Nejprve nainstalujte PortMaster
 1358=PortMaster
@@ -1370,4 +1370,5 @@
 1369=PORTMASTER
 1370=Ukončit PortMaster
 1371=Prohodit tlačítka Potvrdit/Zpět
-1372=Pro potvrzení v nabídkách použij opačné tlačítko. Hry nejsou ovlivněny.
+1372=Pro potvrzení v nabídkách použijte opačné tlačítko. Hry nejsou ovlivněny.
+1373=Experimentální: může způsobit nestabilitu konzole. Stiskněte znovu pro zapnutí.

@@ -1353,7 +1353,7 @@
 1352=Legt alles vast bij de volgende 10 keer opstarten en bewaart een rapport bij elke herstart of uitschakeling. Standaard uit: logboeken kosten prestaties en schrijfacties op de kaart.
 1353=Geen batterij: houd de voedingskabel aangesloten tot de update klaar is
 1354=Snel opstarten
-1355=Start ongeveer 5 seconden sneller op.
+1355=Experimenteel: start ongeveer 5 seconden sneller op, maar kan de console laten vastlopen of vanzelf laten herstarten.
 1356=Controleert het geheugen bij elke start. Kan helpen als de console vastloopt of vanzelf herstart.
 1357=Installeer eerst PortMaster
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=PortMaster afsluiten
 1371=Bevestigen/Terug-knoppen omwisselen
 1372=Gebruik de andere knop om te bevestigen in menu's. Games worden niet beïnvloed.
+1373=Experimenteel: kan de console instabiel maken. Druk opnieuw om in te schakelen.

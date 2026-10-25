@@ -3053,8 +3053,13 @@ fn wifi_stop_scan_session(ui: &HomeWindow) {
     });
 }
 
+/* The system keyboard (settings-view 6) is on screen: Start = Done
+ * (community request 2026-10-25). */
+static KEYBOARD_OPEN: AtomicBool = AtomicBool::new(false);
+
 fn navigate_settings_view(ui: &HomeWindow, next_view: i32) {
     let previous_view = ui.get_settings_view();
+    KEYBOARD_OPEN.store(next_view == 6, Ordering::SeqCst);
 
     if previous_view == 2 && next_view != 2 {
         wifi_stop_scan_session(ui);
@@ -3074,8 +3079,8 @@ fn navigate_settings_view(ui: &HomeWindow, next_view: i32) {
         ui.set_controller_mapping_reset_armed(false);
     }
     if next_view == 10 && previous_view != 10 {
-        /* Reset System Settings resets menu_confirm/menu_back in inputd
-         * out-of-process, without telling the running Home UI; resync on
+        /* The swap is the active user's (inputd's per-user bindings,
+         * reloaded at a user switch, out of this process): resync on
          * entry so a stale toggle state can't linger. */
         refresh_hint_mapping(ui);
     }
@@ -4236,10 +4241,9 @@ fn face_position(code: i32) -> i32 {
  * UI confirm/back swap (2026-10-24, user request): a preference for which
  * face button confirms in nuubOS's own menus, entirely separate from
  * controllersd's per-controller game mapping (BIND SET only touches
- * inputd's own global bindings table, never a padmap); a game's own
- * buttons are unaffected either way. nuubos-emud reads the same bindings
- * file to keep RetroArch's own menu in agreement (emud.c
- * ui_confirm_is_east()).
+ * inputd's own bindings, kept per user, never a padmap); a game's own
+ * buttons are unaffected either way. nuubos-emud asks inputd (BIND GET) to
+ * keep RetroArch's own menu in agreement (emud.c ui_confirm_is_east()).
  */
 fn toggle_action_button_swap(ui: &HomeWindow) {
     let swapped = ui.get_action_button_swapped();
@@ -4839,6 +4843,7 @@ fn handle_settings_action(
                 } else if ui.get_settings_selected_index() == 5 {
                     ui.set_power_index(0);
                     ui.set_power_scroll_offset(0);
+                    ui.set_fast_startup_armed(false);
                     navigate_settings_view(ui, POWER_VIEW);
                     refresh_system(ui);
                     refresh_controllers(ui);
@@ -5286,6 +5291,7 @@ fn handle_settings_action(
             "menu_up" | "menu_down" => {
                 let count = power_row_count(ui);
                 ui.set_power_index(move_model_selection(ui.get_power_index(), count, if action == "menu_up" { -1 } else { 1 }));
+                ui.set_fast_startup_armed(false);
                 update_power_scroll(ui);
             }
             "menu_confirm" => match ui.get_power_index() {
@@ -5302,9 +5308,17 @@ fn handle_settings_action(
                     system_set(ui, format!("SET HYPERSLEEP {next}"));
                 }
                 /* Fast Startup on/off: the cached DRAM training (platform.md). */
+                /* Experimental (user decision 2026-10-25): off at once, on only
+                 * at a second press after the warning. */
                 POWER_FAST_STARTUP_ROW => {
-                    let next = if ui.get_system_fast_startup() { 0 } else { 1 };
-                    system_set(ui, format!("SET FAST_STARTUP {next}"));
+                    if ui.get_system_fast_startup() {
+                        system_set(ui, "SET FAST_STARTUP 0".into());
+                    } else if ui.get_fast_startup_armed() {
+                        ui.set_fast_startup_armed(false);
+                        system_set(ui, "SET FAST_STARTUP 1".into());
+                    } else {
+                        ui.set_fast_startup_armed(true);
+                    }
                 }
                 POWER_CHARGE_LIMIT_ROW if ui.get_system_charge_limit_supported() => open_charge_limit_dropdown(ui),
                 /* Battery and device rows are read-only. */
@@ -5412,6 +5426,23 @@ fn route_input_action(
     }
     /* Media Screen Off: only Start (or Power, Quick Menu) wakes it. */
     if mediaui::screen_off_input(weak, action) {
+        return;
+    }
+    /* Start on the system keyboard submits what was typed, whichever page
+     * opened it. */
+    if action == "settings" && KEYBOARD_OPEN.load(Ordering::SeqCst) {
+        let weak = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                if ui.get_settings_open() && ui.get_settings_view() == 6 {
+                    play_ui_sound("menu_confirm");
+                    finish_system_keyboard(&ui);
+                } else {
+                    /* Closed without a view change: Start is Start again. */
+                    KEYBOARD_OPEN.store(false, Ordering::SeqCst);
+                }
+            }
+        });
         return;
     }
     /* A video plays (EPIC-028): the player window covers nuubUI and the

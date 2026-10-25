@@ -2058,13 +2058,33 @@ static const struct {
 	const char *key;
 	const char *on;
 	const char *off;
+	/* Files the start-up needs in the BIOS folder ("" = none). */
+	const char *const needs[3];
 } boot_options[] = {
-	{ "pcsx_rearmed_show_bios_bootlogo", "enabled", "disabled" },
-	{ "mgba_skip_bios", "OFF", "ON" },
-	{ "gambatte_gb_bootloader", "enabled", "disabled" },
-	{ "genesis_plus_gx_bios", "enabled", "disabled" },
-	{ "melonds_boot_directly", "disabled", "enabled" },
+	{ "pcsx_rearmed_show_bios_bootlogo", "enabled", "disabled", { "" } },
+	{ "mgba_skip_bios", "OFF", "ON", { "" } },
+	{ "gambatte_gb_bootloader", "enabled", "disabled", { "" } },
+	{ "genesis_plus_gx_bios", "enabled", "disabled", { "" } },
+	/* melonDS boots the console's menu only from the real BIOS and
+	 * firmware; with its FreeBIOS that start-up never reaches the game
+	 * (white screen, 2026-10-25 on the CubeXX with the boot screens on). */
+	{ "melonds_boot_directly", "disabled", "enabled", { "bios7.bin", "bios9.bin", "firmware.bin" } },
 };
+
+/* The console start-up for option i: wanted, and possible. */
+static bool boot_option_on(size_t i, bool boot)
+{
+	char path[PATH_MAX];
+
+	if (!boot)
+		return false;
+	for (size_t k = 0; k < 3 && boot_options[i].needs[k] && boot_options[i].needs[k][0]; k++) {
+		snprintf(path, sizeof(path), BIOS_DIR "/%s", boot_options[i].needs[k]);
+		if (!file_exists(path))
+			return false;
+	}
+	return true;
+}
 
 /* Rewrites the boot keys of the user's core options file. */
 static void apply_boot_options(const char *path, bool boot)
@@ -2097,13 +2117,13 @@ static void apply_boot_options(const char *path, bool boot)
 		}
 		if (!done[i])
 			fprintf(out, "%s = \"%s\"\n", boot_options[i].key,
-				boot ? boot_options[i].on : boot_options[i].off);
+				boot_option_on(i, boot) ? boot_options[i].on : boot_options[i].off);
 		done[i] = true;
 	}
 	for (size_t i = 0; i < sizeof(boot_options) / sizeof(boot_options[0]); i++)
 		if (!done[i])
 			fprintf(out, "%s = \"%s\"\n", boot_options[i].key,
-				boot ? boot_options[i].on : boot_options[i].off);
+				boot_option_on(i, boot) ? boot_options[i].on : boot_options[i].off);
 	fclose(in);
 	if (fclose(out) != 0 || rename(tmp, path) != 0)
 		unlink(tmp);
@@ -3095,33 +3115,20 @@ static const char *const ra_notification_keys[] = {
  */
 static bool ui_confirm_is_east(void)
 {
-	/* Same two layers and order as inputd's load_bindings(): image
-	 * defaults file first, then the persistent user override, which
-	 * wins when both set menu_confirm. */
-	static const char *const paths[] = {
-		"/etc/nuubos/input-bindings.conf",
-		"/state/config/nuubos-input.conf",
-	};
-	FILE *fp;
-	char line[128];
-	int code;
-	bool result = false;
-	size_t i;
+	/* inputd's effective binding: the active user's file over the
+	 * device's (it alone knows the layers). */
+	static const char command[] = "BIND GET menu_confirm\n";
+	char answer[32];
+	int fd = connect_socket(INPUT_SOCKET, 500);
+	bool east = false;
 
-	for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-		fp = fopen(paths[i], "r");
-		if (!fp)
-			continue;
-		while (fgets(line, sizeof(line), fp)) {
-			if (sscanf(line, "menu_confirm=%d", &code) == 1) {
-				result = code == 305; /* BTN_EAST */
-				break;
-			}
-		}
-		fclose(fp);
-	}
-
-	return result;
+	if (fd < 0)
+		return false;
+	if (write_all(fd, command, strlen(command)) == 0 &&
+	    read_line_fd(fd, answer, sizeof(answer)) == 0)
+		east = atoi(answer) == 305; /* BTN_EAST */
+	close(fd);
+	return east;
 }
 
 static int write_session_cfg(const char *ra_dir, const char *saves,

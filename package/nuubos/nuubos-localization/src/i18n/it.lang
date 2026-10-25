@@ -1353,7 +1353,7 @@
 1352=Registra tutto per i prossimi 10 avvii e salva un report a ogni riavvio o spegnimento. Spenta di default: i log costano prestazioni e scritture sulla scheda.
 1353=Senza batteria: tieni collegato il cavo di alimentazione fino al termine dell'aggiornamento
 1354=Avvio rapido
-1355=Si avvia circa 5 secondi prima.
+1355=Sperimentale: si avvia circa 5 secondi prima, ma può far bloccare o riavviare da sola la console.
 1356=Controlla la memoria a ogni avvio. Può aiutare se la console si blocca o si riavvia da sola.
 1357=Installa prima PortMaster
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=Esci da PortMaster
 1371=Scambia i tasti Conferma/Indietro
 1372=Usa il tasto opposto per confermare nei menu. I giochi non sono interessati.
+1373=Sperimentale: può rendere instabile la console. Premi di nuovo per attivarla.

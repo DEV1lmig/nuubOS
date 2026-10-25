@@ -1353,7 +1353,7 @@
 1352=Ghi lại mọi thứ trong 10 lần khởi động tới và lưu một báo cáo mỗi khi khởi động lại hoặc tắt máy. Tắt theo mặc định: ghi nhật ký tốn hiệu năng và lượt ghi thẻ nhớ.
 1353=Không có pin: giữ cáp nguồn được kết nối cho đến khi cập nhật hoàn tất
 1354=Khởi động nhanh
-1355=Khởi động nhanh hơn khoảng 5 giây.
+1355=Thử nghiệm: khởi động nhanh hơn khoảng 5 giây, nhưng có thể khiến máy bị treo hoặc tự khởi động lại.
 1356=Kiểm tra bộ nhớ mỗi lần khởi động. Có thể giúp ích nếu máy bị treo hoặc tự khởi động lại.
 1357=Hãy cài PortMaster trước
 1358=PortMaster
@@ -1371,3 +1371,4 @@
 1370=Thoát PortMaster
 1371=Đổi nút Xác nhận/Quay lại
 1372=Dùng nút đối diện để xác nhận trong menu. Trò chơi không bị ảnh hưởng.
+1373=Thử nghiệm: có thể làm máy chạy không ổn định. Nhấn lần nữa để bật.
