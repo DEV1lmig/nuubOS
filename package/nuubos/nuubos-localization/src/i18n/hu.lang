@@ -1372,3 +1372,8 @@
 1371=Megerősítés/Vissza gombok felcserélése
 1372=A menükben a megerősítéshez használd az ellentétes gombot. A játékokat nem érinti.
 1373=Kísérleti: instabillá teheti a konzolt. Nyomd meg újra a bekapcsoláshoz.
+1374=1 port
+1375={0} port
+1376=Hozzáférés a zenékhez és videókhoz
+1377=Ki: ez a port nem látja a zenéidet és videóidat
+1378=Be: ez a port olvashatja a zenéidet és videóidat, de nem módosíthatja őket

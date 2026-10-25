@@ -1372,3 +1372,8 @@
 1371=Trocar Botões de Confirmar/Voltar
 1372=Use o botão oposto para confirmar nos menus. Os jogos não são afetados.
 1373=Experimental: pode deixar o console instável. Pressione de novo para ativar.
+1374=1 port
+1375={0} ports
+1376=Acesso a músicas e vídeos
+1377=Desativado: este port não vê suas músicas e vídeos
+1378=Ativado: este port pode ler suas músicas e vídeos, sem alterá-los

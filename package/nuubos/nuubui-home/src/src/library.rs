@@ -318,6 +318,17 @@ fn count_label(ui: &HomeWindow, n: i64) -> String {
     }
 }
 
+/* The count of a system's games; the Ports system counts ports. */
+fn system_count_label(ui: &HomeWindow, system: &str, n: i64) -> String {
+    if system != "ports" {
+        count_label(ui, n)
+    } else if n == 1 {
+        tr(ui, 1374, "1 port")
+    } else {
+        tr_arg(ui, 1375, "{0} ports", &n.to_string())
+    }
+}
+
 fn duration_label(ui: &HomeWindow, seconds: i64) -> String {
     let minutes = (seconds / 60).max(1);
     if minutes >= 60 {
@@ -532,7 +543,7 @@ fn with_pack<T>(f: impl FnOnce(&mut CoverPack) -> Option<T>) -> Option<T> {
 fn cover_pack_key(path: &str, target: u32) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = std::fs::metadata(path.strip_suffix(TRIM_SUFFIX).unwrap_or(path)).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (path, meta.len(), meta.mtime(), meta.mtime_nsec(), target).hash(&mut h);
     Some(h.finish())
@@ -601,6 +612,34 @@ fn rgba_image(img: image::RgbaImage) -> Image {
 
 /* The cover at most `target` rows high: the packed copy, else the original
  * decoded, scaled (area average) and packed for the next time. */
+/* An app icon from another project (PortMaster's 300x300 icon holds its
+ * 170x170 picture off centre): asked with this suffix, its transparent
+ * margins go and the picture is centred in a square. */
+const TRIM_SUFFIX: &str = "#trim";
+
+fn trim_transparent(src: image::DynamicImage) -> image::DynamicImage {
+    let rgba = src.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    for (x, y, p) in rgba.enumerate_pixels() {
+        if p[3] > 8 {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if x0 > x1 || y0 > y1 {
+        return src;
+    }
+    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+    let side = cw.max(ch);
+    let mut out = image::RgbaImage::new(side, side);
+    let crop = image::imageops::crop_imm(&rgba, x0, y0, cw, ch).to_image();
+    image::imageops::overlay(&mut out, &crop, ((side - cw) / 2) as i64, ((side - ch) / 2) as i64);
+    image::DynamicImage::ImageRgba8(out)
+}
+
 fn load_cover_scaled(path: &str, target: u32) -> Option<Image> {
     let key = cover_pack_key(path, target);
     if let Some(data) = key.and_then(pack_get) {
@@ -608,11 +647,16 @@ fn load_cover_scaled(path: &str, target: u32) -> Option<Image> {
             return Some(rgba_image(img.into_rgba8()));
         }
     }
-    let mut reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let (file, trim) = match path.strip_suffix(TRIM_SUFFIX) {
+        Some(file) => (file, true),
+        None => (path, false),
+    };
+    let mut reader = image::ImageReader::open(file).ok()?.with_guessed_format().ok()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(96 << 20);
     reader.limits(limits);
     let src = reader.decode().ok()?;
+    let src = if trim { trim_transparent(src) } else { src };
     let (w, h) = (src.width(), src.height());
     if w == 0 || h == 0 {
         return None;
@@ -893,7 +937,7 @@ fn build_home(ui: &HomeWindow) {
                     key: s.id.clone().into(),
                     kind: KIND_SYSTEM,
                     title: s.name.clone().into(),
-                    detail: count_label(ui, s.count).into(),
+                    detail: system_count_label(ui, &s.id, s.count).into(),
                     cover_path: s.icon.clone().into(),
                     has_cover: icon.is_some(),
                     cover: icon.map(|(i, _)| i).unwrap_or_default(),
@@ -938,7 +982,10 @@ fn build_home(ui: &HomeWindow) {
         snap.apps
             .iter()
             .map(|a| {
-                let icon = request_cover(ui, &a.icon, true);
+                /* Icons outside /usr/share (PortMaster's) may carry
+                 * transparent margins. */
+                let icon_path = if a.icon.starts_with("/usr/") { a.icon.clone() } else { format!("{}{TRIM_SUFFIX}", a.icon) };
+                let icon = request_cover(ui, &icon_path, true);
                 HomeCard {
                     key: a.id.clone().into(),
                     kind: KIND_APP,
@@ -951,7 +998,8 @@ fn build_home(ui: &HomeWindow) {
                         "portmaster" => tr(ui, 1358, "PortMaster").into(),
                         _ => a.name.clone().into(),
                     },
-                    cover_path: a.icon.clone().into(),
+                    cover_path: icon_path.clone().into(),
+                    full_icon: icon_path.ends_with(TRIM_SUFFIX),
                     has_cover: icon.is_some(),
                     cover: icon.map(|(i, _)| i).unwrap_or_default(),
                     aspect: APP_ASPECT,
@@ -1059,7 +1107,8 @@ fn build_grid(ui: &HomeWindow, reset: bool) {
         ui.set_library_games(m);
     }
     ui.set_library_index(ui.get_library_index().clamp(0, (n - 1).max(0)));
-    ui.set_library_detail(count_label(ui, n as i64).into());
+    let all_ports = !games.is_empty() && games.iter().all(|g| g.system == "ports");
+    ui.set_library_detail(system_count_label(ui, if all_ports { "ports" } else { "" }, n as i64).into());
     sync_focus(ui);
     keep_visible_covers(ui);
 }
@@ -1370,7 +1419,7 @@ pub fn launch_with_mode(ui: &HomeWindow, id: &str, available: bool, mode: &str) 
     });
 }
 
-fn ports_command(command: &str) -> std::io::Result<String> {
+pub(crate) fn ports_command(command: &str) -> std::io::Result<String> {
     let mut stream = UnixStream::connect(PORTS_SOCKET)?;
     stream.set_read_timeout(Some(Duration::from_secs(8)))?;
     stream.write_all(command.as_bytes())?;

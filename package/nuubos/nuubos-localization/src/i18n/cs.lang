@@ -1372,3 +1372,8 @@
 1371=Prohodit tlačítka Potvrdit/Zpět
 1372=Pro potvrzení v nabídkách použijte opačné tlačítko. Hry nejsou ovlivněny.
 1373=Experimentální: může způsobit nestabilitu konzole. Stiskněte znovu pro zapnutí.
+1374=1 port
+1375=Porty: {0}
+1376=Přístup k hudbě a videím
+1377=Vypnuto: tento port nevidí tvou hudbu a videa
+1378=Zapnuto: tento port může číst tvou hudbu a videa, ne je měnit

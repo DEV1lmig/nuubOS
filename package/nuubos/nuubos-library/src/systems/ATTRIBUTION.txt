@@ -91,6 +91,10 @@ File name mapping (nuubOS id <- original file):
   cassettevision.png <- Epoch - Super Cassette Vision.png
   oric.png <- Tangerine Computer Systems - Oric.png
   fmtowns.png <- Fujitsu - FM Towns.png
+  ports.png <- core.png (the set's generic core icon, a rocket: PortMaster ports)
 
-pico8, samcoupe, coco, dragon32, sordm5 and trs80 have no icon in this set; the UI shows
+pico8.png is not from this set: drawn for nuubOS (a stylised console with a
+pixel 8, no Lexaloffle artwork), same licence as nuubOS.
+
+samcoupe, coco, dragon32, sordm5 and trs80 have no icon in this set; the UI shows
 its generic gamepad glyph.

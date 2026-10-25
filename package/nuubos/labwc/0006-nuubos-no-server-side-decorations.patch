@@ -1,0 +1,28 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: no server-side decorations
+
+A console has no window frames. Ports (PortMaster) open plain SDL
+windows that ask for server-side decorations before they have the title
+or app_id a window rule could match ("serverDecoration" and
+SetDecorations had no effect): they came up with a desktop title bar.
+view_wants_decorations() is false for every view.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+
+--- a/src/view.c
++++ b/src/view.c
+@@ -1486,6 +1486,14 @@
+ bool
+ view_wants_decorations(struct view *view)
+ {
++	/*
++	 * nuubOS: a console has no window frames. Ports (PortMaster) open
++	 * plain SDL windows and asked for server-side decorations before any
++	 * title or app_id a window rule could match: they came up with a
++	 * desktop title bar.
++	 */
++	return false;
++
+ 	/* Window-rules take priority if they exist for this view */
+ 	switch (window_rules_get_property(view, "serverDecoration")) {
+ 	case LAB_PROP_TRUE:

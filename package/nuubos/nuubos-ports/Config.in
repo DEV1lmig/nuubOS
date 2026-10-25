@@ -31,6 +31,7 @@ config BR2_PACKAGE_NUUBOS_PORTS
 	select BR2_PACKAGE_SDL2_GFX
 	select BR2_PACKAGE_OPENAL # LOVE runtime, many ports
 	select BR2_PACKAGE_LIBVORBIS # LOVE runtime, many ports
+	select BR2_PACKAGE_LIBTHEORA # LOVE runtime (liblove needs libtheoradec)
 	select BR2_PACKAGE_LIBCURL # PortMaster download
 	select BR2_PACKAGE_OPENSSL # PortMaster checksum
 	select BR2_PACKAGE_CA_CERTIFICATES # downloads (TLS)
@@ -40,4 +41,4 @@ config BR2_PACKAGE_NUUBOS_PORTS
 	  sandbox (bubblewrap) that only sees its own folder. The image
 	  holds what PortMaster and the ports expect from the system:
 	  bash, Python 3, SDL2 and its image/ttf/mixer/gfx libraries,
-	  OpenAL and Vorbis.
+	  OpenAL, Vorbis and Theora.

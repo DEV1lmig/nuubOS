@@ -37,7 +37,8 @@
  * new one on every change); the other commands reply OK or ERR <reason> at
  * once and report progress in the snapshot; PRE_POWER
  * <sleep|restart|poweroff> replies once no session runs (at once for
- * sleep).
+ * sleep). MEDIA_ACCESS <script> [0|1] reads or sets whether that port sees
+ * the Music and Videos folders (read only, /roms/music, /roms/videos).
  *
  * Idle: poll() without timeout. Timers exist only while a child process or
  * a session exit is pending.
@@ -111,6 +112,25 @@
 #define CHECK_TIMEOUT_MS 40000
 #define REMOVE_TIMEOUT_MS 60000
 #define KILL_TIMEOUT_MS 3000
+/* What PortMaster reads about the console (session_info()): the battery
+ * level (its pugwash knows /tmp/battery.percent, not axp20x-battery) and
+ * an os-release with VERSION= (else "nuubOS (0.0.0)"). */
+#define BATTERY_SOURCE "/sys/class/power_supply/axp20x-battery/capacity"
+#define BATTERY_FILE RUN_ROOT "/ports-battery.percent"
+#define BATTERY_MS 60000
+#define OS_RELEASE_FILE RUN_ROOT "/ports-os-release"
+#define OUTPUT_APPLY "/usr/bin/nuubos-wl-output-apply"
+/* Ports the user let read the Music and Videos folders (Game Details,
+ * MEDIA_ACCESS): one script name per line, on STATE, out of the sandbox's
+ * reach (the ports folder is writable from inside). */
+#define MEDIA_ACCESS_DIR "/state/ports"
+#define MEDIA_ACCESS_FILE MEDIA_ACCESS_DIR "/media-access.conf"
+#define MUSIC_DIR "/userdata/music"
+#define VIDEOS_DIR "/userdata/videos"
+/* RetroArch-based ports (libretro cores run by /usr/bin/retroarch) use
+ * this configuration: fullscreen (windowed, RetroArch draws its own title
+ * bar). */
+#define RA_CONFIG HOME_DIR "/.config/retroarch/retroarch.cfg"
 
 enum job_kind {
 	JOB_NONE = 0,
@@ -154,6 +174,11 @@ struct session {
 	bool paused;
 	bool user_quit;
 	long long kill_ms;  /* cgroup.kill after SIGTERM, 0 when none */
+	long long battery_ms; /* next BATTERY_FILE refresh, 0 when none */
+	/* The port script as launched (see session_relaunch()). */
+	time_t script_mtime;
+	off_t script_size;
+	bool relaunched;
 	int power_client;
 };
 
@@ -161,7 +186,7 @@ static volatile sig_atomic_t stop_requested;
 static int sigchld_pipe[2] = { -1, -1 };
 static struct client clients[MAX_CLIENTS];
 static struct job jobs[MAX_JOBS];
-static struct session session;
+static struct session session = { .power_client = -1 };
 static bool cgroup_ready;
 
 /* PortMaster (shared by all users). */
@@ -648,8 +673,59 @@ static void library_session(const char *verb, const char *game)
 }
 
 /* What the sandbox sees, then the command (inside paths). */
+/* A port script name as LAUNCH takes it: "<name>.sh" of the ports folder. */
+static bool valid_port_name(const char *port)
+{
+	size_t len = strlen(port);
+
+	return len >= 4 && len < 256 && !strcmp(port + len - 3, ".sh") &&
+	       !strchr(port, '/') && !strchr(port, '\n') && port[0] != '.';
+}
+
+static bool media_access(const char *port)
+{
+	char line[300];
+	FILE *fp = fopen(MEDIA_ACCESS_FILE, "r");
+	bool on = false;
+
+	if (!fp)
+		return false;
+	while (!on && fgets(line, sizeof(line), fp)) {
+		line[strcspn(line, "\n")] = '\0';
+		on = !strcmp(line, port);
+	}
+	fclose(fp);
+	return on;
+}
+
+static int set_media_access(const char *port, bool on)
+{
+	char line[300];
+	FILE *in, *out;
+
+	if (mkdir_p(MEDIA_ACCESS_DIR) != 0)
+		return -1;
+	out = fopen(MEDIA_ACCESS_FILE ".tmp", "w");
+	if (!out)
+		return -1;
+	in = fopen(MEDIA_ACCESS_FILE, "r");
+	while (in && fgets(line, sizeof(line), in)) {
+		line[strcspn(line, "\n")] = '\0';
+		if (line[0] && strcmp(line, port))
+			fprintf(out, "%s\n", line);
+	}
+	if (in)
+		fclose(in);
+	if (on)
+		fprintf(out, "%s\n", port);
+	if (fclose(out) != 0)
+		return -1;
+	return rename(MEDIA_ACCESS_FILE ".tmp", MEDIA_ACCESS_FILE);
+}
+
 static void sandbox_exec(const char *script)
 {
+	const char *port = strrchr(script, '/') ? strrchr(script, '/') + 1 : script;
 	static char *argv[160];
 	int n = 0;
 
@@ -684,7 +760,7 @@ static void sandbox_exec(const char *script)
 	ARG3("--ro-bind-try", "/etc/hostname", "/etc/hostname");
 	ARG3("--ro-bind-try", "/etc/hosts", "/etc/hosts");
 	ARG3("--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf");
-	ARG3("--ro-bind", "/etc/os-release", "/etc/os-release");
+	ARG3("--ro-bind", access(OS_RELEASE_FILE, R_OK) == 0 ? OS_RELEASE_FILE : "/etc/os-release", "/etc/os-release");
 	ARG3("--ro-bind-try", "/etc/protocols", "/etc/protocols");
 	ARG3("--ro-bind-try", "/etc/services", "/etc/services");
 	ARG3("--ro-bind-try", "/etc/localtime", "/etc/localtime");
@@ -706,9 +782,16 @@ static void sandbox_exec(const char *script)
 	ARG2("--dir", SB_MOUNT_DIR);
 	ARG3("--bind", MOUNT_SOCKET, SB_MOUNT_SOCKET);
 	ARG2("--tmpfs", "/tmp");
+	ARG3("--ro-bind-try", BATTERY_FILE, "/tmp/battery.percent");
 	/* Of USERDATA, the ports folder only. */
 	ARG2("--dir", "/roms");
 	ARG3("--bind", PORTS_ROOT, SB_PORTS);
+	/* Read only, and only for a port the user allowed (never PortMaster's
+	 * own interface). */
+	if (strcmp(port, "PortMaster.sh") && media_access(port)) {
+		ARG3("--ro-bind-try", MUSIC_DIR, "/roms/music");
+		ARG3("--ro-bind-try", VIDEOS_DIR, "/roms/videos");
+	}
 	ARG2("--chdir", SB_PORTS);
 	ARG(BASH);
 	ARG(script);
@@ -724,6 +807,9 @@ static void sandbox_exec(const char *script)
 	setenv("WAYLAND_DISPLAY", "wayland-0", 1);
 	setenv("PIPEWIRE_RUNTIME_DIR", RUN_ROOT "/pipewire", 1);
 	setenv("SDL_VIDEODRIVER", "wayland", 1);
+	/* No window frames (labwc draws none, rc.xml): SDL would draw its own
+	 * with libdecor, a desktop title bar over the port. */
+	setenv("SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR", "0", 1);
 	/* Only inputd's game gamepads (see streamd: SDL's HIDAPI drivers
 	 * would open the real controller past inputd's grab). */
 	setenv("SDL_JOYSTICK_HIDAPI", "0", 1);
@@ -732,15 +818,141 @@ static void sandbox_exec(const char *script)
 	execv(BWRAP, argv);
 }
 
+/* The battery level for PortMaster, rewritten in place: the sandbox binds
+ * this file, a new one would not reach it. */
+static void battery_refresh(void)
+{
+	char level[16] = "";
+	FILE *fp = fopen(BATTERY_SOURCE, "r");
+	int fd;
+
+	if (fp) {
+		if (!fgets(level, sizeof(level), fp))
+			level[0] = '\0';
+		fclose(fp);
+	}
+	fd = open(BATTERY_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0)
+		return;
+	if (level[0] && write(fd, level, strlen(level)) < 0)
+		log_msg("portsd: battery level not written");
+	close(fd);
+}
+
+/* The system's os-release with VERSION= for PortMaster. */
+static void write_os_release(void)
+{
+	char line[256], version[64] = "";
+	FILE *in = fopen("/etc/os-release", "r");
+	FILE *out = fopen(OS_RELEASE_FILE ".tmp", "w");
+	bool has_version = false;
+
+	if (!in || !out) {
+		if (in)
+			fclose(in);
+		if (out)
+			fclose(out);
+		return;
+	}
+	while (fgets(line, sizeof(line), in)) {
+		fputs(line, out);
+		if (!strncmp(line, "VERSION=", 8))
+			has_version = true;
+		else if (!strncmp(line, "VERSION_ID=", 11))
+			sscanf(line + 11, "%63[^\n]", version);
+	}
+	if (!has_version && version[0])
+		fprintf(out, "VERSION=\"%s\"\n", version);
+	fclose(in);
+	if (fclose(out) == 0)
+		(void)rename(OS_RELEASE_FILE ".tmp", OS_RELEASE_FILE);
+}
+
+/* video_fullscreen = "true" in RA_CONFIG, the rest left to RetroArch. */
+static void retroarch_fullscreen(void)
+{
+	char line[1024];
+	FILE *in = fopen(RA_CONFIG, "r");
+	FILE *out;
+	bool found = false;
+
+	if (mkdir_p(HOME_DIR "/.config/retroarch") != 0)
+		return;
+	out = fopen(RA_CONFIG ".tmp", "w");
+	if (!out) {
+		if (in)
+			fclose(in);
+		return;
+	}
+	while (in && fgets(line, sizeof(line), in)) {
+		if (!strncmp(line, "video_fullscreen ", 17) || !strncmp(line, "video_fullscreen=", 17)) {
+			fputs("video_fullscreen = \"true\"\n", out);
+			found = true;
+		} else {
+			fputs(line, out);
+		}
+	}
+	if (!found)
+		fputs("video_fullscreen = \"true\"\n", out);
+	if (in)
+		fclose(in);
+	if (fclose(out) == 0)
+		(void)rename(RA_CONFIG ".tmp", RA_CONFIG);
+}
+
+/* The built-in panel at its native resolution while a session runs
+ * (nuubos-wl-output-apply --native-panel: SDL saw 640x640 on the CubeXX's
+ * 720x720 at the UI's 1.125 scale), the UI scale again after. */
+static void panel_native(bool native)
+{
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		setenv("XDG_RUNTIME_DIR", RUN_ROOT "/wayland-runtime", 1);
+		setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+		execl(OUTPUT_APPLY, OUTPUT_APPLY, native ? "--native-panel" : "--panel-scale", (char *)NULL);
+		_exit(127);
+	}
+	if (pid > 0)
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+			;
+}
+
+/*
+ * A port whose runtime is missing: PortMaster's runtime_check downloads it
+ * and rewrites the script while bash is still reading it, so the first
+ * launch ended in a syntax error and only the second played. A session
+ * that failed on its own (not quit, no Restart/Power Off waiting) after its
+ * script changed is launched once more.
+ */
+static bool session_relaunch(int status)
+{
+	char host[PATH_MAX];
+	struct stat st;
+
+	if (session.portmaster || session.user_quit || session.relaunched ||
+	    session.power_client >= 0 || status == 0 || !session.port[0])
+		return false;
+	snprintf(host, sizeof(host), PORTS_ROOT "/%s", session.port);
+	if (stat(host, &st) != 0)
+		return false;
+	return st.st_mtime != session.script_mtime || st.st_size != session.script_size;
+}
+
 static void reset_session(void)
 {
+	/* A Restart/Power Off waiting for this session's end is answered
+	 * after the reset (finish_power_wait()): without it the lifecycle hook
+	 * waited for nuubos-portsctl's 15 s timeout. */
+	int power_client = session.power_client;
+
 	if (session.input_fd >= 0)
 		close(session.input_fd);
 	memset(&session, 0, sizeof(session));
 	session.state = SESSION_IDLE;
 	session.job = -1;
 	session.input_fd = -1;
-	session.power_client = -1;
+	session.power_client = power_client;
 }
 
 static int free_job(void)
@@ -792,9 +1004,14 @@ static const char *launch_session(const char *port)
 	session.input_fd = input_gamepads_on();
 	if (session.input_fd < 0)
 		log_msg("portsd: inputd game gamepads unavailable");
+	battery_refresh();
+	write_os_release();
+	retroarch_fullscreen();
+	panel_native(true);
 	pid = fork();
 	if (pid < 0) {
 		reset_session();
+		panel_native(false);
 		return "spawn";
 	}
 	if (pid == 0) {
@@ -830,6 +1047,11 @@ static const char *launch_session(const char *port)
 	jobs[slot].deadline_ms = -1;
 	session.state = SESSION_RUNNING;
 	session.job = slot;
+	session.battery_ms = monotonic_ms() + BATTERY_MS;
+	if (port) {
+		session.script_mtime = st.st_mtime;
+		session.script_size = st.st_size;
+	}
 	session.portmaster = port == NULL;
 	copy_text(session.port, sizeof(session.port), port ? port : "");
 	log_msg("portsd: session %s pid=%d", port ? port : "PortMaster", (int)pid);
@@ -1281,7 +1503,10 @@ static void finish_job(int slot, int status)
 			j->kind == JOB_REMOVE ? "remove" : "rollback", status,
 			pm_version[0] ? pm_version : "-");
 		break;
-	case JOB_SESSION:
+	case JOB_SESSION: {
+		char port[sizeof(session.port)], game[sizeof(session.game)];
+		bool relaunch = session_relaunch(status);
+
 		log_msg("portsd: session %s exited status=%d user_quit=%d",
 			session.portmaster ? "PortMaster" : session.port, status, session.user_quit ? 1 : 0);
 		/* Nothing of the session survives it. */
@@ -1289,11 +1514,23 @@ static void finish_job(int slot, int status)
 		cgroup_signal(SIGKILL);
 		if (session.game[0])
 			library_session("SESSION_END", session.game);
+		copy_text(port, sizeof(port), session.port);
+		copy_text(game, sizeof(game), session.game);
 		reset_session();
+		if (relaunch && !launch_session(port)) {
+			log_msg("portsd: %s rewritten while it ran, launched again", port);
+			session.relaunched = true;
+			copy_text(session.game, sizeof(session.game), game);
+			if (game[0])
+				library_session("SESSION_BEGIN", game);
+			break;
+		}
+		panel_native(false);
 		/* PortMaster may have updated itself. */
 		read_portmaster();
 		finish_power_wait();
 		break;
+	}
 	default:
 		break;
 	}
@@ -1411,6 +1648,21 @@ static void handle_command(struct client *c, char *line)
 		library_session("SESSION_BEGIN", session.game);
 		reply(c, "OK\n");
 		notify_subscribers();
+	} else if (!strcmp(line, "MEDIA_ACCESS") && (argc == 1 || argc == 2)) {
+		/* MEDIA_ACCESS <script> -> OK 0|1; MEDIA_ACCESS <script> 0|1 sets
+		 * it (from the next launch). */
+		if (!valid_port_name(args[0])) {
+			reply(c, "ERR port\n");
+		} else if (argc == 1) {
+			reply(c, media_access(args[0]) ? "OK 1\n" : "OK 0\n");
+		} else if (strcmp(args[1], "0") && strcmp(args[1], "1")) {
+			reply(c, "ERR value\n");
+		} else if (set_media_access(args[0], args[1][0] == '1') != 0) {
+			reply(c, "ERR write\n");
+		} else {
+			log_msg("portsd: %s music and videos %s", args[0], args[1][0] == '1' ? "allowed" : "denied");
+			reply(c, "OK\n");
+		}
 	} else if (!strcmp(line, "PAUSE") || !strcmp(line, "RESUME")) {
 		bool pause = !strcmp(line, "PAUSE");
 
@@ -1529,6 +1781,7 @@ static int next_timeout_ms(void)
 		if (jobs[i].kind != JOB_NONE)
 			CONSIDER(jobs[i].deadline_ms);
 	CONSIDER(session.kill_ms);
+	CONSIDER(session.battery_ms);
 #undef CONSIDER
 	if (deadline < 0)
 		return -1;
@@ -1557,6 +1810,10 @@ static void run_timers(void)
 			j->kill_sent = true;
 			j->deadline_ms = -1;
 		}
+	}
+	if (session.battery_ms > 0 && now >= session.battery_ms) {
+		battery_refresh();
+		session.battery_ms = now + BATTERY_MS;
 	}
 	if (session.kill_ms > 0 && now >= session.kill_ms) {
 		log_msg("portsd: session did not end, killed");

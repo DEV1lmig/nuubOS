@@ -1372,3 +1372,8 @@
 1371=Zamień przyciski Potwierdź/Wstecz
 1372=Użyj przeciwnego przycisku do potwierdzania w menu. Gry nie są dotknięte.
 1373=Eksperymentalne: może sprawić, że konsola będzie niestabilna. Naciśnij ponownie, aby włączyć.
+1374=1 port
+1375=Porty: {0}
+1376=Dostęp do muzyki i wideo
+1377=Wył.: ten port nie widzi Twojej muzyki i filmów
+1378=Wł.: ten port może odczytywać Twoją muzykę i filmy, ale ich nie zmienia

@@ -1372,3 +1372,8 @@
 1371=Scambia i tasti Conferma/Indietro
 1372=Usa il tasto opposto per confermare nei menu. I giochi non sono interessati.
 1373=Sperimentale: può rendere instabile la console. Premi di nuovo per attivarla.
+1374=1 port
+1375={0} port
+1376=Accesso a Musica e Video
+1377=Disattivato: questo port non vede la tua musica e i tuoi video
+1378=Attivato: questo port può leggere musica e video, non modificarli

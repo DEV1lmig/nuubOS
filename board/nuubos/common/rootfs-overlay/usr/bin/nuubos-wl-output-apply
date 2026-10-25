@@ -67,6 +67,20 @@ current_scale()
         name == out && /^  Scale:/ { print $2 + 0 }'
 }
 
+# A port session (nuubos-portsd): the built-in panel at scale 1, so SDL and
+# PortMaster see its real resolution (at 1.125 a 720x720 panel was a
+# 640x640 desktop, 720x480 a 640x427 one, upscaled); --panel-scale puts the
+# UI scale back at the session's end. Nothing while HDMI is the output.
+if [ "$1" = "--native-panel" ]; then
+    OUTS="$(/usr/bin/wlr-randr 2>/dev/null)"
+    printf '%s\n' "$OUTS" | awk '/^HDMI-A-/ { h = 1 } h && /^  Enabled: yes/ { found = 1 } /^[A-Za-z0-9-]+ / && !/^HDMI-A-/ { h = 0 } END { exit !found }' && exit 0
+    PANEL="$(printf '%s\n' "$OUTS" | awk '/^[A-Za-z0-9-]+ / && $1 !~ /^HDMI-A-/ { print $1; exit }')"
+    [ -n "$PANEL" ] || exit 0
+    [ "$(current_scale "$PANEL")" = "1" ] && exit 0
+    /usr/bin/wlr-randr --output "$PANEL" --scale 1 >/dev/null 2>&1
+    exit 0
+fi
+
 # Scale of the built-in panel only (session start without HDMI): no mode
 # change, nothing when it already matches.
 if [ "$1" = "--panel-scale" ]; then

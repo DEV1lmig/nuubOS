@@ -10,7 +10,7 @@ NUUBOS_PORTS_SITE_METHOD = local
 NUUBOS_PORTS_LICENSE = PolyForm-Noncommercial-1.0.0
 NUUBOS_PORTS_LICENSE_FILES = LICENSE
 NUUBOS_PORTS_DEPENDENCIES = bubblewrap python3 sdl2 sdl2_image sdl2_ttf sdl2_mixer sdl2_gfx openal libvorbis \
-	libcurl openssl
+	libtheora libcurl openssl
 
 define NUUBOS_PORTS_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
@@ -44,6 +44,10 @@ define NUUBOS_PORTS_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0644 $(@D)/app/portmaster.app \
 		$(TARGET_DIR)/usr/share/nuubos/applications/portmaster.app
 	ln -sfn /userdata/roms $(TARGET_DIR)/roms
+	# PortMaster's LOVE 11.5 runtime links libtheoradec.so.1 (libtheora
+	# 1.1); 1.2 renamed it .so.2 and keeps every th_* symbol it uses
+	# under the same libtheoradec_1.0 version.
+	ln -sfn libtheoradec.so.2 $(TARGET_DIR)/usr/lib/libtheoradec.so.1
 endef
 
 $(eval $(generic-package))

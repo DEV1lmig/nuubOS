@@ -1372,3 +1372,8 @@
 1371=Swap Confirm/Back Buttons
 1372=Use the opposite face button to confirm in menus. Games are not affected.
 1373=Experimental: it can make the console unstable. Press again to turn it on.
+1374=1 port
+1375={0} ports
+1376=Music & Videos Access
+1377=Off: this port cannot see your music and videos
+1378=On: this port can read your music and videos, not change them

@@ -693,6 +693,16 @@ fn main() {
             ui.set_details_caption("psp/cube.cso".into()); ui.set_details_caption_armed(false);
             ui.set_gen_notice(s(ui, 572).into());
         })),
+        ("game_details_port", Box::new(|ui| {
+            ui.set_gen_index(3); ui.set_gen_notice("".into());
+            ui.set_details_title("A Meta Data Game".into()); ui.set_details_subtitle("Ports".into());
+            ui.set_details_meta("2020  •  Luis Zuno".into());
+            ui.set_details_description("Embark on a short yet captivating journey of self-discovery.".into());
+            ui.set_details_actions(actions(&[(0, s(ui, 413), true, false, false), (2, s(ui, 537), false, false, false),
+                (35, s(ui, 1230), false, false, false), (23, s(ui, 1376), false, true, false),
+                (9, s(ui, 549), false, false, false), (10, s(ui, 544), false, false, false)]));
+            ui.set_details_caption(s(ui, 1378).into()); ui.set_details_caption_armed(false);
+        })),
         ("game_settings", Box::new(|ui| {
             ui.set_gen_notice("".into()); ui.set_details_has_cover(false);
             ui.set_details_active(true); ui.set_settings_view(51); ui.set_gen_index(1); ui.set_gen_scroll(0);

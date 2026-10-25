@@ -82,6 +82,9 @@ struct Details {
     time: i64,
     sessions: i64,
     path: String,
+    /* Ports: whether the user let this port read Music and Videos
+     * (nuubos-portsd MEDIA_ACCESS). */
+    media_access: bool,
     members: Vec<Member>,
     /* The user's tags of the game (libraryd field 13). */
     tags: Vec<String>,
@@ -673,7 +676,17 @@ fn details_actions(ui: &HomeWindow, st: &State) -> Vec<(String, DetailAction, St
         let core = if d.core.is_empty() { String::new() } else { format!("{}: {}", tr(ui, 525, "Emulator"), d.core) };
         out.push(("settings".into(), detail_action(3, tr(ui, 524, "Game Settings"), false), core));
     }
-    if d.meta("match") == "review" {
+    if d.system == "ports" {
+        /* A port's details come from PortMaster: no metadata source, no
+         * search name. Music and Videos are the user's to open to it. */
+        let mut media = detail_action(23, tr(ui, 1376, "Music & Videos Access"), false);
+        media.on = d.media_access;
+        out.push(("media".into(), media, if d.media_access {
+            tr(ui, 1378, "On: this port can read your music and videos, not change them")
+        } else {
+            tr(ui, 1377, "Off: this port cannot see your music and videos")
+        }));
+    } else if d.meta("match") == "review" {
         let mut accept = detail_action(6, tr(ui, 562, "Accept Match"), false);
         accept.enabled = !st.busy;
         out.push(("accept".into(), accept, format!("{}: {}", tr(ui, 561, "Check this match"), d.meta("title"))));
@@ -697,10 +710,12 @@ fn details_actions(ui: &HomeWindow, st: &State) -> Vec<(String, DetailAction, St
         };
         out.push(("metadata".into(), get, caption));
     }
-    let mut search = detail_action(17, tr(ui, 800, "Search Name"), false);
-    search.enabled = !st.busy && d.available;
-    let searched = if d.meta("search").is_empty() { d.title.clone() } else { d.meta("search").to_owned() };
-    out.push(("search".into(), search, tr_arg(ui, 801, "Searched as \"{0}\". Change it if the game is not found or the match is wrong.", &searched)));
+    if d.system != "ports" {
+        let mut search = detail_action(17, tr(ui, 800, "Search Name"), false);
+        search.enabled = !st.busy && d.available;
+        let searched = if d.meta("search").is_empty() { d.title.clone() } else { d.meta("search").to_owned() };
+        out.push(("search".into(), search, tr_arg(ui, 801, "Searched as \"{0}\". Change it if the game is not found or the match is wrong.", &searched)));
+    }
     if d.available && d.bios_missing {
         out.push(("bios".into(), detail_action(8, tr(ui, 576, "BIOS Files"), false),
             tr(ui, 583, "BIOS missing for this system")));
@@ -1028,6 +1043,10 @@ fn load_details_then(ui: &HomeWindow, id: String, open: bool) {
             return;
         }
         parse_game_settings(&emulation(&format!("GAME_SETTINGS\t{}\t{}", d.id, d.system), true), &mut d);
+        if d.system == "ports" {
+            d.media_access = crate::library::ports_command(&format!("MEDIA_ACCESS\t{}", port_script(&d)))
+                .is_ok_and(|r| r.trim() == "OK 1");
+        }
         let bios = run_tool("/usr/bin/nuubos-biosctl", &["status", &d.system], None);
         d.bios_missing = parse_bios(&bios).0.iter().any(|s| s.state == "missing" || s.state == "invalid");
         let load = |p: &str| if p.is_empty() { None } else { Image::load_from_path(std::path::Path::new(p)).ok() };
@@ -1411,6 +1430,11 @@ pub(crate) fn arm_or(ui: &HomeWindow, key: &str) -> bool {
     false
 }
 
+/* The port's script name, as nuubos-portsd knows it. */
+fn port_script(d: &Details) -> String {
+    d.path.rsplit('/').next().unwrap_or_default().to_owned()
+}
+
 fn details_confirm(ui: &HomeWindow, key: &str) {
     let d = STATE.with(|st| st.borrow().details.clone());
     match key {
@@ -1428,6 +1452,18 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
             open_bios(ui);
         }
         "metadata" => scrape_game(ui, d.id.clone(), !d.meta("match").is_empty()),
+        "media" => {
+            let on = !d.media_access;
+            let ok = crate::library::ports_command(&format!("MEDIA_ACCESS\t{}\t{}", port_script(&d), if on { 1 } else { 0 }))
+                .is_ok_and(|r| r.trim() == "OK");
+            if ok {
+                STATE.with(|st| st.borrow_mut().details.media_access = on);
+                play_ui_sound("select");
+            } else {
+                play_ui_sound("error");
+            }
+            render(ui);
+        }
         "search" => {
             let current = if d.meta("search").is_empty() { d.title.clone() } else { d.meta("search").to_owned() };
             open_system_keyboard(ui, &tr(ui, 800, "Search Name"), KEYBOARD_SEARCH, 50, "text", &current);

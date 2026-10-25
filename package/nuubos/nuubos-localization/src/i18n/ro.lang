@@ -1372,3 +1372,8 @@
 1371=Schimbă butoanele Confirmare/Înapoi
 1372=Folosește butonul opus pentru a confirma în meniuri. Jocurile nu sunt afectate.
 1373=Experimental: poate face consola instabilă. Apasă din nou pentru a activa.
+1374=1 port
+1375=Porturi: {0}
+1376=Acces la muzică și videoclipuri
+1377=Dezactivat: acest port nu vede muzica și videoclipurile tale
+1378=Activat: acest port poate citi muzica și videoclipurile tale, nu le poate modifica

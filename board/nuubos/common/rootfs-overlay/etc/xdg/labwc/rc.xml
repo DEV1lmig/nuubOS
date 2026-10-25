@@ -14,8 +14,13 @@
        cursor makes wlroots composite every frame and rules out direct
        scan-out of fullscreen clients. Moving a real pointer shows it again. -->
   <windowRules>
+    <!-- A window that is not fullscreen fills the screen: ports
+         (PortMaster) open plain SDL windows at their own size. Every nuubOS
+         client is fullscreen already; no window has frames (labwc patch
+         0006). -->
     <windowRule title="*">
       <action name="HideCursor" />
+      <action name="Maximize" />
     </windowRule>
   </windowRules>
 </labwc_config>

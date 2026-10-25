@@ -1372,3 +1372,8 @@
 1371=Onayla/Geri Düğmelerini Değiştir
 1372=Menülerde onaylamak için karşı düğmeyi kullanın. Oyunlar etkilenmez.
 1373=Deneysel: konsolu kararsız hale getirebilir. Açmak için tekrar basın.
+1374=1 port
+1375={0} port
+1376=Müzik ve videolara erişim
+1377=Kapalı: bu port müziklerini ve videolarını göremez
+1378=Açık: bu port müziklerini ve videolarını okuyabilir, değiştiremez
