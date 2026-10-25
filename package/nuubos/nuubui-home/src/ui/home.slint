@@ -3073,6 +3073,7 @@ export component HomeWindow inherits Window {
     in-out property <string> ui-language-name: "English";
     in-out property <int> select-face-position: -1;
     in-out property <int> back-face-position: -1;
+    in-out property <bool> action-button-swapped: false;
 
     in-out property <string> connectivity-wifi-status: root.i18n-strings[205];
     in-out property <string> connectivity-wifi-detail: root.i18n-strings[206];
@@ -3104,6 +3105,7 @@ export component HomeWindow inherits Window {
     in-out property <[PlayerAssignmentEntry]> player-assignments: [];
     in-out property <[ControllerMappingEntry]> controller-mapping: [];
     in-out property <int> controllers-menu-index: 0;
+    in-out property <int> controllers-menu-scroll-offset: 0;
     /* Generic Settings choice dropdown: the default UI for every discrete
      * multi-value setting. Continuous values keep sliders/left-right. */
     in-out property <bool> settings-choice-open: false;
@@ -3592,8 +3594,8 @@ export component HomeWindow inherits Window {
         : root.settings-view == 4 && root.wifi-detail-index == 9 ? root.wifi-selected-saved
         : root.settings-view == 1 && root.connectivity-selected-index == 1 ? root.wifi-enabled
         : root.settings-view == 1 && (root.connectivity-selected-index == 4 || root.connectivity-selected-index == 5) ? root.bluetooth-enabled
-        : root.settings-view == 10 && root.controllers-menu-index == 2 ? root.rumble-supported
-        : root.settings-view == 10 && root.controllers-menu-index == 3 ? root.lighting-supported
+        : root.settings-view == 10 && root.controllers-menu-index == 3 ? root.rumble-supported
+        : root.settings-view == 10 && root.controllers-menu-index == 4 ? root.lighting-supported
         : root.settings-view == 17 && root.lighting-index == 1 ? root.lighting-color-capable
         : root.settings-view == 17 && root.lighting-index == 3 ? root.lighting-speed-capable
         : true
@@ -5618,37 +5620,54 @@ export component HomeWindow inherits Window {
                  * RUMBLE. */
                 SettingsSectionHeader {
                     x: root.settings-content-x;
-                    y: root.sec-row-y(2, 0, 2, 0, 0) - root.settings-section-gap;
+                    y: root.sec-row-y(3, root.controllers-menu-scroll-offset, 3, 0, 0) - root.settings-section-gap;
                     width: root.settings-content-width;
                     label: root.i18n-strings[root.lighting-supported ? 735 : 899];
                     scope-label: root.i18n-strings[312];
-                    visible: root.page-controllers && root.sec-row-visible(2, 0, 2, 0, 0);
+                    visible: root.page-controllers
+                        && root.controllers-menu-scroll-offset < 3
+                        && root.sec-row-visible(3, root.controllers-menu-scroll-offset, 3, 0, 0);
                 }
                 for row[k] in [
-                    { title: root.i18n-strings[13], value: root.i18n-strings[111], enabled: true },
-                    { title: root.i18n-strings[14], value: root.controllers.length + root.i18n-strings[219], enabled: true },
+                    { title: root.i18n-strings[13], value: root.i18n-strings[111], enabled: true, toggle: false, detail: "" },
+                    { title: root.i18n-strings[14], value: root.controllers.length + root.i18n-strings[219], enabled: true, toggle: false, detail: "" },
+                    {
+                        title: root.i18n-strings[1371],
+                        value: "",
+                        enabled: true,
+                        toggle: true,
+                        detail: root.i18n-strings[1372],
+                    },
                     {
                         title: root.i18n-strings[17],
                         value: root.rumble-supported ? (root.rumble-enabled ? root.i18n-strings[112] : root.i18n-strings[113]) : root.i18n-strings[205],
                         enabled: root.rumble-supported,
+                        toggle: false,
+                        detail: "",
                     },
                     {
                         title: root.i18n-strings[18],
                         value: root.lighting-supported ? root.lighting-effect-label : root.i18n-strings[205],
                         enabled: root.lighting-supported,
+                        toggle: false,
+                        detail: "",
                     },
                 ]: SettingsSelectableRow {
                     x: root.settings-content-x;
-                    y: root.sec-row-y(k, 0, 2, 0, 0);
+                    y: root.sec-row-y(k, root.controllers-menu-scroll-offset, 3, 0, 0);
                     width: root.settings-content-width;
                     height: root.settings-row-height;
                     title: row.title;
                     value: row.value;
+                    detail: row.detail;
+                    toggle: row.toggle;
+                    toggle-on: k == 2 && root.action-button-swapped;
                     enabled: row.enabled;
-                    navigates: row.enabled;
+                    navigates: row.enabled && !row.toggle;
                     selected: root.settings-view == 10 && root.controllers-menu-index == k;
-                    visible: root.page-controllers && root.sec-row-visible(k, 0, 2, 0, 0)
-                        && (k != 3 || root.lighting-supported);
+                    visible: root.page-controllers
+                        && root.sec-row-visible(k, root.controllers-menu-scroll-offset, 3, 0, 0)
+                        && (k != 4 || root.lighting-supported);
                 }
 
                 /* Preferred player assignment. */

@@ -561,6 +561,11 @@ fn keyboard_label(c:&str)->&'static str{match c{"uk"=>"English (UK)","it"=>"Ital
 fn apply_regional(ui:&HomeWindow,s:&RSnap){ui.set_timezone(s.timezone.clone().into());ui.set_automatic_time(s.auto_time);ui.set_manual_date_label(datetime::date_label(ui,&s.local_date).into());ui.set_manual_time_label(s.local_time.clone().into());ui.set_keyboard_layout_code(s.keyboard.clone().into());ui.set_keyboard_layout_label(keyboard_label(&s.keyboard).into());ui.set_keyboard_layout(virtual_layout(&s.keyboard).into());ui.set_last_time_sync_label(if s.last_sync>0{tr(ui,299,"Time synchronized").into()}else{tr(ui,302,"Never").into()});}
 fn refresh_regional(ui:&HomeWindow){if let Ok(r)=regional_command("STATUS"){apply_regional(ui,&parse_regional(&r));}}
 fn start_regional_listener(ui:&HomeWindow){let weak=ui.as_weak();thread::spawn(move||loop{match UnixStream::connect(REGIONAL_SOCKET){Ok(mut x)=>{if x.write_all(b"SUBSCRIBE\n").is_err(){thread::sleep(Duration::from_millis(500));continue;}let mut b=String::new();for l in BufReader::new(x).lines(){let Ok(l)=l else{break};b.push_str(&l);b.push('\n');if l.starts_with("local_time="){let q=parse_regional(&b);b.clear();let w=weak.clone();let _=slint::invoke_from_event_loop(move||if let Some(ui)=w.upgrade(){apply_regional(&ui,&q);});}}}Err(_)=>thread::sleep(Duration::from_millis(500))}});}
+fn update_controllers_menu_scroll(ui:&HomeWindow){
+    /* Controllers & Input: CONTROLLERS (0-2), then RUMBLE & LIGHTING (3-4,
+     * 3-3 without RGB hardware) - one section boundary at row 3. */
+    ui.set_controllers_menu_scroll_offset(sectioned_scroll(ui,ui.get_controllers_menu_index(),controllers_menu_rows(ui),ui.get_controllers_menu_scroll_offset(),(3,0,0)));
+}
 fn update_general_scroll(ui:&HomeWindow){
     /* General has 12 rows in four sections (PROFILE, USERS, DATE & TIME,
      * KEYBOARD). */
@@ -3068,6 +3073,12 @@ fn navigate_settings_view(ui: &HomeWindow, next_view: i32) {
         cancel_controller_remap(ui);
         ui.set_controller_mapping_reset_armed(false);
     }
+    if next_view == 10 && previous_view != 10 {
+        /* Reset System Settings resets menu_confirm/menu_back in inputd
+         * out-of-process, without telling the running Home UI; resync on
+         * entry so a stale toggle state can't linger. */
+        refresh_hint_mapping(ui);
+    }
     if previous_view == 23 && next_view == 0 {
         /* Returning to the rail previews General from the top again. */
         ui.set_general_scroll_offset(0);
@@ -3662,7 +3673,7 @@ fn open_network_detail(ui: &HomeWindow, network: WifiNetworkEntry, return_view: 
 
 /* Controllers & Input rows: RGB Lighting (the last) only with RGB hardware. */
 fn controllers_menu_rows(ui: &HomeWindow) -> i32 {
-    if ui.get_lighting_supported() { 4 } else { 3 }
+    if ui.get_lighting_supported() { 5 } else { 4 }
 }
 
 fn move_model_selection(current: i32, count: i32, delta: i32) -> i32 {
@@ -4221,7 +4232,41 @@ fn face_position(code: i32) -> i32 {
     }
 }
 
+/*
+ * UI confirm/back swap (2026-10-24, user request): a preference for which
+ * face button confirms in nuubOS's own menus, entirely separate from
+ * controllersd's per-controller game mapping (BIND SET only touches
+ * inputd's own global bindings table, never a padmap); a game's own
+ * buttons are unaffected either way. nuubos-emud reads the same bindings
+ * file to keep RetroArch's own menu in agreement (emud.c
+ * ui_confirm_is_east()).
+ */
+fn toggle_action_button_swap(ui: &HomeWindow) {
+    let swapped = ui.get_action_button_swapped();
+    let (confirm, back) = if swapped { (304, 305) } else { (305, 304) };
+    let old_confirm = if swapped { 305 } else { 304 };
+
+    let confirm_ok = input_command(&format!("BIND SET menu_confirm {confirm}"))
+        .map(|reply| reply.trim() == "OK")
+        .unwrap_or(false);
+
+    if confirm_ok {
+        let back_ok = input_command(&format!("BIND SET menu_back {back}"))
+            .map(|reply| reply.trim() == "OK")
+            .unwrap_or(false);
+
+        if !back_ok {
+            /* Don't leave confirm and back on the same button: undo the
+             * confirm change that already went through. */
+            let _ = input_command(&format!("BIND SET menu_confirm {old_confirm}"));
+        }
+    }
+
+    refresh_hint_mapping(ui);
+}
+
 fn refresh_hint_mapping(ui: &HomeWindow) {
+    ui.set_action_button_swapped(binding_code("menu_confirm") == Some(305)); // BTN_EAST
     ui.set_select_face_position(
         binding_code("menu_confirm")
             .map(face_position)
@@ -4778,6 +4823,7 @@ fn handle_settings_action(
                     gameui::reset_services(ui);
                 } else if ui.get_settings_selected_index() == 2 {
                     ui.set_controllers_menu_index(0);
+                    ui.set_controllers_menu_scroll_offset(0);
                     navigate_settings_view(ui, 10);
                 } else if ui.get_settings_selected_index() == 3 {
                     ui.set_gaming_index(0);
@@ -5055,12 +5101,18 @@ fn handle_settings_action(
         }
         /* No RGB Lighting row without RGB hardware. */
         10 => match action {
-            "menu_up" => ui.set_controllers_menu_index(
-                move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), -1)
-            ),
-            "menu_down" => ui.set_controllers_menu_index(
-                move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), 1)
-            ),
+            "menu_up" => {
+                ui.set_controllers_menu_index(
+                    move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), -1)
+                );
+                update_controllers_menu_scroll(ui);
+            }
+            "menu_down" => {
+                ui.set_controllers_menu_index(
+                    move_model_selection(ui.get_controllers_menu_index(), controllers_menu_rows(ui), 1)
+                );
+                update_controllers_menu_scroll(ui);
+            }
             "menu_confirm" => match ui.get_controllers_menu_index() {
                 0 => {
                     ui.set_player_assignment_index(0);
@@ -5072,11 +5124,12 @@ fn handle_settings_action(
                     ui.set_controller_list_scroll_offset(0);
                     navigate_settings_view(ui, 12);
                 }
-                2 if ui.get_rumble_supported() => {
+                2 => toggle_action_button_swap(ui),
+                3 if ui.get_rumble_supported() => {
                     ui.set_rumble_index(0);
                     navigate_settings_view(ui, 16);
                 }
-                3 if ui.get_lighting_supported() => {
+                4 if ui.get_lighting_supported() => {
                     lighting::reset_page(ui);
                     navigate_settings_view(ui, 17);
                 }

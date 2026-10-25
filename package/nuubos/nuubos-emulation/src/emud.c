@@ -3084,6 +3084,46 @@ static const char *const ra_notification_keys[] = {
 	NULL,
 };
 
+/*
+ * UI confirm/back swap (2026-10-24, user request): nuubos-input's own
+ * BIND SET/GET keeps this a preference for which face button confirms in
+ * nuubOS's own menus (Home, Settings, Quick Menu), entirely decoupled from
+ * the per-controller game mapping controllersd sends as the padmap - a
+ * game's own buttons never change either way. RetroArch gets the matching
+ * menu_swap_ok_cancel_buttons so its own menu agrees with nuubOS's; actual
+ * gameplay input is read straight from the padmap and is unaffected.
+ */
+static bool ui_confirm_is_east(void)
+{
+	/* Same two layers and order as inputd's load_bindings(): image
+	 * defaults file first, then the persistent user override, which
+	 * wins when both set menu_confirm. */
+	static const char *const paths[] = {
+		"/etc/nuubos/input-bindings.conf",
+		"/state/config/nuubos-input.conf",
+	};
+	FILE *fp;
+	char line[128];
+	int code;
+	bool result = false;
+	size_t i;
+
+	for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		fp = fopen(paths[i], "r");
+		if (!fp)
+			continue;
+		while (fgets(line, sizeof(line), fp)) {
+			if (sscanf(line, "menu_confirm=%d", &code) == 1) {
+				result = code == 305; /* BTN_EAST */
+				break;
+			}
+		}
+		fclose(fp);
+	}
+
+	return result;
+}
+
 static int write_session_cfg(const char *ra_dir, const char *saves,
 			     const char *states, const char *screenshots,
 			     const struct game_overrides *o, const struct achievements *a,
@@ -3146,11 +3186,14 @@ static int write_session_cfg(const char *ra_dir, const char *saves,
 		"input_menu_toggle_gamepad_combo = \"0\"\n"
 		"input_quit_gamepad_combo = \"0\"\n"
 		"quit_press_twice = \"false\"\n"
-		"menu_swap_ok_cancel_buttons = \"false\"\n"
+		/* RetroArch's own unswapped default already uses East (A) as
+		 * its menu OK: swap only to follow nuubOS to South (B). */
+		"menu_swap_ok_cancel_buttons = \"%s\"\n"
 		"config_save_on_exit = \"true\"\n"
 		"user_language = \"%d\"\n",
 		saves, states, screenshots, ra_dir, ra_dir, ra_dir, ra_dir,
-		ra_dir, ra_dir, ra_dir, retroarch_language(session.user));
+		ra_dir, ra_dir, ra_dir, ui_confirm_is_east() ? "false" : "true",
+		retroarch_language(session.user));
 	/* Port N is reserved for nuubOS game gamepad N (product id N), so
 	 * player order always follows nuubOS player assignment. */
 	for (player = 1; player <= MAX_PLAYERS; player++)

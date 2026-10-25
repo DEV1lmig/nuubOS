@@ -13,7 +13,7 @@ Upstream-Status: Inappropriate [nuubOS specific]
 
 --- a/gfx/video_driver.c
 +++ b/gfx/video_driver.c
-@@ -2410,6 +2410,26 @@
+@@ -2410,6 +2410,27 @@
     return true;
  }
  
