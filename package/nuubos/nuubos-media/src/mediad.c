@@ -9,7 +9,8 @@
  *
  *   video  mpv fullscreen on Wayland with Cedrus decoding (--hwdec=
  *          v4l2request, mpv patch 0001: the DRM PRIME frames go to the GPU
- *          output without a copy; codecs Cedrus lacks are decoded in software
+ *          output without a copy, or copied for widths Panfrost cannot
+ *          import, hwdec_fit(); codecs Cedrus lacks are decoded in software
  *          and shown by the same output), one item, per-user resume (watch-later,
  *          with the file name written so "Continue Watching" can list it).
  *   audio  music without a window (user request 2026-10-12: the user's own
@@ -199,6 +200,11 @@ struct session {
 	char audio_track[128];
 	char sub_track[128];
 	bool has_sub;
+	/* Decoded width and whether Cedrus frames are being copied (see
+	 * hwdec_fit()). */
+	int video_w;
+	bool hwdec_copy;
+	bool hwdec_settled;
 	long long deadline_ms;
 	bool term_sent;
 	int power_client;
@@ -662,6 +668,29 @@ static void observe(int id, const char *property)
 	cJSON_AddItemToArray(a, cJSON_CreateNumber(id));
 	cJSON_AddItemToArray(a, cJSON_CreateString(property));
 	mpv_command(a);
+}
+
+/*
+ * Cedrus writes NV12 with a 32-aligned stride (the video engine reads its
+ * reference frames that way, kernel 0109); Panfrost samples a plane of a
+ * linear dma-buf (mpv's R8/GR88 import) only with a 64-byte aligned one.
+ * Widths in between (1440, 1480...) were rejected and played as a blue
+ * screen (GitHub #2). A video starts with the frames copied (any width,
+ * ~20 % CPU at 1080p24, no dropped frames on the CubeXX) and moves to the
+ * zero-copy import once its width allows it; the others stay copied. A
+ * stride of 64 broke the engine's reference frames (streaks), and
+ * Panfrost given 16 faulted (black video).
+ */
+static void hwdec_fit(void)
+{
+	if (!s.hwdec_copy || s.hwdec_settled || s.video_w <= 0)
+		return;
+	s.hwdec_settled = true;
+	if (((s.video_w + 31) & ~31) % 64 != 0) {
+		log_msg("width %d: hardware decoding with a frame copy", s.video_w);
+		return;
+	}
+	mpv_send("{\"command\":[\"set_property\",\"hwdec\",\"v4l2request\"]}");
 }
 
 static void ask_position(void)
@@ -1147,6 +1176,12 @@ static void handle_mpv_line(const char *line)
 				s.osd_h = v;
 			if (s.osd_until_ms)
 				osd_draw();
+		} else if (!strcmp(name->valuestring, "video-params/w")) {
+			s.video_w = cJSON_IsNumber(data) ? data->valueint : 0;
+			hwdec_fit();
+		} else if (!strcmp(name->valuestring, "hwdec-current")) {
+			s.hwdec_copy = cJSON_IsString(data) && !strcmp(data->valuestring, "v4l2request-copy");
+			hwdec_fit();
 		} else if (!strcmp(name->valuestring, "eof-reached")) {
 			s.eof = cJSON_IsTrue(data);
 			if (s.eof && !s.audio)
@@ -1302,7 +1337,8 @@ static const char *start_mpv(bool audio, const char *target, double start_second
 			/* --hwdec=drm is not a hwdec for the v4l2request hwaccel
 			 * (software decoding, and dmabuf-wayland cannot show software
 			 * frames: black video, found 2026-10-12). */
-			argv[argc++] = (char *)"--hwdec=v4l2request";
+			/* Copied until the width is known (hwdec_fit()). */
+			argv[argc++] = (char *)"--hwdec=v4l2request-copy";
 			argv[argc++] = (char *)"--vo=gpu";
 			argv[argc++] = (char *)"--gpu-context=wayland";
 			/* Bilinear scaling, no dither or linear-light passes: the
@@ -1351,6 +1387,8 @@ static const char *start_mpv(bool audio, const char *target, double start_second
 	s.eof = false;
 	s.audio_track[0] = s.sub_track[0] = '\0';
 	s.has_sub = false;
+	s.video_w = 0;
+	s.hwdec_copy = s.hwdec_settled = false;
 	s.video = false;
 	s.index = 0;
 	s.count = 1;
@@ -1380,6 +1418,8 @@ static const char *start_mpv(bool audio, const char *target, double start_second
 		observe(12, "current-tracks/sub/lang");
 		observe(13, "current-tracks/audio/title");
 		observe(14, "current-tracks/sub/title");
+		observe(18, "video-params/w");
+		observe(19, "hwdec-current");
 	}
 	log_msg("playing %s (pid %d)", audio ? "music" : target, (int)pid);
 	if (audio)
