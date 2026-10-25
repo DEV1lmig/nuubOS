@@ -1352,3 +1352,6 @@
 1351={0} prochains démarrages
 1352=Enregistre tout pendant les 10 prochains démarrages et sauvegarde un rapport à chaque redémarrage ou extinction. Désactivé par défaut : les journaux coûtent en performances et en écritures sur la carte.
 1353=Pas de batterie : laisse le câble d'alimentation branché jusqu'à la fin de la mise à jour
+1354=Démarrage rapide
+1355=Démarre environ 5 secondes plus vite.
+1356=Vérifie la mémoire à chaque démarrage. Peut aider si la console se fige ou redémarre seule.

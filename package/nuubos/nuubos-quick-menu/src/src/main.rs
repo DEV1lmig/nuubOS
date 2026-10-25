@@ -1843,6 +1843,10 @@ fn toast_view(ui: &QuickMenuWindow, n: &Notification) -> Option<ToastView> {
                 _ => tr(ui, 93, "Failed"),
             };
             let (icon, severity, detail) = match n.text("state") {
+                /* A library scrape names the game it is on: a big library
+                 * moves the bar by 1 % only every few dozen games. */
+                "running" if n.text("type") == "scrape-bulk" && !n.text("step").is_empty() =>
+                    (ICON_STORAGE, SEVERITY_INFO, n.text("step").to_owned()),
                 "queued" | "running" => (ICON_STORAGE, SEVERITY_INFO, tr(ui, 91, "Running")),
                 "succeeded" => (ICON_DONE, SEVERITY_SUCCESS, tr(ui, 92, "Completed")),
                 "cancelled" => (ICON_FAILED, SEVERITY_INFO, tr(ui, 596, "Cancelled")),

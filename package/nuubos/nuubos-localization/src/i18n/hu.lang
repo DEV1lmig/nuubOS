@@ -1352,3 +1352,6 @@
 1351=Következő {0} indítás
 1352=Mindent naplóz a következő 10 indításig, és minden újraindításkor vagy kikapcsoláskor jelentést ment. Alapból kikapcsolva: a naplózás teljesítménybe és kártyaírásba kerül.
 1353=Nincs akkumulátor: hagyd csatlakoztatva a tápkábelt, amíg a frissítés be nem fejeződik
+1354=Gyorsindítás
+1355=Körülbelül 5 másodperccel gyorsabban indul.
+1356=Minden indításkor ellenőrzi a memóriát. Segíthet, ha a konzol lefagy vagy magától újraindul.

@@ -1352,3 +1352,6 @@
 1351=Næste {0} opstarter
 1352=Logger alt ved de næste 10 opstarter og gemmer en rapport ved hver genstart eller slukning. Slået fra som standard: logning koster ydeevne og skrivninger på kortet.
 1353=Intet batteri: hold strømkablet tilsluttet, indtil opdateringen er færdig
+1354=Hurtig opstart
+1355=Starter cirka 5 sekunder hurtigere.
+1356=Tjekker hukommelsen ved hver opstart. Kan hjælpe, hvis konsollen fryser eller genstarter af sig selv.

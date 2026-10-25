@@ -1352,3 +1352,6 @@
 1351=Próximos {0} arranques
 1352=Regista tudo nos próximos 10 arranques e guarda um relatório em cada reinício ou encerramento. Desligado por predefinição: os registos custam desempenho e escritas no cartão.
 1353=Sem bateria: mantém o cabo de alimentação ligado até a atualização terminar
+1354=Arranque rápido
+1355=Arranca cerca de 5 segundos mais depressa.
+1356=Verifica a memória em cada arranque. Pode ajudar se a consola bloquear ou reiniciar sozinha.

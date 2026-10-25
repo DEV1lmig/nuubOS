@@ -1352,3 +1352,6 @@
 1351=Next {0} starts
 1352=Logs everything for the next 10 starts and saves a report at each restart or power off. Off by default: logging costs performance and card writes.
 1353=No battery: keep the power cable connected until the update is complete
+1354=Fast Startup
+1355=Starts about 5 seconds faster.
+1356=Checks the memory at every start. Can help if the console freezes or restarts by itself.

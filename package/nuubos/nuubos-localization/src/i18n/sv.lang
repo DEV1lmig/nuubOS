@@ -1352,3 +1352,6 @@
 1351=Nästa {0} starter
 1352=Loggar allt under de nästa 10 starterna och sparar en rapport vid varje omstart eller avstängning. Av som standard: loggning kostar prestanda och skrivningar till kortet.
 1353=Inget batteri: håll strömkabeln ansluten tills uppdateringen är klar
+1354=Snabbstart
+1355=Startar cirka 5 sekunder snabbare.
+1356=Kontrollerar minnet vid varje start. Kan hjälpa om konsolen fryser eller startar om av sig själv.

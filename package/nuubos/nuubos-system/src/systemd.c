@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/statvfs.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -75,6 +76,7 @@ struct config_state {
     int sleep_after_min;        /* 0=off */
     int charge_limit;           /* 80..100 %, 100=off */
     bool hypersleep;            /* sleep with the SoC off (default) */
+    bool fast_startup;          /* cold starts reuse the DRAM training (default) */
 };
 
 struct runtime_state {
@@ -207,6 +209,17 @@ static int diag_boots(void)
     return n < 0 ? 0 : n > DIAG_MAX_BOOTS ? DIAG_MAX_BOOTS : n;
 }
 
+static int run_argv(char *const argv[]);
+
+/* The heartbeat kept on STATE through a freeze (nuubos-recovery). */
+static void diag_persist(const char *action)
+{
+    char *argv[] = { "/usr/libexec/nuubos-diag-persist", (char *)action, NULL };
+
+    if (run_argv(argv) != 0)
+        fprintf(stderr, "systemd: diag-persist %s failed\n", action);
+}
+
 static int set_diagnostics(int boots)
 {
     char tmp[128];
@@ -215,6 +228,7 @@ static int set_diagnostics(int boots)
     if (boots == 0) {
         if (unlink(DIAG_BOOTS) != 0 && errno != ENOENT) return -1;
         if (unlink(DIAG_ACTIVE) != 0 && errno != ENOENT) return -1;
+        diag_persist("stop");
         return 0;
     }
     mkdir("/state/diagnostics", 0700);
@@ -234,6 +248,7 @@ static int set_diagnostics(int boots)
     f = fopen(DIAG_ACTIVE, "w");
     if (!f) return -1;
     fclose(f);
+    diag_persist("start");
     /* With the mode off the service logs are links to /dev/null
      * (S04nuubos-diagnostics): gone, a log a service opens from now on is
      * real; complete from the next boot. */
@@ -267,6 +282,7 @@ static int atomic_save_config(const struct config_state *cfg)
     fprintf(f, "SLEEP_AFTER_MIN=%d\n", cfg->sleep_after_min);
     fprintf(f, "CHARGE_LIMIT=%d\n", cfg->charge_limit);
     fprintf(f, "HYPERSLEEP=%d\n", cfg->hypersleep ? 1 : 0);
+    fprintf(f, "FAST_STARTUP=%d\n", cfg->fast_startup ? 1 : 0);
     if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
         fclose(f); unlink(tmp); return -1;
     }
@@ -294,6 +310,7 @@ static void config_defaults(struct config_state *cfg)
     cfg->sleep_after_min = DEFAULT_SLEEP_AFTER_MIN;
     cfg->charge_limit = DEFAULT_CHARGE_LIMIT;
     cfg->hypersleep = true;
+    cfg->fast_startup = true;
 }
 
 /* Charge limit: 80..100 in steps of 5 (100 = charge to full). */
@@ -332,9 +349,47 @@ static void load_config(struct config_state *cfg)
             if (valid_charge_limit(x)) cfg->charge_limit = x;
         } else if (!strcmp(key, "HYPERSLEEP")) {
             cfg->hypersleep = strcmp(val, "0") != 0;
+        } else if (!strcmp(key, "FAST_STARTUP")) {
+            cfg->fast_startup = strcmp(val, "0") != 0;
         }
     }
     fclose(f);
+}
+
+/*
+ * Fast Startup (user decision 2026-10-25, on by default; community freezes
+ * on an RG SP): a cold start reuses the last DRAM training when the SPL
+ * finds its mark in RTC GP0 (U-Boot 0006/0007, platform.md "Cached DRAM
+ * training"). Off, the mark is cleared at every start and after every
+ * HyperSleep resume (whose SPL sets it again), so any next cold start, a
+ * crash included, trains in full (~5 s). Entering HyperSleep writes its own
+ * resume flag into GP0: the resume is unaffected.
+ */
+#define RTC_PAGE 0x07000000UL
+#define RTC_GP0 0x100
+#define DRAM_TRAINED_MARK 0x4e440001u
+
+static void apply_fast_startup(const struct config_state *cfg)
+{
+    volatile uint32_t *rtc;
+    int fd;
+
+    if (cfg->fast_startup)
+        return;
+    fd = open("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "systemd: fast startup: /dev/mem: %s\n", strerror(errno));
+        return;
+    }
+    rtc = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, RTC_PAGE);
+    close(fd);
+    if (rtc == MAP_FAILED) {
+        fprintf(stderr, "systemd: fast startup: mmap: %s\n", strerror(errno));
+        return;
+    }
+    if (rtc[RTC_GP0 / 4] == DRAM_TRAINED_MARK)
+        rtc[RTC_GP0 / 4] = 0;
+    munmap((void *)rtc, 4096);
 }
 
 static int run_argv(char *const argv[])
@@ -597,6 +652,7 @@ static void enter_sleep(struct runtime_state *st)
     st->last_sleep_elapsed_ms = boottime_ms() - st->stage_enter_ms;
     if (run_lifecycle_helper(LIFECYCLE_POST_WAKE, "wake") != 0)
         fprintf(stderr, "systemd: post-wake hook failed\n");
+    apply_fast_startup(&st->cfg);
 
     snprintf(st->last_wake_reason,sizeof(st->last_wake_reason),
              suspend_rc != 0 ? "suspend-failed" : "user");
@@ -1040,6 +1096,7 @@ static void reply_status(int fd, const struct runtime_state *st)
         "charge_limit=%d\n"
         "charge_limit.supported=%d\n"
         "hypersleep=%d\n"
+        "fast_startup=%d\n"
         "battery.percent=%d\n"
         "battery.state=%s\n"
         "cpu.freq_khz=%lld\n"
@@ -1086,6 +1143,7 @@ static void reply_status(int fd, const struct runtime_state *st)
         st->cfg.charge_limit,
         charge_limit_path() ? 1 : 0,
         st->cfg.hypersleep ? 1 : 0,
+        st->cfg.fast_startup ? 1 : 0,
         st->battery_percent,st->battery_state,
         cpu,gpu,tcpu,tgpu,mem_total_kib,mem_available_kib,uptime,model,kernel,ip,
         sv.sd1_health,sv.sd1_action,sv.userdata_total,sv.userdata_free,
@@ -1191,6 +1249,13 @@ static void handle_command(struct client *c, struct runtime_state *st, const cha
         if(x!=0 && x!=1){(void)write_all(c->fd,"ERR invalid value\n");return;}
         st->cfg.hypersleep=x==1;
         if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
+    }
+    if(sscanf(line,"SET FAST_STARTUP %d",&x)==1){
+        if(x!=0 && x!=1){(void)write_all(c->fd,"ERR invalid value\n");return;}
+        st->cfg.fast_startup=x==1;
+        if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
+        apply_fast_startup(&st->cfg);
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
     if(sscanf(line,"SET DIAGNOSTICS %d",&x)==1){
@@ -1318,6 +1383,7 @@ int main(void)
     mkdir("/run/nuubos",0755);
     load_config(&st.cfg);
     (void)apply_charge_limit(st.cfg.charge_limit);
+    apply_fast_startup(&st.cfg);
     st.idle_stage=IDLE_ACTIVE;
     st.stage_enter_ms=boottime_ms();
     snprintf(st.last_wake_reason,sizeof(st.last_wake_reason),"none");

@@ -1,0 +1,104 @@
+#!/bin/sh
+#
+# Diagnostic mode: what a freeze or a reset would take with it (RAM is
+# lost, no pstore; community report 2026-10-25, RG SP freezes and resets).
+# Every 5 s a heartbeat line (temperatures, battery voltage and current,
+# CPU frequency, memory, Wi-Fi traffic, the game) is appended to STATE and
+# synced, and the tail of the kernel log is rewritten there whenever it
+# changed. After an unclean end the next start moves both next to its
+# unclean record (S04nuubos-diagnostics); a clean Restart / Power Off
+# removes them. Only while the diagnostic mode is on: a small synced write
+# every 5 s.
+#
+#   nuubos-diag-persist start|stop
+
+DIR=/state/diagnostics/persist
+HB="$DIR/heartbeat.log"
+KM="$DIR/kmsg.log"
+PIDFILE=/run/nuubos/diag-persist.pid
+INTERVAL=5
+MAX_LINES=4000
+
+synced_append()
+{
+    dd of="$1" oflag=append conv=notrunc,fsync 2>/dev/null
+}
+
+synced_replace()
+{
+    dd of="$1" conv=fsync 2>/dev/null
+}
+
+sysval()
+{
+    cat "$1" 2>/dev/null || echo -
+}
+
+heartbeat()
+{
+    temps=""
+    for z in /sys/class/thermal/thermal_zone*; do
+        temps="$temps $(cat "$z/type" 2>/dev/null | cut -d- -f1)=$(sysval "$z/temp")"
+    done
+    bat=/sys/class/power_supply/axp20x-battery
+    usb=/sys/class/power_supply/axp20x-usb
+    set -- $(cat /proc/loadavg 2>/dev/null)
+    load="$1 $2 $3"
+    mem="$(awk '/^MemAvailable:/ { a = $2 } /^SwapFree:/ { s = $2 } /^SwapTotal:/ { t = $2 }
+        END { printf "avail=%d swap_used=%d", a / 1024, (t - s) / 1024 }' /proc/meminfo 2>/dev/null)"
+    emu="$(nuubos-emuctl status 2>/dev/null | awk -F= '$1 == "state" || $1 == "system" || $1 == "core" { printf "%s=%s ", $1, $2 }')"
+    printf '%s up=%s load=%s cpu_khz=%s%s bat=%s%%,%suV,%suA,%s usb=%s %s wlan=%s,rx=%s,tx=%s %s\n' \
+        "$(date +%T)" "$(cut -d' ' -f1 /proc/uptime)" "$load" \
+        "$(sysval /sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq)" "$temps" \
+        "$(sysval $bat/capacity)" "$(sysval $bat/voltage_now)" "$(sysval $bat/current_now)" \
+        "$(sysval $bat/status)" "$(sysval $usb/online)" "$mem" \
+        "$(sysval /sys/class/net/wlan0/operstate)" "$(sysval /sys/class/net/wlan0/statistics/rx_bytes)" \
+        "$(sysval /sys/class/net/wlan0/statistics/tx_bytes)" "$emu"
+}
+
+run()
+{
+    mkdir -p "$DIR"
+    last=""
+    n=0
+    while :; do
+        heartbeat | synced_append "$HB"
+        k="$(dmesg | tail -n 1)"
+        if [ "$k" != "$last" ]; then
+            dmesg | tail -n 400 | synced_replace "$KM"
+            last="$k"
+        fi
+        n=$((n + 1))
+        if [ "$n" -ge 200 ]; then
+            n=0
+            if [ "$(wc -l < "$HB")" -gt "$MAX_LINES" ]; then
+                tail -n $((MAX_LINES / 2)) "$HB" > "/run/nuubos/diag-persist.tmp" &&
+                    synced_replace "$HB" < "/run/nuubos/diag-persist.tmp"
+                rm -f "/run/nuubos/diag-persist.tmp"
+            fi
+        fi
+        sleep "$INTERVAL"
+    done
+}
+
+case "${1:-}" in
+start)
+    pid="$(cat "$PIDFILE" 2>/dev/null)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && exit 0
+    "$0" run </dev/null >/dev/null 2>&1 &
+    echo $! > "$PIDFILE"
+    ;;
+stop)
+    pid="$(cat "$PIDFILE" 2>/dev/null)"
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    rm -f "$PIDFILE"
+    ;;
+run)
+    run
+    ;;
+*)
+    echo "Usage: $0 start|stop" >&2
+    exit 1
+    ;;
+esac
+exit 0

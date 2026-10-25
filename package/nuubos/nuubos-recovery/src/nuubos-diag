@@ -130,6 +130,32 @@ hardware()
     cat_redacted "$R/proc/bus/input/devices"
 }
 
+# HDMI and audio (community report 2026-10-25, no sound on a TV): whether
+# the TV's EDID was read (no EDID = DVI mode, no audio), its audio
+# capabilities, the selected route and the PipeWire graph.
+display_audio()
+{
+    sec hdmi
+    for c in "$R"/sys/class/drm/card*-*; do
+        [ -r "$c/status" ] || continue
+        printf '%s status=%s edid_bytes=%s\n' "${c##*/}" "$(cat "$c/status" 2>/dev/null)" \
+            "$(wc -c < "$c/edid" 2>/dev/null || echo 0)"
+        [ -r "$c/modes" ] && head -n 3 "$c/modes"
+    done
+    sec audio
+    cat_redacted "$R/proc/asound/cards"
+    for e in "$R"/proc/asound/card*/eld#*; do
+        [ -r "$e" ] && { echo "-- $e"; cat "$e"; }
+    done
+    for h in "$R"/proc/asound/card*/pcm*p/sub0/hw_params; do
+        [ -r "$h" ] && { echo "-- $h"; cat "$h"; }
+    done
+    printf -- '-- nuubos-audioctl status\n'
+    bounded 5 nuubos-audioctl status
+    printf -- '-- wpctl status\n'
+    XDG_RUNTIME_DIR=/run/nuubos/pipewire bounded 5 wpctl status
+}
+
 network()
 {
     sec network
@@ -203,6 +229,19 @@ logs_dir()
         [ -f "$f" ] || continue
         redact < "$f" > "$1/logs/boot-${f##*/}"
     done
+    # Starts that ended in a freeze or reset (S04nuubos-diagnostics), with
+    # the heartbeat and kernel log kept through them in diagnostic mode.
+    for f in "$R"/state/diagnostics/unclean/*.txt "$R"/state/diagnostics/unclean/*.log; do
+        [ -f "$f" ] || continue
+        mkdir -p "$1/unclean"
+        redact < "$f" > "$1/unclean/${f##*/}"
+    done
+    # This start's heartbeat (nuubos-diag-persist).
+    for f in "$R"/state/diagnostics/persist/*.log; do
+        [ -f "$f" ] || continue
+        mkdir -p "$1/persist"
+        redact < "$f" > "$1/persist/${f##*/}"
+    done
     # Diagnostic mode (S04nuubos-diagnostics): everything collected in RAM
     # during this boot, whole files.
     if [ -d "$R/run/nuubos/diagnostics" ]; then
@@ -218,6 +257,7 @@ summary()
 {
     identity
     hardware
+    display_audio
     network
     services
     config

@@ -14,7 +14,9 @@
 #include <unistd.h>
 
 #define RTC_PAGE 0x07000000UL
+#define RTC_GP0 0x100
 #define RTC_GP5 0x114
+#define RTC_GP6 0x118
 
 int main(void)
 {
@@ -46,6 +48,11 @@ int main(void)
 			} else {
 				printf("rtc_gp5=0x%08x\n", gp5);
 			}
+			/* GP0: the trained-DRAM mark; GP6: the SPL/BL31 step of
+			 * this start (0x5a5a0024 cached DRAM training, 0x5a5a0034
+			 * HyperSleep resume; platform.md "Cached DRAM training"). */
+			printf("rtc_gp0=0x%08x\n", rtc[RTC_GP0 / 4]);
+			printf("rtc_gp6=0x%08x\n", rtc[RTC_GP6 / 4]);
 			munmap((void *)rtc, 4096);
 		}
 		close(fd);

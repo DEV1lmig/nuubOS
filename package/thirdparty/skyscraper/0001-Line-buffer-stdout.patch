@@ -1,0 +1,21 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] Line-buffer stdout
+
+nuubos-scraper follows the per-game progress lines through a pipe, where
+stdout was block-buffered: progress arrived in bursts of several games.
+
+Signed-off-by: nuubOS Project <noreply@nuubos.invalid>
+---
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -136,6 +136,10 @@
+ 
+ 
+ int main(int argc, char *argv[]) {
++    // nuubOS: a pipe gets every line at once (the progress lines
++    // "#n/m, (found/missed)" drive nuubos-scraper's progress), not in 4 KiB
++    // blocks.
++    setvbuf(stdout, NULL, _IOLBF, 0);
+ #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+     struct sigaction sigIntHandler;
+ 

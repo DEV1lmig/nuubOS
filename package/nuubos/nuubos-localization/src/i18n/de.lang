@@ -1352,3 +1352,6 @@
 1351=Nächste {0} Starts
 1352=Protokolliert alles für die nächsten 10 Starts und speichert bei jedem Neustart oder Ausschalten einen Bericht. Standardmäßig aus: Protokolle kosten Leistung und Schreibvorgänge auf der Karte.
 1353=Kein Akku: Lass das Stromkabel angeschlossen, bis das Update abgeschlossen ist
+1354=Schnellstart
+1355=Startet etwa 5 Sekunden schneller.
+1356=Prüft den Speicher bei jedem Start. Kann helfen, wenn die Konsole einfriert oder von selbst neu startet.

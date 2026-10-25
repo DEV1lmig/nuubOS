@@ -730,6 +730,10 @@ static void reconcile_selection(struct audio_state *state)
 	(void)copy_string(state->applied_route,
 			  sizeof(state->applied_route),
 			  state->selected);
+	fprintf(stderr, "nuubos-audiod: route %s applied (mode=%s sink=%s hdmi=%d/%d headphones=%d bluetooth=%d)\n",
+		state->selected, state->mode, state->sink_id,
+		state->hdmi_known ? 1 : 0, state->hdmi_available ? 1 : 0,
+		state->headphones_available ? 1 : 0, state->bluetooth_available ? 1 : 0);
 }
 
 static void uppercase_copy(char *dst, size_t size, const char *src)
@@ -2949,6 +2953,9 @@ static void refresh_hdmi_state(struct audio_state *state)
 
 	closedir(dir);
 
+	if (known != state->hdmi_known || available != state->hdmi_available)
+		fprintf(stderr, "nuubos-audiod: HDMI connector %s\n",
+			!known ? "unknown" : available ? "connected" : "disconnected");
 	state->hdmi_known = known;
 	state->hdmi_available = available;
 	reconcile_selection(state);
@@ -3474,6 +3481,11 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/* Diagnostic mode (docs/dev/system.md): start-stop-daemon -b leaves
+	 * stderr on /dev/null; the log is what the support bundle collects. */
+	if (access("/run/nuubos/diagnostics/active", F_OK) == 0 &&
+	    freopen("/run/nuubos/audiod.log", "a", stderr) != NULL)
+		setvbuf(stderr, NULL, _IOLBF, 0);
 	signal(SIGINT, handle_signal);
 	signal(SIGTERM, handle_signal);
 	/* Control clients use short timeouts. If one disconnects before a reply,
