@@ -1305,6 +1305,11 @@ static const char *start_mpv(bool audio, const char *target, double start_second
 			argv[argc++] = (char *)"--hwdec=v4l2request";
 			argv[argc++] = (char *)"--vo=gpu";
 			argv[argc++] = (char *)"--gpu-context=wayland";
+			/* Bilinear scaling, no dither or linear-light passes: the
+			 * default scalers cost the Mali-G31 frames (1080p24 H.264
+			 * on the CubeXX dropped ~5 frames/s in hardware, ~12/s for
+			 * software-decoded 10-bit; with this, none; GitHub #2). */
+			argv[argc++] = (char *)"--profile=fast";
 			/* Full native resolution on HDMI (wlroots 0002,
 			 * NUUBOS_CLIENT_FULL_SCALE_APP_IDS in nuubos-ui-launch). */
 			argv[argc++] = (char *)"--wayland-app-id=nuubos-video";
