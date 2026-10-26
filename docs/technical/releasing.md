@@ -86,9 +86,11 @@ nuubOS uses [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 | Nightly | `X.Y.Z-nightly.YYYYMMDD` | `1.0.0-nightly.20261020` | development build towards `X.Y.Z`, UTC build date |
 
 - Exception for 1.0.0 (maintainer decision, 2026-10-24): `1.0.0-rc.3` also brings
-  PortMaster, the A/B button swap in the menus and per-system settings, the most
-  requested features; `1.0.0-rc.4` follows after a week of feedback with bug fixes
-  only, then `1.0.0`.
+  PortMaster and the A/B button swap in the menus, the most requested features
+  (per-system settings, planned too, moved after 1.0.0); `1.0.0-rc.4` (maintainer
+  decision, 2026-10-26) brings the bug fixes from RC3 plus four small community
+  requests: power key short press = Sleep, a terminal app, hiding RetroArch from the
+  Quick Menu, disc change for multi-disc games in the Quick Menu; then `1.0.0`.
 - `PATCH` = bug fixes only, `MINOR` = new features, `MAJOR` = an incompatible change
   (a new SD card layout, a reflash needed).
 - `VERSION` holds the release in preparation: `1.0.0-rc.1` while RC 1 of 1.0.0 is
