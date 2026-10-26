@@ -9,7 +9,7 @@ nuubOS boots straight into a controller-first home screen, plays games through
 RetroArch, streams from your PC, plays music and video, and keeps itself up to date
 with signed, rollback-safe updates.
 
-> **Status: release candidate (1.0.0-rc.2).** Bug fixes only until 1.0.0; nightly
+> **Status: release candidate (1.0.0-rc.3).** Bug fixes only until 1.0.0; nightly
 > images are for testers. Keep a backup of your saves. See [Known issues](https://github.com/baf93/nuubOS/wiki/Known-Issues).
 
 **[Download](https://github.com/baf93/nuubOS/releases)** ·
@@ -27,8 +27,11 @@ with signed, rollback-safe updates.
 - **Emulation**: about 80 systems through RetroArch and libretro cores tuned for the
   H700. Save states with rotating slots, hotkeys, per-game settings, bezels and a CRT
   look, RetroAchievements with Hardcore Mode, cheats and LAN netplay.
+- **Ports**: PortMaster, downloaded from the console, installs PC games and engines
+  ported to handhelds; they play from your library like any other game, each in its
+  own sandbox.
 - **Several users**: each person gets their own profile, saves, language, theme
-  ("Mood") and settings.
+  ("Mood") and settings, Confirm/Back buttons included.
 - **PC streaming**: Moonlight for Sunshine and GeForce Experience, and Steam Link (you
   download Valve's app from the console).
 - **Media**: a music and video player for local files, network shares and Jellyfin.
@@ -66,7 +69,8 @@ Details and the exact device names: [Supported Devices](https://github.com/baf93
    [Raspberry Pi Imager](https://www.raspberrypi.com/software/): *Choose OS* →
    *Use custom* → the downloaded file. Answer *No* if Imager offers OS customisation.
 3. Open the small `NUUBOS_BOOT` partition on the card, edit `nuubos.cfg` and set your
-   device, for example `DEVICE=rg40xx-v`.
+   device, for example `DEVICE=rg40xx-v` (Windows line endings, spaces and quotes are
+   fine).
 4. Put the card in slot 1 (SD1) and switch the console on. The first boot sets up the
    storage and opens the setup wizard.
 
