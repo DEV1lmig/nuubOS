@@ -13,13 +13,22 @@
   <!-- Controller-first: no pointer image. A visible (even 1 px, software)
        cursor makes wlroots composite every frame and rules out direct
        scan-out of fullscreen clients. Moving a real pointer shows it again. -->
+  <!-- Windows that keep their own size (below) open in the middle. -->
+  <placement>
+    <policy>center</policy>
+  </placement>
+
   <windowRules>
     <!-- A window that is not fullscreen fills the screen: ports
          (PortMaster) open plain SDL windows at their own size. Every nuubOS
          client is fullscreen already; no window has frames (labwc patch
-         0006). -->
+         0006). Only resizable windows ("normal"): a fixed-size SDL window
+         maximized loses its window surface to the new size, and software
+         renderers that never ask for it again (Ren'Py) show nothing. -->
     <windowRule title="*">
       <action name="HideCursor" />
+    </windowRule>
+    <windowRule title="*" type="normal">
       <action name="Maximize" />
     </windowRule>
   </windowRules>

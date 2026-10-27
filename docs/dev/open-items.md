@@ -64,7 +64,7 @@
   6. Power off / Restart black screen before the splash (RC3 item 9).
   7. USERDATA VolumeDirty at boot (RC3 item 10): FIXED 2026-10-27 (platform.md "Boot time": cover pack open read-write during the final splash; 8/8 clean Restarts).
   8. HDMI with no sound on some TVs (RC2 reports 1 and 7) and the DS stylus on the RG35XX H (reports 2 and 7): support bundles asked.
-  9. Ports still open (emulation.md "Still open"): Godot 4 / Java / Ren'Py ports, A/B of Xbox-layout pads, `mod_nuubOS.txt` only at install, upstream PR.
+  9. Ports (emulation.md "Still open"): 2026-10-27 Godot 4 (westonwrap's direct path) and Java (Mindustry: `zip`) FIXED, fixed-size windows no longer maximized (labwc rc.xml), upstream PR PortMaster-GUI #366 opened; still open: Ren'Py (software renderer one frame per ~20 s), A/B of Xbox-layout pads (user decision: follow the Confirm/Back swap or not).
   10. Steam Link: UI cut at 720x720, closes after the TV goes off and on.
   11. Kernel memory corruption (KFENCE, RC3 item 11), RG SP freezes/OTA checksum with Fast Startup off (RC2 reports 4-5), pstore/ramoops (roadmap.md "Diagnostic mode").
   12. Bluetooth + Wi-Fi audit (RC3 item 8).

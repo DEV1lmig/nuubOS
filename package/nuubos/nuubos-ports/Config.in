@@ -12,6 +12,7 @@ config BR2_PACKAGE_NUUBOS_PORTS
 	depends on BR2_TOOLCHAIN_HAS_THREADS_NPTL # openal
 	depends on BR2_PACKAGE_OPENAL_ARCH_SUPPORTS # openal
 	select BR2_PACKAGE_BASH # port scripts
+	select BR2_PACKAGE_ZIP # port scripts that patch their game archive (Mindustry)
 	select BR2_PACKAGE_BUBBLEWRAP # sandbox
 	select BR2_PACKAGE_PYTHON3 # PortMaster GUI (pugwash)
 	select BR2_PACKAGE_PYTHON3_SSL # downloads
@@ -40,5 +41,5 @@ config BR2_PACKAGE_NUUBOS_PORTS
 	  updated by itself, and the ports it installs, each run in a
 	  sandbox (bubblewrap) that only sees its own folder. The image
 	  holds what PortMaster and the ports expect from the system:
-	  bash, Python 3, SDL2 and its image/ttf/mixer/gfx libraries,
+	  bash, zip, Python 3, SDL2 and its image/ttf/mixer/gfx libraries,
 	  OpenAL, Vorbis and Theora.
