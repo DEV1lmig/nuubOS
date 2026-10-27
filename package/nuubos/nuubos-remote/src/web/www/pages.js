@@ -526,6 +526,9 @@ async function gameSettingsPage(id, system) {
   const def = (v) => C(528, 'Default ({0})', v);
   const aspects = { core: C(529, 'As the game'), '4:3': '4:3', '16:9': '16:9', full: C(530, 'Full Screen'), integer: C(531, 'Integer Scaling') };
   const filters = { sharp: C(532, 'Sharp'), smooth: C(533, 'Smooth'), pixel: C(534, 'Pixel Perfect'), crt: C(777, 'CRT Effect') };
+  const accuracies = { fast: C(1315, 'Fast'), accurate: C(1316, 'Accurate') };
+  const paks = { '': C(1340, 'Rumble Pak'), memory: C(1341, 'Controller Pak') };
+  const resolutions = { auto: C(52, 'Auto'), '1x': C(1379, '1x'), '2x': C(1380, '2x'), custom: C(315, 'Custom') };
   const cores = (s.cores || '').split(/[ ,]/).filter(Boolean);
   const set = (key, value) => act('game.set', { id, system, key, value }, { topics: ['game_settings'] });
   const pick = async (key, title, options, cur) => { const v = await choose(title, options, cur); if (v !== null) await set(key, v); };
@@ -538,6 +541,17 @@ async function gameSettingsPage(id, system) {
         on: () => pick('aspect', C(526, 'Aspect Ratio'), [{ value: '', label: def(C(531, 'Integer Scaling')) }, ...Object.entries(aspects).map(([value, label]) => ({ value, label }))], s.aspect) }),
       row({ key: 'filter', title: C(527, 'Video Filter'), value: s.filter ? filters[s.filter] : def(filters[s.filter_default] || ''), chevron: true,
         on: () => pick('filter', C(527, 'Video Filter'), [{ value: '', label: def(filters[s.filter_default] || '') }, ...['sharp', 'smooth', 'pixel'].map((v) => ({ value: v, label: filters[v] }))], s.filter) }),
+      s.accuracy_supported === '1' ? row({ key: 'accuracy', title: C(1314, 'Emulation Accuracy'),
+        detail: ['dreamcast', 'naomi', 'atomiswave'].includes(system) ? C(1383, 'Fast can draw smoke and glass wrong') : C(1317, 'Choose Accurate if the game misbehaves'),
+        value: s.accuracy ? accuracies[s.accuracy] : def(accuracies[s.accuracy_default] || accuracies.fast), chevron: true,
+        on: () => pick('accuracy', C(1314, 'Emulation Accuracy'), [{ value: '', label: def(accuracies[s.accuracy_default] || accuracies.fast) }, ...Object.entries(accuracies).map(([value, label]) => ({ value, label }))], s.accuracy) }) : null,
+      s.pak_supported === '1' ? row({ key: 'pak', title: C(1339, 'Controller Accessory'), detail: C(1342, 'One fits at a time: choose Controller Pak if the game saves on it'),
+        value: s.pak === 'memory' ? paks.memory : paks[''], chevron: true,
+        on: () => pick('pak', C(1339, 'Controller Accessory'), Object.entries(paks).map(([value, label]) => ({ value, label })), s.pak || '') }) : null,
+      s.resolution_supported === '1' ? row({ key: 'resolution', title: C(454, 'Resolution'),
+        detail: s.resolution_default === 'auto' ? C(1381, 'Auto: 1x on the console, 2x on a TV') : C(1382, '2x is sharper but can slow the game down'),
+        value: s.resolution ? resolutions[s.resolution] : def(resolutions[s.resolution_default] || resolutions['1x']), chevron: true,
+        on: () => pick('resolution', C(454, 'Resolution'), [{ value: '', label: def(resolutions[s.resolution_default] || resolutions['1x']) }, { value: '1x', label: resolutions['1x'] }, { value: '2x', label: resolutions['2x'] }], s.resolution) }) : null,
       row({ key: 'reset', title: C(535, 'Reset Game Settings'), detail: C(536, 'Changes apply the next time the game starts'),
         arm: { prompt: C(598, 'Press again to reset') }, on: () => act('game.reset', { id }, { topics: ['game_settings'] }) }))],
   };

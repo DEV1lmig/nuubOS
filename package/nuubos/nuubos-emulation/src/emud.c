@@ -50,7 +50,8 @@
  * /userdata/users/<id>/appdata/nuubos-emulation/games/<game>.conf. They
  * apply at the next launch: core choice, aspect ratio and video filter on
  * top of the user's RetroArch configuration, and the emulation accuracy of
- * melonDS-nuubOS in the user's core options for the session. RetroArch saves its whole
+ * melonDS-nuubOS and Flycast (translucent sorting) and the 3D render resolution (resolution_options) in the
+ * user's core options for the session. RetroArch saves its whole
  * configuration on exit, so the keys a session overrode are put back to
  * the user's own values when it ends.
  *
@@ -437,7 +438,50 @@ struct game_overrides {
 	 * default, empty) or memory (Controller Pak saves). One slot, as on the
 	 * console (user request 2026-10-21: "scelta per gioco"). */
 	char n64_pak[8];
+	/* 3D render resolution: "" (Auto), "1x" or "2x". */
+	char resolution[8];
 };
+
+/* Cores whose 3D render resolution Game Settings chooses (user decision
+ * 2026-10-27): the option and its 1x (native) and 2x values, matched by the
+ * prefix of the core id (bundled and downloaded builds share the keys).
+ * Auto keeps the user's core option, except PCSX ReARMed: 1x on the
+ * handheld screen, 2x on HDMI (`auto_hdmi`). */
+static const struct resolution_option {
+	const char *core;
+	const char *key;
+	const char *x1;
+	const char *x2;
+	bool auto_hdmi;
+} resolution_options[] = {
+	{ "pcsx_rearmed", "pcsx_rearmed_neon_enhancement_enable", "disabled", "enabled", true },
+	{ "ppsspp", "ppsspp_internal_resolution", "480x272", "960x544", false },
+	{ "flycast", "reicast_internal_resolution", "640x480", "1280x960", false },
+	{ "yabasanshiro", "yabasanshiro_resolution_mode", "original", "2x", false },
+	{ "parallel_n64", "parallel-n64-screensize", "320x240", "640x480", false },
+	{ "mupen64plus_next", "mupen64plus-43screensize", "320x240", "640x480", false },
+};
+
+/* Flycast's translucent polygon sorting is its emulation accuracy (user
+ * decision 2026-10-27, GitHub #16): Fast = per strip (cheaper, smoke, glass
+ * and water can be drawn in the wrong order), Accurate = per triangle, the
+ * nuubOS default. */
+#define FLYCAST_SORTING "reicast_alpha_sorting"
+#define FLYCAST_SORTING_FAST "per-strip (fast, least accurate)"
+#define FLYCAST_SORTING_ACCURATE "per-triangle (normal)"
+
+static bool flycast_core(const char *core)
+{
+	return !strncmp(core, "flycast", 7);
+}
+
+static const struct resolution_option *resolution_option(const char *core)
+{
+	for (size_t i = 0; i < sizeof(resolution_options) / sizeof(resolution_options[0]); i++)
+		if (!strncmp(core, resolution_options[i].core, strlen(resolution_options[i].core)))
+			return &resolution_options[i];
+	return NULL;
+}
 
 
 static volatile sig_atomic_t stop_requested;
@@ -1515,6 +1559,8 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 			copy_text(o->stylus, sizeof(o->stylus), eq);
 		else if (!strcmp(line, "n64_pak"))
 			copy_text(o->n64_pak, sizeof(o->n64_pak), eq);
+		else if (!strcmp(line, "resolution"))
+			copy_text(o->resolution, sizeof(o->resolution), eq);
 	}
 	fclose(fp);
 }
@@ -1530,7 +1576,8 @@ static int save_overrides(const char *user, const char *game, const struct game_
 	overrides_path(user, game, path, sizeof(path));
 	/* Nothing overridden: no file, the game inherits everything. */
 	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
-	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] && !o->n64_pak[0])
+	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] &&
+	    !o->n64_pak[0] && !o->resolution[0])
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
 	if (mkdir_p(dir) != 0)
@@ -1557,6 +1604,8 @@ static int save_overrides(const char *user, const char *game, const struct game_
 		fprintf(fp, "stylus=%s\n", o->stylus);
 	if (o->n64_pak[0])
 		fprintf(fp, "n64_pak=%s\n", o->n64_pak);
+	if (o->resolution[0])
+		fprintf(fp, "resolution=%s\n", o->resolution);
 	if (ferror(fp))
 		rc = -1;
 	if (fclose(fp) != 0)
@@ -3553,6 +3602,30 @@ static const char *launch(const char *game, const char *mode, const char *net)
 				write_core_option(path, key, pak);
 			}
 	}
+	{
+		/* 3D render resolution for this session: the game's choice, or
+		 * Auto (PCSX ReARMed by the output; the others keep the user's
+		 * option). A key RetroArch has not written yet holds the core's
+		 * default, its native value, so that is what comes back. */
+		const struct resolution_option *res = resolution_option(session.core);
+		const char *choice = overrides.resolution;
+		char value[64];
+
+		if (flycast_core(session.core) && overrides.accuracy[0]) {
+			if (!read_core_option(path, FLYCAST_SORTING, value, sizeof(value)))
+				write_core_option(path, FLYCAST_SORTING, FLYCAST_SORTING_ACCURATE);
+			session_core_option(FLYCAST_SORTING, !strcmp(overrides.accuracy, "fast") ?
+					    FLYCAST_SORTING_FAST : FLYCAST_SORTING_ACCURATE);
+		}
+
+		if (res && !choice[0] && res->auto_hdmi)
+			choice = hdmi_active() ? "2x" : "1x";
+		if (res && choice[0]) {
+			if (!read_core_option(path, res->key, value, sizeof(value)))
+				write_core_option(path, res->key, res->x1);
+			session_core_option(res->key, !strcmp(choice, "2x") ? res->x2 : res->x1);
+		}
+	}
 
 	snprintf(path, sizeof(path), "%s/config/global.glslp", ra_dir);
 	(void)seed_file(DEFAULT_SHADER_PRESET, path);
@@ -4182,8 +4255,11 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 	}
 	available_cores(fields[1], cores, sizeof(cores));
 	if (!strcmp(verb, "GAME_SETTINGS")) {
-		char out[1024];
+		char out[1280];
 		char accuracy_default[16];
+		char res_value[64];
+		const char *res_default = "";
+		const struct resolution_option *res;
 		const char *effective;
 		struct emu_settings settings;
 		char screen[16];
@@ -4195,22 +4271,44 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 		def_core[0] = '\0';
 		(void)resolve_core(fields[1], def_core, sizeof(def_core), def_path, sizeof(def_path));
 		effective = o.core[0] && list_has(cores, o.core) ? o.core : def_core;
-		/* Emulation accuracy: melonDS-nuubOS only; the default is the
-		 * user's core option (nuubOS ships "fast"). */
+		/* Emulation accuracy: melonDS-nuubOS and Flycast; the default is
+		 * the user's core option (nuubOS ships "fast" for melonDS, per
+		 * triangle sorting = "accurate" for Flycast). */
 		snprintf(def_path, sizeof(def_path),
 			 USERS_DIR "/%s/appdata/retroarch/retroarch-core-options.cfg", user);
-		if (!read_core_option(def_path, "melonds_accuracy", accuracy_default,
-				      sizeof(accuracy_default)))
+		if (flycast_core(effective)) {
+			char value[64];
+
+			copy_text(accuracy_default, sizeof(accuracy_default),
+				  read_core_option(def_path, FLYCAST_SORTING, value, sizeof(value)) &&
+				  !strcmp(value, FLYCAST_SORTING_FAST) ? "fast" : "accurate");
+		} else if (!read_core_option(def_path, "melonds_accuracy", accuracy_default,
+					     sizeof(accuracy_default))) {
 			copy_text(accuracy_default, sizeof(accuracy_default), "fast");
+		}
+		/* Render resolution: what Auto gives (auto = by the output, else
+		 * the user's core option as 1x, 2x or custom; missing = the core's
+		 * native default). */
+		res = resolution_option(effective);
+		if (res && res->auto_hdmi)
+			res_default = "auto";
+		else if (res && read_core_option(def_path, res->key, res_value, sizeof(res_value)))
+			res_default = !strcmp(res_value, res->x1) ? "1x" :
+				      !strcmp(res_value, res->x2) ? "2x" : "custom";
+		else if (res)
+			res_default = "1x";
 		len = snprintf(out, sizeof(out),
 			       "core=%s\ncore_default=%s\ncore_override=%s\ncores=%s\n"
 			       "aspect=%s\nfilter=%s\nfilter_default=%s\n"
 			       "accuracy_supported=%d\naccuracy=%s\naccuracy_default=%s\n"
-			       "pak_supported=%d\npak=%s\nend=1\n",
+			       "pak_supported=%d\npak=%s\n"
+			       "resolution_supported=%d\nresolution=%s\nresolution_default=%s\nend=1\n",
 			       effective, def_core, o.core, cores, o.aspect, o.filter,
 			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp",
-			       !strcmp(effective, MELONDS_NUUBOS), o.accuracy, accuracy_default,
-			       !strcmp(fields[1], "n64"), o.n64_pak);
+			       !strcmp(effective, MELONDS_NUUBOS) || flycast_core(effective),
+			       o.accuracy, accuracy_default,
+			       !strcmp(fields[1], "n64"), o.n64_pak,
+			       res != NULL, o.resolution, res_default);
 		if (len > 0 && write_all(c->fd, out, (size_t)len) != 0)
 			close_client(c);
 		return;
@@ -4235,6 +4333,9 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 	else if (!strcmp(fields[2], "pak") &&
 		 (!fields[3][0] || !strcmp(fields[3], "rumble") || !strcmp(fields[3], "memory")))
 		copy_text(o.n64_pak, sizeof(o.n64_pak), strcmp(fields[3], "rumble") ? fields[3] : "");
+	else if (!strcmp(fields[2], "resolution") &&
+		 (!fields[3][0] || !strcmp(fields[3], "1x") || !strcmp(fields[3], "2x")))
+		copy_text(o.resolution, sizeof(o.resolution), fields[3]);
 	else {
 		reply(c, "ERR value\n");
 		return;

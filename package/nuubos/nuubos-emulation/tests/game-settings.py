@@ -17,14 +17,15 @@ t = tempfile.mkdtemp()
 run, ud, share, state = t + '/run', t + '/userdata', t + '/share', t + '/state/users'
 emu_share, cores = t + '/emushare', t + '/cores'
 user = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-for d in (run + '/user', ud + '/roms/snes', share, emu_share + '/shaders', cores,
+for d in (run + '/user', ud + '/roms/snes', ud + '/roms/psx', share, emu_share + '/shaders', cores,
           state + '/' + user + '/secrets', t + '/inc/nuubos'):
     os.makedirs(d, exist_ok=True)
 open(share + '/systems.conf', 'w').write(open(lib + '/systems.conf').read())
 open(run + '/user/active', 'w').write(user + '\n')
 open(ud + '/roms/snes/Mario.sfc', 'w').write('x' * 64)
-open(emu_share + '/cores.conf', 'w').write('snes|snes9x,bsnes,missing\n')
-for c in ('snes9x', 'bsnes'):
+open(ud + '/roms/psx/Crash.chd', 'w').write('x' * 64)
+open(emu_share + '/cores.conf', 'w').write('snes|snes9x,bsnes,missing\npsx|pcsx_rearmed\nn64|parallel_n64_nuubos\ndreamcast|flycast_nuubos\n')
+for c in ('snes9x', 'bsnes', 'pcsx_rearmed', 'parallel_n64_nuubos', 'flycast_nuubos'):
     open(cores + '/%s_libretro.so' % c, 'w').write('')
 open(emu_share + '/retroarch.cfg', 'w').write(
     'aspect_ratio_index = "22"\nvideo_smooth = "false"\nvideo_shader_enable = "true"\n'
@@ -66,6 +67,8 @@ fake = t + '/retroarch'
 open(fake, 'w').write(r'''#!/bin/sh
 echo "$*" > "%s/args"
 cfg=""; app=""; core=""
+for a in "$@"; do base=$a; done
+base=${base##*/}; base=${base%%.*}
 while [ $# -gt 0 ]; do
   case "$1" in --config) cfg="$2"; shift;; --appendconfig) app="$2"; shift;; -L) core="$2"; shift;; esac
   shift
@@ -82,10 +85,10 @@ while read -r line; do
     SCREENSHOT) printf 'PNG' > "$shots/Mario-001.png" ;;
     CHEATS_LOAD*) echo "$line" >> "%s/cheats-loaded"; echo "CHEATS_LOAD OK" ;;
     NETPLAY_STOP) echo "NETPLAY_STOP OK"; echo "NETPLAY off" ;;
-    SAVE_STATE_SLOT*) n=${line#SAVE_STATE_SLOT }; f="$states/Mario.state$n"
-      [ "$n" = 0 ] && f="$states/Mario.state"; [ "$n" = -1 ] && f="$states/Mario.state.auto"
+    SAVE_STATE_SLOT*) n=${line#SAVE_STATE_SLOT }; f="$states/$base.state$n"
+      [ "$n" = 0 ] && f="$states/$base.state"; [ "$n" = -1 ] && f="$states/$base.state.auto"
       sleep 0.05; printf S > "$f"; echo "SAVE_STATE_SLOT $n OK" ;;
-    QUIT) grep -q 'savestate_auto_save = "true"' "$app" && printf A > "$states/Mario.state.auto"; break ;;
+    QUIT) grep -q 'savestate_auto_save = "true"' "$app" && printf A > "$states/$base.state.auto"; break ;;
   esac
 done
 # config_save_on_exit: the appended keys end up in the user file.
@@ -149,7 +152,7 @@ def wait(cond, secs=5):
     return False
 
 try:
-    wait(lambda: 'games=1' in cmd('libraryd.sock', 'STATUS'))
+    wait(lambda: 'games=2' in cmd('libraryd.sock', 'STATUS'))
     game = [l for l in cmd('libraryd.sock', 'GAMES\tsystem:snes').splitlines() if l.startswith('game=')][0].split('=')[1].split('\t')[0]
     gs = cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game)
     check('defaults', 'core=snes9x\n' in gs and 'core_override=\n' in gs and 'cores=snes9x,bsnes,mesen-s\n' in gs)
@@ -167,6 +170,9 @@ try:
     check('set accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\taccurate' % game).startswith('OK'))
     check('accuracy listed', 'accuracy=accurate\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
     check('clear accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\t' % game).startswith('OK'))
+    # Flycast: translucent sorting is its accuracy, per triangle by default.
+    check('accuracy for flycast', 'accuracy_supported=1\naccuracy=\naccuracy_default=accurate\n'
+          in cmd('emud.sock', 'GAME_SETTINGS\t%s\tdreamcast' % game))
     # Nintendo 64 accessory (2026-10-21): Rumble Pak unless the game keeps
     # Controller Pak saves; only n64 games offer it.
     check('pak not for snes', 'pak_supported=0\n' in gs)
@@ -176,6 +182,16 @@ try:
           and 'pak=memory\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tn64' % game))
     check('rumble is the default (stored empty)', cmd('emud.sock', 'GAME_SET\t%s\tn64\tpak\trumble' % game).startswith('OK')
           and 'pak=\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tn64' % game))
+    # 3D render resolution (2026-10-27): the cores with a 1x/2x option.
+    check('resolution not for snes', 'resolution_supported=0\n' in gs)
+    check('resolution auto for psx', 'resolution_supported=1\nresolution=\nresolution_default=auto\n'
+          in cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % game))
+    check('resolution native default for n64', 'resolution_supported=1\nresolution=\nresolution_default=1x\n'
+          in cmd('emud.sock', 'GAME_SETTINGS\t%s\tn64' % game))
+    check('reject bad resolution', cmd('emud.sock', 'GAME_SET\t%s\tpsx\tresolution\t4x' % game).startswith('ERR'))
+    check('set resolution', cmd('emud.sock', 'GAME_SET\t%s\tpsx\tresolution\t2x' % game).startswith('OK')
+          and 'resolution=2x\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % game))
+    check('clear resolution', cmd('emud.sock', 'GAME_SET\t%s\tpsx\tresolution\t' % game).startswith('OK'))
     conf = open('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)).read()
     check('only overrides stored', conf == 'core=bsnes\naspect=4:3\nfilter=pixel\n')
 
@@ -230,6 +246,26 @@ try:
     check('unrelated keys kept', 'menu_driver = "ozone"' in ucfg)
     open(state + '/' + user + '/secrets/retroachievements.conf', 'w').write(
         'USERNAME=alice\nTOKEN=tok123\nENABLED=1\nHARDCORE=0\n')
+
+    # PS1 resolution Auto: 1x on the panel, 2x on HDMI, a game's choice
+    # wins; the user's core option comes back after the session.
+    psx = [l for l in cmd('libraryd.sock', 'GAMES\tsystem:psx').splitlines() if l.startswith('game=')][0].split('=')[1].split('\t')[0]
+    copts = radir + '/retroarch-core-options.cfg'
+    def psx_session(hdmi):
+        open(t + '/hdmi-enabled', 'w').write('enabled\n' if hdmi else 'disabled\n')
+        ok = cmd('emud.sock', 'LAUNCH\t' + psx).startswith('OK')
+        ok = ok and wait(lambda: 'state=running' in cmd('emud.sock', 'STATUS'))
+        m = [l for l in open(copts).read().splitlines() if l.startswith('pcsx_rearmed_neon_enhancement_enable ')]
+        cmd('emud.sock', 'QUIT')
+        ok = ok and wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+        return ok and m[0].split('"')[1] if m else None
+    check('psx auto 1x on the panel', psx_session(False) == 'disabled')
+    check('psx auto 2x on HDMI', psx_session(True) == 'enabled')
+    check('psx user option restored', 'pcsx_rearmed_neon_enhancement_enable = "enabled"\n' not in open(copts).read())
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tresolution\t1x' % psx)
+    check('psx game choice wins on HDMI', psx_session(True) == 'disabled')
+    cmd('emud.sock', 'GAME_RESET\t' + psx)
+    open(t + '/hdmi-enabled', 'w').write('disabled\n')
 
     check('reset', cmd('emud.sock', 'GAME_RESET\t' + game).startswith('OK'))
     check('reset removes file', not os.path.exists('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)))

@@ -33,7 +33,7 @@ static void usage(void)
 		"  hotkey ACTION [ARG]            run a game hotkey (screen_layout, stylus right...)\n"
 		"  quit\n"
 		"  game-settings GAME SYSTEM       per-game overrides of the active user\n"
-		"  game-set GAME SYSTEM core|aspect|filter|accuracy VALUE (\"\" = inherit)\n"
+		"  game-set GAME SYSTEM core|aspect|filter|accuracy|pak|resolution VALUE (\"\" = inherit)\n"
 		"  game-reset GAME\n"
 		"  states [GAME_ID]               save states (running game or GAME_ID)\n"
 		"  settings                       emulation settings of the active user\n"

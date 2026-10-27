@@ -87,8 +87,17 @@ fn merge(a: &mut Value, b: Value, prefix: &str) {
     }
 }
 
+/* A catalog name: "it", or a regional code such as "pt-br", "es-419",
+ * "zh-cn"; anything else is English. */
+fn catalog_lang(lang: &str) -> &str {
+    let (base, region) = lang.split_once('-').unwrap_or((lang, "ok"));
+    let valid = base.len() == 2 && base.chars().all(|c| c.is_ascii_lowercase())
+        && (2..=3).contains(&region.len()) && region.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    if valid { lang } else { "en" }
+}
+
 pub fn catalog(lang: &str) -> Vec<String> {
-    let lang = if lang.len() == 2 && lang.chars().all(|c| c.is_ascii_lowercase()) { lang } else { "en" };
+    let lang = catalog_lang(lang);
     let text = fs::read_to_string(format!("{}/usr/share/nuubos/i18n/{lang}.lang", crate::root())).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -491,7 +500,7 @@ pub fn action(b: &Value) -> R {
         "emu.quit" => { sock_ok("emud", "QUIT")?; ok() }
         "game.set" => {
             sock_ok("emud", &format!("GAME_SET\t{}\t{}\t{}\t{}", game_id(&a("id"))?, token(&a("system"))?,
-                one_of(&a("key"), &["core", "aspect", "filter"])?, plain(&a("value"), 64)?))?;
+                one_of(&a("key"), &["core", "aspect", "filter", "accuracy", "pak", "resolution"])?, plain(&a("value"), 64)?))?;
             ok()
         }
         "game.reset" => { sock_ok("emud", &format!("GAME_RESET\t{}", game_id(&a("id"))?))?; ok() }
@@ -612,6 +621,13 @@ mod tests {
         assert!(int("51", 0, 50).is_err());
         assert!(emu_key("hotkey_quit").is_ok());
         assert!(emu_key("core_path").is_err());
+        assert_eq!(catalog_lang("it"), "it");
+        assert_eq!(catalog_lang("pt-br"), "pt-br");
+        assert_eq!(catalog_lang("es-419"), "es-419");
+        assert_eq!(catalog_lang("zh-cn"), "zh-cn");
+        assert_eq!(catalog_lang("../x"), "en");
+        assert_eq!(catalog_lang("zh-cn/../../x"), "en");
+        assert_eq!(catalog_lang("ITA"), "en");
     }
 
     #[test]
