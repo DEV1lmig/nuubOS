@@ -170,8 +170,8 @@ try:
     check('set accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\taccurate' % game).startswith('OK'))
     check('accuracy listed', 'accuracy=accurate\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
     check('clear accuracy', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taccuracy\t' % game).startswith('OK'))
-    # Flycast: translucent sorting is its accuracy, per triangle by default.
-    check('accuracy for flycast', 'accuracy_supported=1\naccuracy=\naccuracy_default=accurate\n'
+    # Flycast: translucent sorting is its accuracy, per strip (Fast) by default.
+    check('accuracy for flycast', 'accuracy_supported=1\naccuracy=\naccuracy_default=fast\n'
           in cmd('emud.sock', 'GAME_SETTINGS\t%s\tdreamcast' % game))
     # Nintendo 64 accessory (2026-10-21): Rumble Pak unless the game keeps
     # Controller Pak saves; only n64 games offer it.

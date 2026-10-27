@@ -3613,7 +3613,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 
 		if (flycast_core(session.core) && overrides.accuracy[0]) {
 			if (!read_core_option(path, FLYCAST_SORTING, value, sizeof(value)))
-				write_core_option(path, FLYCAST_SORTING, FLYCAST_SORTING_ACCURATE);
+				write_core_option(path, FLYCAST_SORTING, FLYCAST_SORTING_FAST);
 			session_core_option(FLYCAST_SORTING, !strcmp(overrides.accuracy, "fast") ?
 					    FLYCAST_SORTING_FAST : FLYCAST_SORTING_ACCURATE);
 		}
@@ -4273,7 +4273,7 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 		effective = o.core[0] && list_has(cores, o.core) ? o.core : def_core;
 		/* Emulation accuracy: melonDS-nuubOS and Flycast; the default is
 		 * the user's core option (nuubOS ships "fast" for melonDS, per
-		 * triangle sorting = "accurate" for Flycast). */
+		 * triangle sorting = "accurate" for Flycast, which ships per strip). */
 		snprintf(def_path, sizeof(def_path),
 			 USERS_DIR "/%s/appdata/retroarch/retroarch-core-options.cfg", user);
 		if (flycast_core(effective)) {
@@ -4281,7 +4281,7 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 
 			copy_text(accuracy_default, sizeof(accuracy_default),
 				  read_core_option(def_path, FLYCAST_SORTING, value, sizeof(value)) &&
-				  !strcmp(value, FLYCAST_SORTING_FAST) ? "fast" : "accurate");
+				  !strcmp(value, FLYCAST_SORTING_ACCURATE) ? "accurate" : "fast");
 		} else if (!read_core_option(def_path, "melonds_accuracy", accuracy_default,
 					     sizeof(accuracy_default))) {
 			copy_text(accuracy_default, sizeof(accuracy_default), "fast");

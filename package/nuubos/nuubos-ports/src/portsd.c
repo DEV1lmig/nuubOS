@@ -1195,6 +1195,7 @@ static int open_inside(const char *path, int flags)
 			return -1;
 		memset(&how, 0, sizeof(how));
 		how.flags = (uint64_t)(flags | O_CLOEXEC);
+		how.mode = (flags & O_CREAT) ? 0644 : 0;
 		how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
 		fd = (int)syscall(SYS_openat2, dir, rel, &how, sizeof(how));
 		close(dir);
@@ -1236,6 +1237,73 @@ static int loop_attach(int image, char *dev, size_t size)
 	}
 	close(control);
 	return -1;
+}
+
+/*
+ * PortMaster's Ren'Py runtimes ship config.gl_enable = False: Ren'Py's
+ * software renderer, one frame every ~20 s on the H700. Panfrost runs its
+ * GLES2 renderer, so a renpy_*.squashfs mount gets, over its
+ * renpy/config.py, a copy with gl_enable = True, config.mipmap (their
+ * build reads it, their config.py lacks it; True = upstream Ren'Py) and
+ * the GLES2 renderer on Panfrost itself: port scripts point SDL at gl4es
+ * (SDL_VIDEO_GL/EGL_DRIVER, LD_LIBRARY_PATH), whose desktop GL drew a
+ * black window, so SDL gets Mesa's libraries by their full paths.
+ * Called in the sandbox's mount namespace after the mount. Best effort:
+ * the port starts either way.
+ */
+static void renpy_enable_gl(const char *image, const char *mountpoint)
+{
+	static const char key[] = "\ngl_enable = False\n";
+	static const char copy[] = "/tmp/.nuubos-renpy-config.py";
+	static const char gles2[] =
+		"\n# nuubOS: GLES2 on Panfrost, not desktop GL through gl4es.\n"
+		"import os\n"
+		"os.environ[\"SDL_VIDEO_GL_DRIVER\"] = \"/usr/lib/libGLESv2.so.2\"\n"
+		"os.environ[\"SDL_VIDEO_EGL_DRIVER\"] = \"/usr/lib/libEGL.so.1\"\n"
+		"os.environ[\"RENPY_RENDERER\"] = \"gles2\"\n";
+	static char text[256 * 1024];
+	const char *name = strrchr(image, '/');
+	const char *at;
+	char path[PATH_MAX];
+	size_t n = 0;
+	ssize_t got;
+	int fd, src, dst, mfd;
+	bool ok;
+
+	name = name ? name + 1 : image;
+	if (strncmp(name, "renpy_", 6) != 0)
+		return;
+	snprintf(path, sizeof(path), "%s/renpy/config.py", mountpoint);
+	if ((fd = open_inside(path, O_RDONLY)) < 0)
+		return;
+	while (n < sizeof(text) - 1 && (got = read(fd, text + n, sizeof(text) - 1 - n)) > 0)
+		n += (size_t)got;
+	close(fd);
+	text[n] = '\0';
+	if (n >= sizeof(text) - 1 || (at = strstr(text, key)) == NULL)
+		return;
+	if ((fd = open_inside(copy, O_WRONLY | O_CREAT | O_TRUNC)) < 0)
+		return;
+	ok = write_all(fd, text, (size_t)(at - text)) == 0 &&
+	     write_all(fd, "\ngl_enable = True\n", 18) == 0 &&
+	     write_all(fd, at + strlen(key), n - (size_t)(at - text) - strlen(key)) == 0 &&
+	     (strstr(text, "\nmipmap =") || write_all(fd, "\nmipmap = True\n", 15) == 0) &&
+	     write_all(fd, gles2, strlen(gles2)) == 0;
+	close(fd);
+	src = ok ? open_inside(copy, O_PATH) : -1;
+	dst = ok ? open_inside(path, O_PATH) : -1;
+	mfd = src >= 0 && dst >= 0 ?
+	      open_tree(src, "", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH) : -1;
+	if (mfd < 0 || move_mount(mfd, "", dst, "", MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH) != 0)
+		log_msg("portsd: Ren'Py OpenGL for %s failed: %s", name, strerror(errno));
+	else
+		log_msg("portsd: Ren'Py OpenGL on for %s", name);
+	if (mfd >= 0)
+		close(mfd);
+	if (src >= 0)
+		close(src);
+	if (dst >= 0)
+		close(dst);
 }
 
 /*
@@ -1300,6 +1368,7 @@ static const char *mount_request(pid_t peer, char *line)
 			return "namespace";
 		if (move_mount(mfd, "", dst, "", MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH) != 0)
 			return "mount";
+		renpy_enable_gl(a, b);
 		return NULL;
 	}
 	if (!strcmp(op, "BIND") && b) {
