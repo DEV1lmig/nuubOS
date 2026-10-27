@@ -1,0 +1,97 @@
+From: nuubOS <nuubos@localhost>
+Date: Tue, 27 Oct 2026 23:30:00 +0100
+Subject: [PATCH] Run the frontend cheats at every VBlank (nuubOS)
+
+retro_cheat_set ran an Action Replay code once, when the frontend set
+it: the values were written a single time and the game overwrote them
+on the next frame, so a cheat turned on did nothing (an infinite health
+code, for one). The codes now go into a code list of their own that the
+AR engine runs at every ARM7 VBlank, as the real device does;
+retro_cheat_reset and unloading the game clear it. The code name no
+longer reads past the end of the string and a code longer than 64 pairs
+is cut instead of overflowing.
+---
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -16,6 +16,7 @@
+ #include <file/file_path.h>
+ #include <compat/strl.h>
+ 
++#include "AREngine.h"
+ #include "Config.h"
+ #include "Platform.h"
+ #include "NDS.h"
+@@ -1223,8 +1224,11 @@
+    return _handle_load_game(0, info);
+ }
+ 
++static void retro_cheats_clear(void);
++
+ void retro_unload_game(void)
+ {
++   retro_cheats_clear();
+    compose_stop();
+    if (emu_thread_rt)
+       set_emu_thread_rt(false);
+@@ -1317,26 +1321,54 @@
+       return 0;
+ }
+ 
++/* nuubOS: the frontend's cheats are Action Replay codes. They go into a
++ * code list of their own that the AR engine runs at every ARM7 VBlank, as
++ * the real device does; running a code once when it was set wrote its
++ * values a single time and the game overwrote them on the next frame. */
++static ARCodeFile *retro_cheats = nullptr;
++
++static void retro_cheats_clear(void)
++{
++   AREngine::SetCodeFile(nullptr);
++   if (retro_cheats)
++      retro_cheats->Categories.clear();
++}
++
+ void retro_cheat_reset(void)
+-{}
++{
++   retro_cheats_clear();
++}
+ 
+ void retro_cheat_set(unsigned index, bool enabled, const char *code)
+ {
+-   if (!enabled)
++   if (!enabled || !code)
+       return;
+    ARCode curcode;
+    std::string str(code);
+    char * pch =  &*str.begin();
+-   memcpy(curcode.Name, code, 128);
++   memset(curcode.Name, 0, sizeof(curcode.Name));
++   strlcpy(curcode.Name, code, sizeof(curcode.Name));
+    curcode.Enabled=enabled;
+    curcode.CodeLen=0;
+    pch = strtok(pch, " +");
+-   while (pch != NULL)
++   while (pch != NULL && curcode.CodeLen < sizeof(curcode.Code) / sizeof(curcode.Code[0]))
+    {
+-    curcode.Code[curcode.CodeLen]=(u32)strtol(pch, NULL, 16);
+-    log_cb(RETRO_LOG_INFO, "Adding Code %s (%d) \n",pch, curcode.Code[curcode.CodeLen]);
++    curcode.Code[curcode.CodeLen]=(u32)strtoul(pch, NULL, 16);
+     curcode.CodeLen++;
+     pch = strtok(NULL, " +");
+    }
+-   AREngine::RunCheat(curcode);
++   /* AR codes are pairs of words. */
++   curcode.CodeLen &= ~1u;
++   if (curcode.CodeLen == 0)
++      return;
++   if (!retro_cheats)
++      retro_cheats = new ARCodeFile("");
++   if (retro_cheats->Categories.empty())
++   {
++      ARCodeCat cat;
++      memset(cat.Name, 0, sizeof(cat.Name));
++      retro_cheats->Categories.push_back(cat);
++   }
++   retro_cheats->Categories.front().Codes.push_back(curcode);
++   AREngine::SetCodeFile(retro_cheats);
+ }

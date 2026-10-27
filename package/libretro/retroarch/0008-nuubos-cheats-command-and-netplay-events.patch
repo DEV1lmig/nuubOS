@@ -8,8 +8,8 @@ interface.
 - CHEATS_LOAD <file>: replaces the session's cheats with the ones of a
   .cht file written by the session manager (the user's choice per game)
   and applies them; an empty argument clears them. Replies
-  "CHEATS_LOAD OK|FAILED". Refused while netplay runs and in hardcore
-  mode.
+  "CHEATS_LOAD OK|FAILED". Loading is refused while netplay runs and in
+  hardcore mode; clearing always works.
 - NETPLAY_STOP: stops hosting or leaves the host (the netplay host
   toggle hotkey is an input bit that a paused game may never see).
   Replies "NETPLAY_STOP OK|FAILED".
@@ -30,35 +30,37 @@ Upstream-Status: Inappropriate [nuubOS session manager integration]
  #ifdef HAVE_NETWORKING
  #include <net/net_compat.h>
  #include <net/net_socket.h>
-@@ -837,6 +838,85 @@
+@@ -837,6 +838,87 @@
     return true;
  }
  
 +/* nuubOS: the session's cheats are a file the session manager writes
 + * (the user's choice per game, cheatN_enable). Replaces every cheat of
 + * the session with the file's and applies them; an empty argument clears
-+ * them. Refused while netplay runs (RetroArch never allows cheats then)
-+ * and in hardcore mode (applying would leave it). */
++ * them. Loading is refused while netplay runs (RetroArch never allows
++ * cheats then) and in hardcore mode (applying would leave it); clearing
++ * always works (cheats RetroArch restored from its own game file). */
 +bool command_cheats_load(command_t *cmd, const char *arg)
 +{
 +   char reply[64];
 +   size_t _len;
 +   bool ret = true;
++   bool clear = string_is_empty(arg);
 +
 +#ifdef HAVE_CHEATS
 +#ifdef HAVE_NETWORKING
-+   if (netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_DATA_INITED, NULL))
++   if (!clear && netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_DATA_INITED, NULL))
 +      ret = false;
 +#endif
 +#ifdef HAVE_CHEEVOS
-+   if (rcheevos_hardcore_active())
++   if (!clear && rcheevos_hardcore_active())
 +      ret = false;
 +#endif
 +   if (ret)
 +   {
 +      cheat_manager_state_free();
 +      cheat_manager_alloc_if_empty();
-+      if (!string_is_empty(arg))
++      if (!clear)
 +         ret = cheat_manager_load(arg, true);
 +      /* Also clears the core's cheats when none is left. */
 +      cheat_manager_apply_cheats(false);

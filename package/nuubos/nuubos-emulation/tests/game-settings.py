@@ -53,12 +53,12 @@ cht = 'cheats = 3\n\ncheat0_desc = "Lives"\ncheat0_code = "7E0DBE:09"\ncheat0_en
 # extracts the game's files.
 import zipfile
 with zipfile.ZipFile(ud + '/cheats/libretro/cheats.zip', 'w') as z:
-    for n in ('Mario (USA).cht', 'Mario (USA) (Game Genie).cht', 'Zelda (USA).cht'):
+    for n in ('Mario (USA).cht', 'Mario (USA) (Game Genie).cht', 'Mario (Demo).cht', 'Zelda (USA).cht'):
         z.writestr('Nintendo - Super Nintendo Entertainment System/' + n, cht)
     z.writestr('Nintendo - Game Boy/Mario (USA).cht', cht)
 open(ud + '/cheats/libretro/index.txt', 'w').write(''.join(
     'Nintendo - Super Nintendo Entertainment System/%s\n' % n
-    for n in ('Mario (USA).cht', 'Mario (USA) (Game Genie).cht', 'Zelda (USA).cht'))
+    for n in ('Mario (USA).cht', 'Mario (USA) (Game Genie).cht', 'Mario (Demo).cht', 'Zelda (USA).cht'))
     + 'Nintendo - Game Boy/Mario (USA).cht\n')
 open(ud + '/cheats/snes/Mario.cht', 'w').write(cht)
 open(t + '/inc/nuubos/notify.h', 'w').write(open(notify_h).read())
@@ -377,10 +377,15 @@ try:
     # Cheats.
     cmd('emud.sock', 'SET\tbezels\t0')
     check('cheats need a game', cmd('emud.sock', 'CHEATS').startswith('ERR no-session'))
+    if os.path.exists(t + '/cheats-loaded'):
+        os.remove(t + '/cheats-loaded')
     launch('new')
+    # RetroArch's own saved cheats of the game are cleared without the user's.
+    check('no cheats cleared at launch', wait(lambda: os.path.exists(t + '/cheats-loaded'))
+          and open(t + '/cheats-loaded').read() == 'CHEATS_LOAD\n')
     ch = cmd('emud.sock', 'CHEATS')
     lists = [l.split('=', 1)[1].split('\t')[1] for l in ch.splitlines() if l.startswith('list=')]
-    check('cheat lists ranked', lists == ['Mario', 'Mario (USA)', 'Mario (USA) (Game Genie)'])
+    check('cheat lists ranked', lists == ['Mario', 'Mario (USA)', 'Mario (USA) (Game Genie)', 'Mario (Demo)'])
     check('game lists extracted', os.path.exists(coll + '/Mario (USA) (Game Genie).cht')
           and not os.path.exists(coll + '/Zelda (USA).cht')
           and not os.path.exists(ud + '/cheats/libretro/Nintendo - Game Boy'))
@@ -413,7 +418,9 @@ try:
     os.remove(t + '/cheats-loaded')
     launch('new')
     check('no cheats in hardcore', 'available=0\nreason=hardcore\n' in cmd('emud.sock', 'CHEATS')
-          and cmd('emud.sock', 'CHEAT_SET\t1\t1') == 'ERR hardcore\n' and not os.path.exists(t + '/cheats-loaded'))
+          and cmd('emud.sock', 'CHEAT_SET\t1\t1') == 'ERR hardcore\n'
+          and wait(lambda: os.path.exists(t + '/cheats-loaded'))
+          and open(t + '/cheats-loaded').read() == 'CHEATS_LOAD\n')
     check('no netplay in hardcore', cmd('emud.sock', 'NETPLAY_HOST') == 'ERR hardcore\n')
     cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
     open(state + '/' + user + '/secrets/retroachievements.conf', 'w').write(

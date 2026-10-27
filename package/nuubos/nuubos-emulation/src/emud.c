@@ -2929,9 +2929,62 @@ static void add_cheat_list(struct cheat_list *lists, int *count, const char *pat
 	lists[at].rank = rank;
 }
 
+/* Whether a name has a word (letters and digits between other characters),
+ * case-insensitive. */
+static bool has_word(const char *name, const char *word)
+{
+	size_t len = strlen(word);
+
+	for (const char *p = name; *p; p++) {
+		if (strncasecmp(p, word, len) || (p > name && isalnum((unsigned char)p[-1])) ||
+		    isalnum((unsigned char)p[len]))
+			continue;
+		return true;
+	}
+	return false;
+}
+
+/* Whether a list is of the ROM's region: the region's name or its short
+ * forms ("(Europe)", "[EU]"; the PSP lists use the short ones). */
+static bool same_region(const char *name, const char *region)
+{
+	static const char *const aliases[][4] = {
+		{ "Europe", "EU", "EUR", NULL }, { "USA", "US", NULL },
+		{ "Japan", "JP", "JPN", NULL }, { "Korea", "KR", NULL },
+		{ "China", "CN", NULL }, { "Asia", "AS", NULL },
+	};
+
+	if (!region[0])
+		return false;
+	if (has_word(name, region))
+		return true;
+	for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
+		if (strcasecmp(aliases[i][0], region))
+			continue;
+		for (int k = 1; aliases[i][k]; k++)
+			if (has_word(name, aliases[i][k]))
+				return true;
+	}
+	return false;
+}
+
+/* Whether a list is of another release than the ROM (a demo, a beta, the
+ * PlayStation Store version of a disc): its addresses differ. */
+static bool other_release(const char *name, const char *stem)
+{
+	static const char *const tags[] = { "Demo", "Kiosk", "Beta", "Proto", "Prototype", "Sample" };
+
+	for (size_t i = 0; i < sizeof(tags) / sizeof(tags[0]); i++)
+		if (has_word(name, tags[i]) && !has_word(stem, tags[i]))
+			return true;
+	return strcasestr(name, "PlayStation Store") && !has_word(stem, "PSN") &&
+	       !strcasestr(stem, "PlayStation Store");
+}
+
 /* Rank of a list for the ROM: the one named exactly like the ROM first,
  * then those of its region, then the others (Game Genie, Action
- * Replay...); -1 when its title is another. */
+ * Replay...), lists of another release (demos...) last; -1 when its title
+ * is another. */
 static int cheat_rank(const char *name, const char *stem, const char *key, const char *region)
 {
 	char other[NAME_MAX + 1];
@@ -2939,7 +2992,9 @@ static int cheat_rank(const char *name, const char *stem, const char *key, const
 	title_key(name, other, sizeof(other));
 	if (strcmp(other, key))
 		return -1;
-	return !strcasecmp(name, stem) ? 0 : region[0] && strstr(name, region) ? 1 : 2;
+	if (!strcasecmp(name, stem))
+		return 0;
+	return (same_region(name, region) ? 1 : 2) + (other_release(name, stem) ? 2 : 0);
 }
 
 /* The collection's files of the ROM's title in the system's databases
@@ -3861,7 +3916,10 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	session.fast_forward = false;
 	session.started_ms = monotonic_ms();
 	copy_text(session.net_launch, sizeof(session.net_launch), net_address[0] ? "connect" : net);
-	/* The user's cheats for the game (never with netplay or hardcore). */
+	/* The user's cheats for the game (never with netplay or hardcore).
+	 * RetroArch restores the cheats it saved in its own file of the game
+	 * when it last closed (<core>/<game>.cht, those turned on included):
+	 * without cheats of the user's they are cleared. */
 	if (!cheats_blocked() && overrides.cheats[0]) {
 		struct cheat_list lists[MAX_CHEAT_LISTS];
 		int count = cheat_lists(session.system, session.rom, lists);
@@ -3869,6 +3927,8 @@ static const char *launch(const char *game, const char *mode, const char *net)
 
 		current_cheat_file(&overrides, lists, count, file, sizeof(file));
 		apply_session_cheats(&overrides, file);
+	} else {
+		ra_command("CHEATS_LOAD");
 	}
 	log_msg("emud: launch game=%s system=%s core=%s pid=%d user=%s start=%d shader=%s render=%d hardcore=%d net=%s cheats=%d",
 		session.game, session.system, session.core, (int)pid,

@@ -61,7 +61,7 @@
   Small bugs done 2026-10-27 (GitHub/Reddit answers later, user): #11 `psxonpsp660.bin` in bios.conf (PCSX ReARMed already used it; the BIOS Manager did not list it); #19 radial stick deadzone (input.md); ports in Home right after a PortMaster session; `mod_nuubOS.txt` refreshed in installed PortMaster (emulation.md); the "runtime download rewrites the port script" item was already handled in RC3 (portsd relaunch). #13 (PSP picture centred without bezels) waits for the user: the picture at the top with the margin below is a user requirement (emulation.md "Integer scaling").
   GitHub #20 (2026-10-27, constant low vibration in Crazy Taxi): FIXED with Vibration Intensity Off / Light (filtered, default) / Strong (input.md "Rumble").
   Bugs and checks (carried from the RC3 plan and the community reports):
-  5. Cheats not applied in games (RC3 item 4).
+  5. Cheats not applied in games (RC3 item 4): FIXED 2026-10-27 (emulation.md "Cheats not applied": PPSSPP cheat engine off, melonDS ran a code once, RetroArch restored cheats turned off, demo/other-region lists ranked first; PSP, NDS and Dreamcast checked on the CubeXX in the game RAM); still to try by hand: the effect in a game (Quick Menu GAME -> Cheats).
   6. Power off / Restart black screen before the splash (RC3 item 9).
   7. USERDATA VolumeDirty at boot (RC3 item 10): FIXED 2026-10-27 (platform.md "Boot time": cover pack open read-write during the final splash; 8/8 clean Restarts).
   8. HDMI with no sound on some TVs (RC2 reports 1 and 7) and the DS stylus on the RG35XX H (reports 2 and 7): support bundles asked.

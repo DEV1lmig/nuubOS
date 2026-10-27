@@ -13,7 +13,7 @@ LIBRETRO_MELONDS_LICENSE_FILES = LICENSE
 # core-info file to derive melonds_nuubos_libretro.info from
 LIBRETRO_MELONDS_DEPENDENCIES = libretro-core-info
 
-# Bundled as melonDS-nuubOS (melonds_nuubos): patches 0001-0021 are nuubOS
+# Bundled as melonDS-nuubOS (melonds_nuubos): patches 0001-0022 are nuubOS
 # H700 performance work (README "Patched cores"); upstream melonDS remains a
 # download.
 # Link-time and profile-guided optimisation (2026-10-17, user: "optimise
@@ -23,7 +23,10 @@ LIBRETRO_MELONDS_DEPENDENCIES = libretro-core-info
 # 31.4 with LTO + PGO (menus 42 -> 54). pgo/ holds the GCC 15.3 profile
 # trained on the device (docs/dev/emulation.md "melonDS PGO"): it matches
 # this commit and these flags only, so regenerate it on a version or
-# compiler bump (a stale profile fails the build with a coverage mismatch).
+# compiler bump.
+# A function changed after the training (patch 0022, the cheats) only warns:
+# GCC drops the profile of that function and keeps it for the others;
+# retrain when a hot path changes.
 # NUUBOS_MELONDS_PGO=generate builds the instrumented core instead (writes
 # its counters to /tmp/nuubos-pgo on the device when RetroArch exits).
 ifeq ($(NUUBOS_MELONDS_PGO),generate)
@@ -38,7 +41,8 @@ LIBRETRO_MELONDS_OPT_FLAGS = \
 	-fprofile-use=$(LIBRETRO_MELONDS_PKGDIR)/pgo \
 	-fprofile-prefix-path=$(@D) \
 	-fprofile-partial-training \
-	-Wno-missing-profile
+	-Wno-missing-profile \
+	-Wno-error=coverage-mismatch
 endif
 
 define LIBRETRO_MELONDS_BUILD_CMDS
