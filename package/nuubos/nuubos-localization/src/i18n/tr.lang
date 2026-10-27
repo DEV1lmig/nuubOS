@@ -1386,3 +1386,17 @@
 1385=TERMİNAL
 1386=Terminalden çık
 1387=Terminal açılamadı
+1388=Güç düğmesiyle uyku
+1389=Güç menüsü için güç düğmesini basılı tutun.
+1390=Güç düğmesi güç menüsünü açar.
+1391=Hızlı Menüde RetroArch
+1392=Oyun sırasında RetroArch menüsünü açar
+1393=RetroArch açılamadı
+1394=RETROARCH
+1395=RetroArch'tan çık
+1396=RetroArch'ı sıfırla
+1397=Geçerli kullanıcının RetroArch seçeneklerini, çekirdek seçeneklerini ve yeniden eşlemelerini varsayılana döndürür. Oyunlar, kayıtlar ve durumlar korunur.
+1398=RetroArch ayarları sıfırlandı
+1399=Disk
+1400=Disk {0}
+1401={0}/{1}

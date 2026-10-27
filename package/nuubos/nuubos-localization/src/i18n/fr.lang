@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Quitter le terminal
 1387=Impossible d'ouvrir le terminal
+1388=Appuyer sur Marche pour la veille
+1389=Maintenez le bouton d'alimentation pour le menu alimentation.
+1390=Le bouton d'alimentation ouvre le menu alimentation.
+1391=RetroArch dans le Menu rapide
+1392=Ouvre le menu de RetroArch pendant un jeu
+1393=Impossible d'ouvrir RetroArch
+1394=RETROARCH
+1395=Quitter RetroArch
+1396=Réinitialiser RetroArch
+1397=Remet aux valeurs par défaut les options, options des cœurs et remappages RetroArch de l'utilisateur actuel. Jeux, sauvegardes et états sont conservés.
+1398=Réglages RetroArch réinitialisés
+1399=Disque
+1400=Disque {0}
+1401={0} sur {1}

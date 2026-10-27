@@ -734,11 +734,19 @@ export component QuickMenuWindow inherits Window {
     /* State Slot (row 11) opens a dropdown of every slot with its save
      * time (or Empty); confirm selects it. */
     in-out property <bool> game-slot-dropdown-open: false;
+    /* The same dropdown lists the discs (Disc row, row 51). */
+    in-out property <bool> game-slot-dropdown-disc: false;
+    /* Multi-disc game: discs (0 = no disc control) and the value shown. */
+    in-out property <int> game-discs: 0;
+    in-out property <string> game-disc-label: "";
     in-out property <int> game-slot-dropdown-index: 0;
     in-out property <int> game-slot-dropdown-scroll: 0;
     in-out property <[string]> game-slot-options: [];
     /* Performance overlay of the running game's user (row 28, switch). */
     in-out property <bool> game-overlay-on: false;
+    /* GAME → RetroArch row, the user's Settings → Gaming switch (hidden by
+     * default); game-ra shifts the rows after it. */
+    in-out property <bool> game-retroarch: false;
     /* melonDS-nuubOS: rows 42 Stylus (switch) and 43 Screen Layout
      * (dropdown of the four layouts, confirm applies it live), before
      * Restart Game. game-nds-layout is emud's nds_layouts index. */
@@ -791,6 +799,8 @@ export component QuickMenuWindow inherits Window {
     /* TERMINAL (nuubos-termd): the session runs; its on-screen keyboard is
      * on; kb-terminal = the keyboard sheet types into the terminal. */
     in-out property <bool> term-section-visible: false;
+    /* RETROARCH: RetroArch's own menu without a game (rows 49, 50). */
+    in-out property <bool> ra-section-visible: false;
     in-out property <bool> term-keyboard-on: false;
     in-out property <bool> kb-terminal: false;
     in-out property <string> web-zoom-label: "100%";
@@ -893,21 +903,27 @@ export component QuickMenuWindow inherits Window {
     property <length> game-y: root.content-top;
     property <length> game-row0-y: root.game-y + root.section-header;
     property <length> game-step: root.row-height + root.row-gap;
-    /* GAME has eleven rows (twelve with Player Assignment below State
-     * Slot, game-extra shifts the rows after it; eight without the three
-     * state rows in hardcore, game-states; two more for an NDS game before
-     * Restart Game, game-nds-rows), WEB eight. */
+    /* GAME has ten rows (eleven with RetroArch, game-ra; twelve with
+     * Player Assignment below State Slot, game-extra shifts the rows after
+     * it; seven without the three state rows in hardcore, game-states; two
+     * more for an NDS game before Restart Game, game-nds-rows, or the Disc
+     * row of a multi-disc game, game-disc-rows; game-mid-rows is either),
+     * WEB eight. */
     property <int> game-extra: root.game-section-visible && root.players-visible ? 1 : 0;
     property <int> game-states: root.game-hardcore ? 0 : 3;
     /* Stylus and Screen Layout of an NDS game, before Restart Game. */
     property <int> game-nds-rows: root.game-section-visible && root.game-nds ? 2 : 0;
-    property <length> game-end: root.game-row0-y + (root.game-section-visible ? 7 + root.game-states + root.game-extra + root.game-nds-rows : 7) * root.game-step + root.row-height;
+    property <int> game-disc-rows: root.game-section-visible && root.game-discs > 1 ? 1 : 0;
+    property <int> game-mid-rows: root.game-nds-rows + root.game-disc-rows;
+    property <int> game-ra: root.game-retroarch ? 1 : 0;
+    property <length> game-end: root.game-row0-y + (root.game-section-visible ? 6 + root.game-ra + root.game-states + root.game-extra + root.game-mid-rows : 7) * root.game-step + root.row-height;
     property <length> stream-end: root.game-row0-y + (root.stream-steamlink ? 4 : 8) * root.game-step + root.row-height;
     property <length> port-end: root.game-row0-y + root.game-step + root.row-height;
     property <length> term-end: root.game-row0-y + 2 * root.game-step + root.row-height;
     property <length> music-y: root.game-section-visible ? root.game-end + root.section-gap
         : root.port-section-visible ? root.port-end + root.section-gap
         : root.term-section-visible ? root.term-end + root.section-gap
+        : root.ra-section-visible ? root.port-end + root.section-gap
         : root.stream-section-visible ? root.stream-end + root.section-gap
         : root.web-section-visible ? root.game-end + root.section-gap
         : root.content-top;
@@ -935,10 +951,12 @@ export component QuickMenuWindow inherits Window {
     property <length> user-y: root.display-end + root.section-gap;
     property <length> user-row-y: root.user-y + root.section-header;
     property <length> players-row-y: root.game-row0-y + (1 + root.game-states) * root.game-step;
-    property <length> cheats-row-y: root.game-row0-y + (2 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step;
-    property <length> net-row-y: root.game-row0-y + (3 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step;
+    property <length> cheats-row-y: root.game-row0-y + (2 + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step;
+    property <length> net-row-y: root.game-row0-y + (3 + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step;
     property <length> stylus-row-y: root.game-row0-y + (1 + root.game-states + root.game-extra) * root.game-step;
     property <length> layout-row-y: root.stylus-row-y + root.game-step;
+    /* Disc (51) sits where an NDS game has Stylus: never both. */
+    property <length> disc-row-y: root.stylus-row-y;
     property <length> system-y: root.switch-user-visible
         ? root.user-row-y + root.row-height + root.section-gap
         : root.user-y;
@@ -957,6 +975,7 @@ export component QuickMenuWindow inherits Window {
         /* 42 Stylus and 43 Screen Layout (NDS) sit before 12 Restart Game. */
         : root.selected-index == 42 ? root.stylus-row-y
         : root.selected-index == 43 ? root.layout-row-y
+        : root.selected-index == 51 ? root.disc-row-y
         /* PORT: 44 Resume, 45 Quit Game. */
         : root.selected-index == 44 ? root.game-row0-y
         : root.selected-index == 45 ? root.game-row0-y + root.game-step
@@ -964,7 +983,10 @@ export component QuickMenuWindow inherits Window {
         : root.selected-index == 46 ? root.game-row0-y
         : root.selected-index == 47 ? root.game-row0-y + root.game-step
         : root.selected-index == 48 ? root.game-row0-y + 2 * root.game-step
-        : root.selected-index == 13 ? root.game-row0-y + (4 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step
+        /* RETROARCH: 49 Resume, 50 Quit RetroArch. */
+        : root.selected-index == 49 ? root.game-row0-y
+        : root.selected-index == 50 ? root.game-row0-y + root.game-step
+        : root.selected-index == 13 ? root.game-row0-y + (4 + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step
         : root.selected-index == 31 ? root.music-row0-y
         : root.selected-index == 32 ? root.music-row0-y + root.game-step
         : root.selected-index == 33 ? root.music-vol-y
@@ -972,9 +994,9 @@ export component QuickMenuWindow inherits Window {
         : root.selected-index == 35 ? root.music-stop-y
         : root.selected-index == 29 ? root.context-y + root.section-header
         : root.selected-index == 30 ? root.players-row-y
-        : root.selected-index == 18 ? root.game-row0-y + (5 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step
-        : root.selected-index == 28 ? root.game-row0-y + (6 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step
-        : root.selected-index == 14 ? root.game-row0-y + (7 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step
+        : root.selected-index == 18 ? root.game-row0-y + (4 + root.game-ra + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step
+        : root.selected-index == 28 ? root.game-row0-y + (5 + root.game-ra + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step
+        : root.selected-index == 14 ? root.game-row0-y + (6 + root.game-ra + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step
         /* STREAM: 15 Resume, 36, 37, 38, 16 Quit, 17 Quit and Close
          * (Steam Link: no 17). */
         : root.selected-index >= 36 && root.selected-index <= 38 ? root.game-row0-y + (root.selected-index - 35) * root.game-step
@@ -985,7 +1007,7 @@ export component QuickMenuWindow inherits Window {
         : root.selected-index == 27 ? root.game-row0-y + root.game-step
         : root.selected-index >= 21 ? root.game-row0-y + (root.selected-index - 19) * root.game-step
         : root.selected-index >= 15 ? root.game-row0-y + (root.selected-index - 15) * root.game-step
-        : root.selected-index >= 12 ? root.game-row0-y + (root.selected-index - 11 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step
+        : root.selected-index >= 12 ? root.game-row0-y + (root.selected-index - 11 + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step
         : root.selected-index >= 8 ? root.game-row0-y + (root.selected-index - 8) * root.game-step
         : root.selected-index == 3 ? root.audio-row-y
         : root.selected-index == 5 ? root.brightness-row-y
@@ -1006,6 +1028,7 @@ export component QuickMenuWindow inherits Window {
         max(0px, root.focus-bottom - root.viewport-bottom),
         max(0px, root.focus-top - root.viewport-top
             - (root.focus-top == root.audio-row-y || root.selected-index == 8 || root.selected-index == 15 || root.selected-index == 44 || root.selected-index == 46
+                || root.selected-index == 49
                 || root.selected-index == 20 || root.selected-index == 29 || root.selected-index == 31
                 ? root.section-header : 0px)));
 
@@ -1088,7 +1111,7 @@ export component QuickMenuWindow inherits Window {
             visible: root.game-section-visible && root.players-visible;
         }
         QmRow {
-            x: 16px; y: root.game-row0-y + (1 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step - root.scroll;
+            x: 16px; y: root.game-row0-y + (1 + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step - root.scroll;
             width: parent.width - 32px; height: root.row-height;
             title: root.i18n-strings[420];
             armed: root.game-confirm-index == 12;
@@ -1113,27 +1136,35 @@ export component QuickMenuWindow inherits Window {
             visible: root.game-section-visible;
         }
         QmRow {
-            x: 16px; y: root.game-row0-y + (4 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step - root.scroll;
+            x: 16px; y: root.game-row0-y + (4 + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step - root.scroll;
             width: parent.width - 32px; height: root.row-height;
             title: root.i18n-strings[421];
             selected: root.selected-index == 13;
-            visible: root.game-section-visible;
+            visible: root.game-section-visible && root.game-retroarch;
         }
         QmRow {
-            x: 16px; y: root.game-row0-y + (5 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step - root.scroll;
+            x: 16px; y: root.game-row0-y + (4 + root.game-ra + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step - root.scroll;
             width: parent.width - 32px; height: root.row-height;
             title: root.i18n-strings[592];
             selected: root.selected-index == 18;
             visible: root.game-section-visible;
         }
         QmRow {
-            x: 16px; y: root.game-row0-y + (6 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step - root.scroll;
+            x: 16px; y: root.game-row0-y + (5 + root.game-ra + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step - root.scroll;
             width: parent.width - 32px; height: root.row-height;
             title: root.i18n-strings[774];
             toggle: true;
             toggle-on: root.game-overlay-on;
             selected: root.selected-index == 28;
             visible: root.game-section-visible;
+        }
+        QmRow {
+            x: 16px; y: root.disc-row-y - root.scroll;
+            width: parent.width - 32px; height: root.row-height;
+            title: root.i18n-strings[1399];
+            value: root.game-disc-label;
+            selected: root.selected-index == 51;
+            visible: root.game-section-visible && root.game-discs > 1;
         }
         QmRow {
             x: 16px; y: root.stylus-row-y - root.scroll;
@@ -1153,7 +1184,7 @@ export component QuickMenuWindow inherits Window {
             visible: root.game-section-visible && root.game-nds;
         }
         QmRow {
-            x: 16px; y: root.game-row0-y + (7 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step - root.scroll;
+            x: 16px; y: root.game-row0-y + (6 + root.game-ra + root.game-states + root.game-extra + root.game-mid-rows) * root.game-step - root.scroll;
             width: parent.width - 32px; height: root.row-height;
             title: root.i18n-strings[422];
             armed: root.game-confirm-index == 14;
@@ -1177,6 +1208,23 @@ export component QuickMenuWindow inherits Window {
             title: row.title;
             selected: root.selected-index == row.index;
             visible: root.port-section-visible;
+        }
+
+        /* RETROARCH: RetroArch's own menu without a game, first in the menu. */
+        QmSectionHeader {
+            x: 16px; y: root.game-y - root.scroll; width: parent.width - 32px;
+            label: root.i18n-strings[1394];
+            visible: root.ra-section-visible;
+        }
+        for row[k] in [
+            { index: 49, title: root.i18n-strings[416] },
+            { index: 50, title: root.i18n-strings[1395] },
+        ]: QmRow {
+            x: 16px; y: root.game-row0-y + k * root.game-step - root.scroll;
+            width: parent.width - 32px; height: root.row-height;
+            title: row.title;
+            selected: root.selected-index == row.index;
+            visible: root.ra-section-visible;
         }
 
         /* TERMINAL: the running terminal, first in the menu. */
@@ -1581,7 +1629,7 @@ export component QuickMenuWindow inherits Window {
      * first (a row near the bottom, e.g. Audio over a game). */
     property <length> audio-dd-height: 12px + min(root.audio-output-options.length, root.audio-output-dropdown-visible-rows) * (root.row-height + root.row-gap) - root.row-gap;
     property <length> audio-dd-below: root.audio-row-y + root.slider-row-height + 4px - root.scroll;
-    property <length> slot-row-y: root.game-row0-y + 3 * root.game-step - root.scroll;
+    property <length> slot-row-y: (root.game-slot-dropdown-disc ? root.disc-row-y : root.game-row0-y + 3 * root.game-step) - root.scroll;
     property <length> slot-dd-height: 12px + min(root.game-slot-options.length, root.audio-output-dropdown-visible-rows) * (root.row-height + root.row-gap) - root.row-gap;
 
     /* Audio output dropdown, anchored to the Audio row. */
@@ -1717,7 +1765,8 @@ export component QuickMenuWindow inherits Window {
         }
     }
 
-    /* State Slot dropdown, anchored to the State Slot row. */
+    /* State Slot dropdown, anchored to the State Slot row (or the discs,
+     * anchored to the Disc row). */
     Rectangle {
         x: 16px;
         y: root.slot-row-y + root.row-height + 4px + root.slot-dd-height > root.height - 8px

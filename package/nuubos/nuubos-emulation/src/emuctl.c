@@ -28,7 +28,10 @@ static void usage(void)
 		"                                 (slot:-1 = automatic state; netplay)\n"
 		"  pause | resume | save | load | reset | fast-forward\n"
 		"  slot N|+1|-1\n"
+		"  disc N                         change the disc (0-based) of a multi-disc game\n"
 		"  advanced                       open RetroArch's own menu\n"
+		"  menu                           RetroArch's own menu without a game\n"
+		"  reset-retroarch                the user's RetroArch configuration to the defaults\n"
 		"  screenshot\n"
 		"  hotkey ACTION [ARG]            run a game hotkey (screen_layout, stylus right...)\n"
 		"  quit\n"
@@ -99,6 +102,8 @@ int main(int argc, char **argv)
 			 argc == 4 ? " " : "", argc == 4 ? argv[3] : "");
 	} else if (!strcmp(verb, "storage-lost") && argc == 3) {
 		snprintf(command, sizeof(command), "STORAGE_LOST\t%s\n", argv[2]);
+	} else if (!strcmp(verb, "disc") && argc == 3) {
+		snprintf(command, sizeof(command), "DISC\t%s\n", argv[2]);
 	} else if (!strcmp(verb, "pre-power") && argc == 3) {
 		snprintf(command, sizeof(command), "PRE_POWER\t%s\n", argv[2]);
 	} else if (argc == 2) {
@@ -108,6 +113,7 @@ int main(int argc, char **argv)
 			{ "reset", "RESET" }, { "fast-forward", "FAST_FORWARD" },
 			{ "advanced", "ADVANCED" }, { "quit", "QUIT" },
 			{ "screenshot", "SCREENSHOT" },
+			{ "menu", "MENU" }, { "reset-retroarch", "RESET_RETROARCH" },
 			{ "netplay-host", "NETPLAY_HOST" }, { "netplay-stop", "NETPLAY_STOP" },
 		};
 		size_t i;

@@ -1386,3 +1386,17 @@
 1385=TERMINÁL
 1386=Kilépés a terminálból
 1387=A terminált nem sikerült megnyitni
+1388=Bekapcsológomb: alvás
+1389=Tartsa lenyomva a bekapcsológombot az energiamenühöz.
+1390=A bekapcsológomb megnyitja az energiamenüt.
+1391=RetroArch a Gyorsmenüben
+1392=Játék közben megnyitja a RetroArch menüjét
+1393=A RetroArch nem nyitható meg
+1394=RETROARCH
+1395=Kilépés a RetroArchból
+1396=RetroArch visszaállítása
+1397=Visszaállítja a jelenlegi felhasználó RetroArch-beállításait, magbeállításait és átkiosztásait. A játékok, mentések és állapotok megmaradnak.
+1398=RetroArch-beállítások visszaállítva
+1399=Lemez
+1400={0}. lemez
+1401={0}/{1}

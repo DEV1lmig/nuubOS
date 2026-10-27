@@ -226,7 +226,7 @@ fn library(line: &str, multi: bool) -> String {
     request(LIBRARY_SOCKET, line, multi, 3).unwrap_or_default()
 }
 
-fn emulation(line: &str, multi: bool) -> String {
+pub(crate) fn emulation(line: &str, multi: bool) -> String {
     request(EMULATION_SOCKET, line, multi, 3).unwrap_or_default()
 }
 
@@ -1677,6 +1677,9 @@ fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
         tr(ui, 776, "Frames the game when it does not fill the screen")), true));
     rows.push(("crt".into(), toggle(tr(ui, 777, "CRT Effect"), on("crt"),
         tr(ui, 778, "Scanlines for consoles played on TVs")), true));
+    /* The Quick Menu's GAME → RetroArch row (hidden by default). */
+    rows.push(("retroarch_menu".into(), toggle(tr(ui, 1391, "RetroArch in the Quick Menu"), on("retroarch_menu"),
+        tr(ui, 1392, "Opens RetroArch's own menu during a game")), true));
     /* LIBRARY (DEVICE): the library scan, the metadata source, its optional
      * account or key, then the two scraping runs. */
     let scanning = ui.get_library_scanning();
@@ -1846,7 +1849,7 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
                 "sync-add" => crate::syncui::open_guide(ui),
                 "bios" => open_bios(ui),
                 "cheats" if !STATE.with(|st| st.borrow().cheats_job) => update_cheats(ui),
-                "boot_screens" | "slot_rotation" | "bezels" | "crt" => {
+                "boot_screens" | "slot_rotation" | "bezels" | "crt" | "retroarch_menu" => {
                     let on = STATE.with(|st| emu_get(&st.borrow(), &key) == "1");
                     emu_set(ui, &key, if on { "0" } else { "1" }.to_owned());
                 }

@@ -1386,3 +1386,17 @@
 1385=TERMINALE
 1386=Esci dal terminale
 1387=Impossibile aprire il terminale
+1388=Sospendi con il tasto di accensione
+1389=Tieni premuto per il menu accensione.
+1390=Il tasto di accensione apre il menu accensione.
+1391=RetroArch nel Menu rapido
+1392=Apre il menu di RetroArch durante un gioco
+1393=Impossibile aprire RetroArch
+1394=RETROARCH
+1395=Esci da RetroArch
+1396=Reimposta RetroArch
+1397=Riporta ai valori predefiniti opzioni, opzioni dei core e remap di RetroArch dell'utente attuale. Giochi, salvataggi e stati restano.
+1398=Impostazioni di RetroArch reimpostate
+1399=Disco
+1400=Disco {0}
+1401={0} di {1}

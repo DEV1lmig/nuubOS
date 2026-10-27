@@ -1316,7 +1316,8 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
     row({ key: 'hk', title: C(772, 'Game Hotkeys'), chevron: true, on: () => go('gaming/hotkeys') }),
     row({ key: 'ov', title: C(774, 'Performance Overlay'), value: on01(emu.overlay) ? C(222, 'On') : C(54, 'Off'), chevron: true, on: () => go('gaming/overlay') }),
     row({ key: 'bez', title: C(775, 'Bezels'), detail: C(776, 'Frames the game when it does not fill the screen'), toggle: on01(emu.bezels), set: (v) => set('bezels', v ? '1' : '0') }),
-    row({ key: 'crt', title: C(777, 'CRT Effect'), detail: C(778, 'Scanlines for consoles played on TVs'), toggle: on01(emu.crt), set: (v) => set('crt', v ? '1' : '0') })),
+    row({ key: 'crt', title: C(777, 'CRT Effect'), detail: C(778, 'Scanlines for consoles played on TVs'), toggle: on01(emu.crt), set: (v) => set('crt', v ? '1' : '0') }),
+    row({ key: 'ramenu', title: C(1391, 'RetroArch in the Quick Menu'), detail: C(1392, "Opens RetroArch's own menu during a game"), toggle: on01(emu.retroarch_menu), set: (v) => set('retroarch_menu', v ? '1' : '0') })),
   section(C(704, 'LIBRARY'), 'device'), group(
     row({ key: 'scan', title: C(804, 'Scan for New Games'), detail: C(805, 'Finds games copied to the SD card since the last scan'), busy: scanning,
       value: scanning ? C(410, 'Searching for games…') : '', disabled: scanning, on: () => act('lib.scan') }),
@@ -1458,7 +1459,10 @@ page('power', 'settings', () => C(813, 'Power'), async () => {
       set: (v) => act('system.hypersleep', { v: v ? '1' : '0' }, { topics: ['system'] }) }),
     row({ key: 'faststartup', title: C(1354, 'Fast Startup'), toggle: s.fast_startup !== '0',
       detail: s.fast_startup !== '0' ? C(1355, 'Experimental: starts about 5 seconds faster, but can make the console freeze or restart by itself.') : C(1356, 'Checks the memory at every start. Can help if the console freezes or restarts by itself.'),
-      set: (v) => act('system.faststartup', { v: v ? '1' : '0' }, { topics: ['system'] }) })),
+      set: (v) => act('system.faststartup', { v: v ? '1' : '0' }, { topics: ['system'] }) }),
+    row({ key: 'powerkey', title: C(1388, 'Press Power to Sleep'), toggle: s.power_key_sleep === '1',
+      detail: s.power_key_sleep === '1' ? C(1389, 'Hold the power button for the power menu.') : C(1390, 'The power button opens the power menu.'),
+      set: (v) => act('system.powerkeysleep', { v: v ? '1' : '0' }, { topics: ['system'] }) })),
   section(C(814, 'BATTERY'), 'device'), group(
     ...(bstate === 'absent' ? [row({ key: 'charge', title: C(816, 'Charge'), value: C(1301, 'No battery') })] : [
     row({ key: 'charge', title: C(816, 'Charge'), value: s['battery.percent'] + '%', detail: bstate === 'charging' ? C(382, 'Charging') : bstate === 'full' ? C(383, 'Fully charged') : bstate === 'not-charging' ? C(819, 'Not charging') : C(818, 'Discharging') }),

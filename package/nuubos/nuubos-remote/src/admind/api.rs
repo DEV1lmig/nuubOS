@@ -299,7 +299,7 @@ fn job(kind: &str, args: &[&str]) -> R {
 }
 
 fn emu_key(k: &str) -> Result<String, String> {
-    let fixed = ["boot_screens", "slots", "slot_rotation", "bezels", "crt", "overlay", "overlay_items"];
+    let fixed = ["boot_screens", "slots", "slot_rotation", "bezels", "crt", "overlay", "overlay_items", "retroarch_menu"];
     if fixed.contains(&k) || (k.starts_with("hotkey_") && token(k).is_ok()) {
         Ok(k.to_owned())
     } else {
@@ -321,6 +321,7 @@ pub fn action(b: &Value) -> R {
         "system.sleep" => { sock_ok("systemd", &format!("SET SLEEP {}", int(&a("v"), 0, 240)?))?; ok() }
         "system.hypersleep" => { sock_ok("systemd", &format!("SET HYPERSLEEP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
         "system.faststartup" => { sock_ok("systemd", &format!("SET FAST_STARTUP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
+        "system.powerkeysleep" => { sock_ok("systemd", &format!("SET POWER_KEY_SLEEP {}", one_of(&a("v"), &["0", "1"])?))?; ok() }
         /* The games card (SD2) and the console backup. */
         "storage.eject" => { sock_ok("systemd", "STORAGE SD2 EJECT")?; ok() }
         "storage.use" => { sock_ok("systemd", "STORAGE SD2 USE")?; ok() }

@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Închide terminalul
 1387=Terminalul nu a putut fi deschis
+1388=Butonul de pornire adoarme
+1389=Țineți apăsat butonul de pornire pentru meniul de alimentare.
+1390=Butonul de pornire deschide meniul de alimentare.
+1391=RetroArch în Meniul rapid
+1392=Deschide meniul RetroArch în timpul unui joc
+1393=RetroArch nu a putut fi deschis
+1394=RETROARCH
+1395=Ieșire din RetroArch
+1396=Resetează RetroArch
+1397=Readuce la valorile implicite opțiunile RetroArch, opțiunile nucleelor și remapările utilizatorului curent. Jocurile, salvările și stările rămân.
+1398=Setările RetroArch au fost resetate
+1399=Disc
+1400=Discul {0}
+1401={0} din {1}

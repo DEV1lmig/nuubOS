@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Terminal beenden
 1387=Das Terminal konnte nicht geöffnet werden
+1388=Ein-/Aus-Taste für Ruhezustand
+1389=Ein-/Aus-Taste gedrückt halten für das Energiemenü.
+1390=Die Ein-/Aus-Taste öffnet das Energiemenü.
+1391=RetroArch im Schnellmenü
+1392=Öffnet das Menü von RetroArch im Spiel
+1393=RetroArch konnte nicht geöffnet werden
+1394=RETROARCH
+1395=RetroArch beenden
+1396=RetroArch zurücksetzen
+1397=Setzt RetroArch-Optionen, Core-Optionen und Belegungen des aktuellen Benutzers auf die Standardwerte zurück. Spiele, Spielstände und Savestates bleiben erhalten.
+1398=RetroArch-Einstellungen zurückgesetzt
+1399=Disc
+1400=Disc {0}
+1401={0} von {1}

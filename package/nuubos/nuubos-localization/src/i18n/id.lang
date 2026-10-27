@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Keluar dari Terminal
 1387=Terminal tidak dapat dibuka
+1388=Tekan Daya untuk Tidur
+1389=Tahan tombol daya untuk menu daya.
+1390=Tombol daya membuka menu daya.
+1391=RetroArch di Menu Cepat
+1392=Membuka menu RetroArch saat bermain
+1393=RetroArch tidak dapat dibuka
+1394=RETROARCH
+1395=Keluar dari RetroArch
+1396=Atur Ulang RetroArch
+1397=Mengembalikan opsi RetroArch, opsi core, dan pemetaan ulang pengguna saat ini ke bawaan. Game, simpanan, dan state tetap ada.
+1398=Pengaturan RetroArch diatur ulang
+1399=Disk
+1400=Disk {0}
+1401={0} dari {1}

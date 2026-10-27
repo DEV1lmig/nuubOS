@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Terminal afsluiten
 1387=De terminal kon niet worden geopend
+1388=Aan/uit-knop voor slaapstand
+1389=Houd de aan/uit-knop ingedrukt voor het energiemenu.
+1390=De aan/uit-knop opent het energiemenu.
+1391=RetroArch in het Snelmenu
+1392=Opent het menu van RetroArch tijdens een spel
+1393=RetroArch kon niet worden geopend
+1394=RETROARCH
+1395=RetroArch afsluiten
+1396=RetroArch herstellen
+1397=Zet de RetroArch-opties, core-opties en toewijzingen van de huidige gebruiker terug naar de standaard. Games, opslagbestanden en states blijven bewaard.
+1398=RetroArch-instellingen hersteld
+1399=Schijf
+1400=Schijf {0}
+1401={0} van {1}

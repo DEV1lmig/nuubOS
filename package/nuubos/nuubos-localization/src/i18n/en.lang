@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Quit Terminal
 1387=The terminal could not be opened
+1388=Press Power to Sleep
+1389=Hold the power button for the power menu.
+1390=The power button opens the power menu.
+1391=RetroArch in the Quick Menu
+1392=Opens RetroArch's own menu during a game
+1393=RetroArch could not be opened
+1394=RETROARCH
+1395=Quit RetroArch
+1396=Reset RetroArch Settings
+1397=Puts the current user's RetroArch options, core options and remaps back to the defaults. Games, saves and states are kept.
+1398=RetroArch settings reset
+1399=Disc
+1400=Disc {0}
+1401={0} of {1}

@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Zamknij terminal
 1387=Nie udało się otworzyć terminala
+1388=Przycisk zasilania usypia
+1389=Przytrzymaj przycisk zasilania, aby otworzyć menu zasilania.
+1390=Przycisk zasilania otwiera menu zasilania.
+1391=RetroArch w Szybkim menu
+1392=Otwiera menu RetroArch podczas gry
+1393=Nie można otworzyć RetroArch
+1394=RETROARCH
+1395=Zamknij RetroArch
+1396=Resetuj RetroArch
+1397=Przywraca domyślne opcje RetroArch, opcje rdzeni i mapowania bieżącego użytkownika. Gry, zapisy i stany pozostają.
+1398=Ustawienia RetroArch zresetowane
+1399=Płyta
+1400=Płyta {0}
+1401={0} z {1}

@@ -39,8 +39,14 @@ define NUUBOS_EMULATION_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/share/nuubos/applications/netplay.app
 	$(INSTALL) -D -m 0644 $(@D)/app/netplay.png \
 		$(TARGET_DIR)/usr/share/nuubos/applications/icons/netplay.png
+	$(INSTALL) -D -m 0644 $(@D)/app/retroarch.app \
+		$(TARGET_DIR)/usr/share/nuubos/applications/retroarch.app
+	$(INSTALL) -D -m 0644 $(@D)/app/retroarch.png \
+		$(TARGET_DIR)/usr/share/nuubos/applications/icons/retroarch.png
 	$(INSTALL) -D -m 0644 $(@D)/app/ATTRIBUTION.txt \
 		$(TARGET_DIR)/usr/share/nuubos/applications/icons/ATTRIBUTION-netplay.txt
+	$(INSTALL) -D -m 0644 $(@D)/app/ATTRIBUTION.txt \
+		$(TARGET_DIR)/usr/share/nuubos/applications/icons/ATTRIBUTION-retroarch.txt
 	$(INSTALL) -D -m 0755 $(@D)/S49nuubos-emud $(TARGET_DIR)/etc/init.d/S49nuubos-emud
 	$(INSTALL) -D -m 0755 $(@D)/50-emulation \
 		$(TARGET_DIR)/usr/lib/nuubos/lifecycle-hooks/pre-power.d/50-emulation

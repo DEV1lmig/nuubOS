@@ -1386,3 +1386,17 @@
 1385=PÄÄTE
 1386=Sulje pääte
 1387=Päätettä ei voitu avata
+1388=Virtapainike lepotilaan
+1389=Pidä virtapainiketta pohjassa avataksesi virtavalikon.
+1390=Virtapainike avaa virtavalikon.
+1391=RetroArch Pikavalikossa
+1392=Avaa RetroArchin oman valikon pelin aikana
+1393=RetroArchia ei voitu avata
+1394=RETROARCH
+1395=Sulje RetroArch
+1396=Palauta RetroArch
+1397=Palauttaa nykyisen käyttäjän RetroArch-asetukset, ytimien asetukset ja uudelleenmääritykset oletuksiin. Pelit, tallennukset ja tilat säilyvät.
+1398=RetroArchin asetukset palautettu
+1399=Levy
+1400=Levy {0}
+1401={0}/{1}

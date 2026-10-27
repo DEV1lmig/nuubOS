@@ -1386,3 +1386,17 @@
 1385=TERMINÁL
 1386=Ukončit terminál
 1387=Terminál se nepodařilo otevřít
+1388=Tlačítko napájení uspí
+1389=Podržením tlačítka napájení otevřete nabídku napájení.
+1390=Tlačítko napájení otevře nabídku napájení.
+1391=RetroArch v Rychlé nabídce
+1392=Otevře nabídku RetroArch během hry
+1393=RetroArch se nepodařilo otevřít
+1394=RETROARCH
+1395=Ukončit RetroArch
+1396=Obnovit RetroArch
+1397=Vrátí volby RetroArch, volby jader a přemapování aktuálního uživatele na výchozí. Hry, uložené pozice a stavy zůstanou.
+1398=Nastavení RetroArch obnovena
+1399=Disk
+1400=Disk {0}
+1401={0} z {1}

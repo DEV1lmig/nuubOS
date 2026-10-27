@@ -1,0 +1,96 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] command: nuubOS disc control commands
+
+stdin GET_DISK replies "GET_DISK <index> <count> <ejected>" from the
+core's disk control interface (count 0 without one); SET_DISK_EJECTED
+<0|1> opens or closes the virtual tray and SET_DISK_INDEX <n> picks the
+disc in the open tray, each replying OK or FAILED, with no OSD message.
+nuubos-emud uses them for the Quick Menu's Disc row (multi-disc games,
+.m3u): open, change, and close after the game has seen the open tray.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/command.c
++++ b/command.c
+@@ -826,6 +826,59 @@
+    return true;
+ }
+ 
++/* nuubOS disc control for an external session manager (the Quick Menu's
++ * Disc row through nuubos-emud): the core's disk control interface, with
++ * no OSD message. GET_DISK replies "GET_DISK <index> <count> <ejected>"
++ * (count 0 when the core has no disk control). */
++bool command_get_disk(command_t *cmd, const char *arg)
++{
++   char reply[64];
++   size_t _len;
++   rarch_system_info_t *sys_info = &runloop_state_get_ptr()->system;
++   disk_control_interface_t *dc  = &sys_info->disk_control;
++   bool enabled                  = disk_control_enabled(dc);
++
++   _len = snprintf(reply, sizeof(reply), "GET_DISK %u %u %d\n",
++         enabled ? disk_control_get_image_index(dc) : 0,
++         enabled ? disk_control_get_num_images(dc) : 0,
++         enabled && disk_control_get_eject_state(dc) ? 1 : 0);
++   cmd->replier(cmd, reply, _len);
++   return true;
++}
++
++/* SET_DISK_EJECTED <0|1>: opens or closes the virtual disc tray. */
++bool command_set_disk_ejected(command_t *cmd, const char *arg)
++{
++   char reply[64];
++   size_t _len;
++   disk_control_interface_t *dc = &runloop_state_get_ptr()->system.disk_control;
++   bool eject                   = strtol(arg, NULL, 10) != 0;
++   bool ok                      = disk_control_enabled(dc)
++         && disk_control_set_eject_state(dc, eject, false);
++
++   _len = snprintf(reply, sizeof(reply), "SET_DISK_EJECTED %d %s\n",
++         eject ? 1 : 0, ok ? "OK" : "FAILED");
++   cmd->replier(cmd, reply, _len);
++   return true;
++}
++
++/* SET_DISK_INDEX <n>: the disc in the open tray (0-based). */
++bool command_set_disk_index(command_t *cmd, const char *arg)
++{
++   char reply[64];
++   size_t _len;
++   disk_control_interface_t *dc = &runloop_state_get_ptr()->system.disk_control;
++   unsigned index               = (unsigned)strtoul(arg, NULL, 10);
++   bool ok                      = disk_control_enabled(dc)
++         && index < disk_control_get_num_images(dc)
++         && disk_control_set_index(dc, index, false);
++
++   _len = snprintf(reply, sizeof(reply), "SET_DISK_INDEX %u %s\n",
++         index, ok ? "OK" : "FAILED");
++   cmd->replier(cmd, reply, _len);
++   return true;
++}
++
+ /* Frames presented per second since the previous GET_FPS (nuubOS
+  * performance overlay, asked about once a second). */
+ bool command_get_fps(command_t *cmd, const char *arg)
+--- a/command.h
++++ b/command.h
+@@ -433,6 +433,9 @@
+ bool command_save_state_slot(command_t *cmd, const char* arg);
+ bool command_set_paused(command_t *cmd, const char* arg);
+ bool command_set_muted(command_t *cmd, const char* arg);
++bool command_get_disk(command_t *cmd, const char* arg);
++bool command_set_disk_ejected(command_t *cmd, const char* arg);
++bool command_set_disk_index(command_t *cmd, const char* arg);
+ bool command_get_fps(command_t *cmd, const char* arg);
+ bool command_osd_text(command_t *cmd, const char* arg);
+ bool command_cheats_load(command_t *cmd, const char* arg);
+@@ -471,6 +474,9 @@
+    { "SAVE_STATE_SLOT",command_save_state_slot, "<slot number>"},
+    { "SET_PAUSED",     command_set_paused,      "<0|1>"},
+    { "SET_MUTED",      command_set_muted,       "<0|1>"},
++   { "GET_DISK",       command_get_disk,        "No argument"},
++   { "SET_DISK_EJECTED", command_set_disk_ejected, "<0|1>"},
++   { "SET_DISK_INDEX", command_set_disk_index,  "<disc index>"},
+    { "GET_FPS",        command_get_fps,         "No argument"},
+    { "OSD_TEXT",       command_osd_text,        "<text>"},
+    { "CHEATS_LOAD",    command_cheats_load,     "<cheat file>"},

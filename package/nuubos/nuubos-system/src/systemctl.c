@@ -54,7 +54,8 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "Usage: nuubos-systemctl status | set-profile <auto|battery-saver> | "
                 "set-auto-battery <0-50> | set-charge-limit <80-100> | set-sleep <min> | "
-                "set-hypersleep <0|1> | set-fast-startup <0|1> | set-diagnostics <0-20 boots> | "
+                "set-hypersleep <0|1> | set-fast-startup <0|1> | set-power-key-sleep <0|1> | "
+                "set-diagnostics <0-20 boots> | "
                 "storage-changed | set-storage-backup <0|1> | set-storage-backup-item <item> <0|1> | "
                 "set-storage-backup-dest <sd2|sd1|usb> | "
                 "sd2 <eject|ignore|use> | storage-backup-archive | "
@@ -81,6 +82,8 @@ int main(int argc, char **argv)
         snprintf(command, sizeof(command), "SET HYPERSLEEP %s\n", argv[2]);
     else if (!strcmp(argv[1], "set-fast-startup") && argc == 3)
         snprintf(command, sizeof(command), "SET FAST_STARTUP %s\n", argv[2]);
+    else if (!strcmp(argv[1], "set-power-key-sleep") && argc == 3)
+        snprintf(command, sizeof(command), "SET POWER_KEY_SLEEP %s\n", argv[2]);
     else if (!strcmp(argv[1], "storage-changed") && argc == 2)
         snprintf(command, sizeof(command), "STORAGE CHANGED\n");
     else if (!strcmp(argv[1], "set-storage-backup") && argc == 3)

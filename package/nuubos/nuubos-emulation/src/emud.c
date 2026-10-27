@@ -27,7 +27,12 @@
  * STATES [game], SETTINGS, SET <key> <value>, PAUSE, RESUME,
  * SAVE_STATE, LOAD_STATE, SLOT <n|+1|-1>, RESET, FAST_FORWARD, ADVANCED,
  * QUIT, SCREENSHOT, OVERLAY_TEXT <line> reply OK or ERR <reason>; PRE_POWER <sleep|restart|poweroff>
- * replies once the game state is safe. STORAGE_LOST <mount point> (from
+ * replies once the game state is safe. MENU starts RetroArch's own menu
+ * without a game (menu=1 in the snapshot; only QUIT, PAUSE and RESUME
+ * apply), RESET_RETROARCH puts the user's RetroArch configuration back to
+ * the defaults (no session running). DISC <index> changes the disc of a
+ * multi-disc game (disc=, discs= in the snapshot; discs is read from
+ * RetroArch at every PAUSE, i.e. when the Quick Menu opens). STORAGE_LOST <mount point> (from
  * nuubos-storagectl when the games card is pulled out): a game whose ROM
  * was on it is saved in the automatic state and closed, with a notice.
  *
@@ -209,6 +214,9 @@
 #define MAX_RESTORE_KEYS 48
 /* Performance overlay: RetroArch frame rate sampled once a second. */
 #define OVERLAY_TICK_MS 1000
+/* Disc change: how long the game runs with the tray open before the new
+ * disc goes in (games notice a disc change by the open lid). */
+#define DISC_INSERT_MS 1000
 /* Netplay (RetroArch's protocol): TCP game port and LAN discovery port,
  * how long a discovery listens for hosts. */
 #define NETPLAY_PORT 55435
@@ -236,6 +244,8 @@ enum pending_kind {
  *   slot_rotation each save goes to the next slot, wrapping to 0
  *   bezels, crt   picture presentation (RetroArch patch 0010, crt.glsl)
  *   overlay       performance overlay over games, overlay_items its fields
+ *   retroarch_menu the Quick Menu's RetroArch row in a game (hidden by
+ *                 default, user decision 2026-10-27)
  *   hotkey_<action> chord control, held with the Quick Menu button
  */
 enum hotkey_index {
@@ -296,6 +306,7 @@ struct emu_settings {
 	bool crt;
 	bool overlay;
 	char overlay_items[96];
+	bool retroarch_menu;
 	char hotkey[HK_COUNT][16];
 };
 
@@ -325,6 +336,8 @@ struct session {
 	char game[32];
 	char system[64];
 	char core[64];
+	/* RetroArch's own menu without a game (MENU, the RetroArch app). */
+	bool menu;
 	char content[PATH_MAX];
 	/* The ROM file itself (content may be a generated MAME .cmd). */
 	char rom[PATH_MAX];
@@ -395,6 +408,12 @@ struct session {
 	int nds_layout;
 	bool stylus;
 	char stylus_control[8];
+	/* Disc control (multi-disc games, RetroArch patch 0013): the disc
+	 * in use and how many (0 = no disc control), from GET_DISK; while a
+	 * change is under way the tray closes at disc_insert_ms. */
+	int disc;
+	int discs;
+	long long disc_insert_ms;
 	/* Core options this session set in the user's file (per-game
 	 * accuracy) and their values to put back at exit. */
 	int opt_restore_count;
@@ -1019,6 +1038,8 @@ static size_t build_status(char *out, size_t size)
 			 "slots=%d\n"
 			 "overlay=%d\n"
 			 "overlay_items=%s\n"
+			 "retroarch_menu=%d\n"
+			 "menu=%d\n"
 			 "fps=%.1f\n"
 			 "hardcore=%d\n"
 			 "cheats_on=%d\n"
@@ -1027,6 +1048,8 @@ static size_t build_status(char *out, size_t size)
 			 "netplay_peer=%s\n"
 			 "nds_layout=%d\n"
 			 "stylus=%s\n"
+			 "disc=%d\n"
+			 "discs=%d\n"
 			 "quitting=%d\n"
 			 "end=1\n",
 			 state_name(),
@@ -1040,6 +1063,8 @@ static size_t build_status(char *out, size_t size)
 			 session.state == SESSION_IDLE ? DEFAULT_SLOTS : session.settings.slots,
 			 session.state != SESSION_IDLE && session.settings.overlay ? 1 : 0,
 			 session.state == SESSION_IDLE ? "" : session.settings.overlay_items,
+			 session.state != SESSION_IDLE && session.settings.retroarch_menu ? 1 : 0,
+			 session.menu ? 1 : 0,
 			 session.fps,
 			 session.state != SESSION_IDLE && session.hardcore ? 1 : 0,
 			 session.cheats_on,
@@ -1052,6 +1077,7 @@ static size_t build_status(char *out, size_t size)
 			 session.state != SESSION_IDLE && !strcmp(session.core, MELONDS_NUUBOS)
 			 ? session.nds_layout : -1,
 			 session.state != SESSION_IDLE && session.stylus ? session.stylus_control : "off",
+			 session.disc, session.discs,
 			 /* The game is closing: quit asked (its automatic save may
 			 * still run) or RetroArch exiting. The Quick Menu covers it
 			 * with the closing screen; not when it restarts as netplay
@@ -1191,6 +1217,8 @@ static void library_session(const char *verb, const char *game)
 	char command[128];
 	char answer[128];
 
+	if (session.menu)
+		return;
 	snprintf(command, sizeof(command), "%s\t%s", verb, game);
 	if (library_request(command, answer, sizeof(answer)) != 0 ||
 	    strcmp(answer, "OK") != 0)
@@ -1740,7 +1768,8 @@ static bool settings_set(struct emu_settings *e, const char *key, const char *v)
 	bool flag = !strcmp(v, "1");
 
 	if (!strcmp(key, "boot_screens") || !strcmp(key, "slot_rotation") ||
-	    !strcmp(key, "bezels") || !strcmp(key, "crt") || !strcmp(key, "overlay")) {
+	    !strcmp(key, "bezels") || !strcmp(key, "crt") || !strcmp(key, "overlay") ||
+	    !strcmp(key, "retroarch_menu")) {
 		if (strcmp(v, "0") && strcmp(v, "1"))
 			return false;
 		if (!strcmp(key, "boot_screens"))
@@ -1751,6 +1780,8 @@ static bool settings_set(struct emu_settings *e, const char *key, const char *v)
 			e->bezels = flag;
 		else if (!strcmp(key, "crt"))
 			e->crt = flag;
+		else if (!strcmp(key, "retroarch_menu"))
+			e->retroarch_menu = flag;
 		else
 			e->overlay = flag;
 		return true;
@@ -1816,9 +1847,9 @@ static size_t format_settings(const struct emu_settings *e, char *out, size_t si
 	size_t len;
 	int n = snprintf(out, size,
 			 "boot_screens=%d\nslots=%d\nslot_rotation=%d\nbezels=%d\ncrt=%d\n"
-			 "overlay=%d\noverlay_items=%s\n",
+			 "overlay=%d\noverlay_items=%s\nretroarch_menu=%d\n",
 			 e->boot_screens, e->slots, e->slot_rotation, e->bezels, e->crt,
-			 e->overlay, e->overlay_items);
+			 e->overlay, e->overlay_items, e->retroarch_menu);
 
 	len = n < 0 ? 0 : (size_t)n < size ? (size_t)n : size - 1;
 	for (int i = 0; i < HK_COUNT && len < size; i++) {
@@ -2748,6 +2779,23 @@ static void handle_ra_reply(char *line)
 		notify_subscribers();
 		return;
 	}
+	{
+		unsigned index, count;
+		int ejected;
+
+		if (sscanf(line, "GET_DISK %u %u %d", &index, &count, &ejected) == 3) {
+			/* While a change is under way the chosen disc stays shown. */
+			if (!session.disc_insert_ms)
+				session.disc = (int)index;
+			session.discs = (int)count;
+			notify_subscribers();
+			return;
+		}
+	}
+	if (!strncmp(line, "SET_DISK_", 9) && strstr(line, "FAILED")) {
+		log_msg("emud: retroarch refused %s", line);
+		return;
+	}
 	if (!strncmp(line, "GET_FPS ", 8)) {
 		session.fps = atof(line + 8);
 		notify_subscribers();
@@ -3393,6 +3441,90 @@ static void reset_session(void)
  */
 static const char *cheats_blocked(void);
 
+/*
+ * The child side of a session: RetroArch with the session's pipes, log
+ * and environment (the user's directories, Wayland, PipeWire, the
+ * per-system tuning of the running game). Never returns.
+ */
+static void exec_retroarch(char **argv, const char *base, const char *ra_dir,
+			   const int in_pipe[2], const int out_pipe[2],
+			   int overscan, int render_height)
+{
+	bool diag = access(DIAG_ACTIVE, F_OK) == 0;
+	char dir[PATH_MAX];
+	int log_fd;
+	sigset_t none;
+
+	sigemptyset(&none);
+	sigprocmask(SIG_SETMASK, &none, NULL);
+	signal(SIGCHLD, SIG_DFL);
+	signal(SIGPIPE, SIG_DFL);
+	setsid();
+	dup2(in_pipe[0], STDIN_FILENO);
+	dup2(out_pipe[1], STDOUT_FILENO);
+	log_fd = diag ? open(DIAG_RETROARCH_LOG, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600)
+		      : open(RETROARCH_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (log_fd >= 0)
+		dup2(log_fd, STDERR_FILENO);
+	clearenv();
+	setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
+	setenv("HOME", ra_dir, 1);
+	/* RetroArch's own default directories ($XDG_CONFIG_HOME/
+	 * retroarch) are the user's RetroArch directory. */
+	snprintf(dir, sizeof(dir), "%s/appdata", base);
+	setenv("XDG_CONFIG_HOME", dir, 1);
+	setenv("XDG_RUNTIME_DIR", WAYLAND_RUNTIME, 1);
+	setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+	setenv("PIPEWIRE_RUNTIME_DIR", PIPEWIRE_RUNTIME, 1);
+	setenv("LANG", "C.UTF-8", 1);
+	if (overscan >= 0) {
+		char pct[16];
+
+		snprintf(pct, sizeof(pct), "%d", overscan);
+		setenv("NUUBOS_RA_OVERSCAN_X", pct, 1);
+	}
+	if (render_height > 0) {
+		char lines[16];
+
+		snprintf(lines, sizeof(lines), "%d", render_height);
+		setenv("NUUBOS_RA_RENDER_HEIGHT", lines, 1);
+	}
+	if (session.bezel_env[0])
+		setenv("NUUBOS_RA_BEZEL", session.bezel_env, 1);
+	/* Saturn: YabaSanshiro uploads its texture atlas by regions; Mesa
+	 * patch 0008 makes such textures linear (no staging copy and
+	 * software tiling per upload). Virtua Fighter 2 fight 27.3-27.8
+	 * -> 28.4 fps (2026-10-23); neutral on Dreamcast, so Saturn only. */
+	if (!strcmp(session.system, "saturn"))
+		setenv("NUUBOS_PAN_LINEAR_UPLOADS", "1", 1);
+	/* Dreamcast family (Flycast-nuubOS draws each frame at the start of
+	 * the next retro_run, so it reaches the GPU late): a swap may wait
+	 * two frames back instead of one (Mesa patch 0005). Crazy Taxi
+	 * while driving 53-56 -> 59.6 fps (2026-10-21). It first waits up to
+	 * 8 ms for the frame before (Mesa patch 0006): frames the GPU had
+	 * not finished missed their vblank and went out in pairs. Frames
+	 * over 20 ms, 3 x 20 s per game (2026-10-22): depth 1 / 2 / 2+8 ms
+	 * DoA2 41 / 136 / 68, Le Mans 183 / 22 / 32, Crazy Taxi 12 / 4 /
+	 * 11, Shenmue II 13 / 11 / 10, same frame rates. */
+	if (!strcmp(session.system, "dreamcast") || !strcmp(session.system, "naomi") ||
+	    !strcmp(session.system, "atomiswave")) {
+		setenv("NUUBOS_THROTTLE_DEPTH", "2", 1);
+		setenv("NUUBOS_THROTTLE_SOFT_MS", "8", 1);
+	}
+	/* Light systems: every frame is committed at the start of its swap
+	 * and the swap then waits for its frame callback (Mesa patch
+	 * 0007); before, the wait came first and each frame reached labwc
+	 * one refresh later. Input -> screen 57 -> 40.6 ms with the
+	 * latency probe core on the CubeXX (2026-10-23, docs/dev/input.md).
+	 * Heavy systems keep the wait first: their frames reach the GPU
+	 * late, committed at once they missed the vblank (Crazy Taxi
+	 * while driving ~60 -> 40 fps, user 2026-10-23). */
+	if (!heavy_system(session.system))
+		setenv("NUUBOS_SWAP_WAIT_AFTER", "1", 1);
+	execv(RETROARCH_BIN, argv);
+	_exit(127);
+}
+
 static const char *launch(const char *game, const char *mode, const char *net)
 {
 	char answer[PATH_MAX + 128];
@@ -3702,86 +3834,14 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		}
 		/* Diagnostic mode (docs/dev/system.md): RetroArch logs everything,
 		 * every session of the boot kept for the support bundle. */
-		bool diag = access(DIAG_ACTIVE, F_OK) == 0;
-
-		if (diag)
+		if (access(DIAG_ACTIVE, F_OK) == 0)
 			argv[argc++] = (char *)"--verbose";
 		argv[argc++] = (char *)"-L";
 		argv[argc++] = core_path;
 		argv[argc++] = session.content;
 		argv[argc] = NULL;
-		int log_fd;
-		sigset_t none;
-
-		sigemptyset(&none);
-		sigprocmask(SIG_SETMASK, &none, NULL);
-		signal(SIGCHLD, SIG_DFL);
-		signal(SIGPIPE, SIG_DFL);
-		setsid();
-		dup2(in_pipe[0], STDIN_FILENO);
-		dup2(out_pipe[1], STDOUT_FILENO);
-		log_fd = diag ? open(DIAG_RETROARCH_LOG, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600)
-			      : open(RETROARCH_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-		if (log_fd >= 0)
-			dup2(log_fd, STDERR_FILENO);
-		clearenv();
-		setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1);
-		setenv("HOME", ra_dir, 1);
-		/* RetroArch's own default directories ($XDG_CONFIG_HOME/
-		 * retroarch) are the user's RetroArch directory. */
-		snprintf(cfg, sizeof(cfg), "%s/appdata", base);
-		setenv("XDG_CONFIG_HOME", cfg, 1);
 		snprintf(cfg, sizeof(cfg), "%s/retroarch.cfg", ra_dir);
-		setenv("XDG_RUNTIME_DIR", WAYLAND_RUNTIME, 1);
-		setenv("WAYLAND_DISPLAY", "wayland-0", 1);
-		setenv("PIPEWIRE_RUNTIME_DIR", PIPEWIRE_RUNTIME, 1);
-		setenv("LANG", "C.UTF-8", 1);
-		if (overscan >= 0) {
-			char pct[16];
-
-			snprintf(pct, sizeof(pct), "%d", overscan);
-			setenv("NUUBOS_RA_OVERSCAN_X", pct, 1);
-		}
-		if (render_height > 0) {
-			char lines[16];
-
-			snprintf(lines, sizeof(lines), "%d", render_height);
-			setenv("NUUBOS_RA_RENDER_HEIGHT", lines, 1);
-		}
-		if (session.bezel_env[0])
-			setenv("NUUBOS_RA_BEZEL", session.bezel_env, 1);
-		/* Saturn: YabaSanshiro uploads its texture atlas by regions; Mesa
-		 * patch 0008 makes such textures linear (no staging copy and
-		 * software tiling per upload). Virtua Fighter 2 fight 27.3-27.8
-		 * -> 28.4 fps (2026-10-23); neutral on Dreamcast, so Saturn only. */
-		if (!strcmp(session.system, "saturn"))
-			setenv("NUUBOS_PAN_LINEAR_UPLOADS", "1", 1);
-		/* Dreamcast family (Flycast-nuubOS draws each frame at the start of
-		 * the next retro_run, so it reaches the GPU late): a swap may wait
-		 * two frames back instead of one (Mesa patch 0005). Crazy Taxi
-		 * while driving 53-56 -> 59.6 fps (2026-10-21). It first waits up to
-		 * 8 ms for the frame before (Mesa patch 0006): frames the GPU had
-		 * not finished missed their vblank and went out in pairs. Frames
-		 * over 20 ms, 3 x 20 s per game (2026-10-22): depth 1 / 2 / 2+8 ms
-		 * DoA2 41 / 136 / 68, Le Mans 183 / 22 / 32, Crazy Taxi 12 / 4 /
-		 * 11, Shenmue II 13 / 11 / 10, same frame rates. */
-		if (!strcmp(session.system, "dreamcast") || !strcmp(session.system, "naomi") ||
-		    !strcmp(session.system, "atomiswave")) {
-			setenv("NUUBOS_THROTTLE_DEPTH", "2", 1);
-			setenv("NUUBOS_THROTTLE_SOFT_MS", "8", 1);
-		}
-		/* Light systems: every frame is committed at the start of its swap
-		 * and the swap then waits for its frame callback (Mesa patch
-		 * 0007); before, the wait came first and each frame reached labwc
-		 * one refresh later. Input -> screen 57 -> 40.6 ms with the
-		 * latency probe core on the CubeXX (2026-10-23, docs/dev/input.md).
-		 * Heavy systems keep the wait first: their frames reach the GPU
-		 * late, committed at once they missed the vblank (Crazy Taxi
-		 * while driving ~60 -> 40 fps, user 2026-10-23). */
-		if (!heavy_system(session.system))
-			setenv("NUUBOS_SWAP_WAIT_AFTER", "1", 1);
-		execv(RETROARCH_BIN, argv);
-		_exit(127);
+		exec_retroarch(argv, base, ra_dir, in_pipe, out_pipe, overscan, render_height);
 	}
 
 	close(in_pipe[0]);
@@ -3819,10 +3879,205 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	return NULL;
 }
 
+/* The active user's RetroArch directory, configuration seeded from the
+ * nuubOS defaults (first use, or after RESET_RETROARCH). */
+static const char *prepare_user_retroarch(char *base, size_t base_size,
+					  char *ra_dir, size_t ra_size)
+{
+	char path[PATH_MAX];
+
+	snprintf(base, base_size, USERS_DIR "/%s", session.user);
+	snprintf(ra_dir, ra_size, "%s/appdata/retroarch", base);
+	snprintf(path, sizeof(path), "%s/config/remaps", ra_dir);
+	if (mkdir_p(path) != 0 || mkdir_p(DOWNLOADED_CORES) != 0 ||
+	    mkdir_p(CACHE_DIR) != 0 || mkdir_p(BIOS_DIR) != 0)
+		return "storage";
+	snprintf(path, sizeof(path), "%s/retroarch.cfg", ra_dir);
+	if (seed_file(DEFAULT_RA_CFG, path) != 0)
+		return "storage";
+	copy_text(session.ra_cfg, sizeof(session.ra_cfg), path);
+	snprintf(path, sizeof(path), "%s/retroarch-core-options.cfg", ra_dir);
+	if (seed_file(DEFAULT_CORE_OPTIONS, path) == 0) {
+		char done[PATH_MAX];
+
+		merge_missing_keys(DEFAULT_CORE_OPTIONS, path);
+		snprintf(done, sizeof(done), "%s/core-option-updates", ra_dir);
+		apply_core_option_updates(path, done);
+	}
+	copy_text(session.core_options, sizeof(session.core_options), path);
+	snprintf(path, sizeof(path), "%s/config/global.glslp", ra_dir);
+	(void)seed_file(DEFAULT_SHADER_PRESET, path);
+	return NULL;
+}
+
+/*
+ * MENU (the RetroArch application, user request 2026-10-27): RetroArch's
+ * own menu without a game, with the active user's configuration, for what
+ * is not per game (drivers, core downloads, RetroArch's own options). The
+ * session has no states, no library entry and no hotkey but Quit; the
+ * session configuration (paths, drivers, input ports) is the games' one,
+ * with the plain integer picture (no bezel, no CRT) for content started
+ * from RetroArch's menu.
+ */
+static const char *launch_menu(void)
+{
+	char base[160];
+	char ra_dir[256];
+	char saves[PATH_MAX];
+	char states[PATH_MAX];
+	char screenshots[PATH_MAX];
+	struct game_overrides overrides;
+	struct achievements achievements;
+	const char *shader = "";
+	const char *error;
+	int in_pipe[2];
+	int out_pipe[2];
+	pid_t pid;
+
+	if (session.state != SESSION_IDLE)
+		return "busy";
+	if (!read_active_user(session.user, sizeof(session.user)))
+		return "no-user";
+	load_settings(session.user, &session.settings);
+	session.menu = true;
+	if ((error = prepare_user_retroarch(base, sizeof(base), ra_dir, sizeof(ra_dir)))) {
+		reset_session();
+		return error;
+	}
+	snprintf(saves, sizeof(saves), "%s/saves", base);
+	snprintf(states, sizeof(states), "%s/states", base);
+	snprintf(screenshots, sizeof(screenshots), "%s/screenshots", base);
+	if (mkdir_p(saves) != 0 || mkdir_p(states) != 0 || mkdir_p(screenshots) != 0) {
+		reset_session();
+		return "storage";
+	}
+	memset(&overrides, 0, sizeof(overrides));
+	copy_text(overrides.aspect, sizeof(overrides.aspect), "integer");
+	load_achievements(session.user, &achievements);
+	if (write_session_cfg(ra_dir, saves, states, screenshots, &overrides,
+			      &achievements, false, &shader) != 0) {
+		reset_session();
+		return "storage";
+	}
+
+	session.input_fd = input_gamepads_on();
+	if (session.input_fd < 0)
+		log_msg("emud: inputd game gamepads unavailable");
+	send_hotkeys();
+
+	if (pipe2(in_pipe, O_CLOEXEC) != 0) {
+		reset_session();
+		return "spawn";
+	}
+	if (pipe2(out_pipe, O_CLOEXEC) != 0) {
+		close(in_pipe[0]);
+		close(in_pipe[1]);
+		reset_session();
+		return "spawn";
+	}
+	pid = fork();
+	if (pid < 0) {
+		close(in_pipe[0]);
+		close(in_pipe[1]);
+		close(out_pipe[0]);
+		close(out_pipe[1]);
+		reset_session();
+		return "spawn";
+	}
+	if (pid == 0) {
+		char *argv[10] = {
+			(char *)RETROARCH_BIN, (char *)"--config", session.ra_cfg,
+			(char *)"--appendconfig", (char *)SESSION_CFG,
+			(char *)"--set-shader", (char *)shader, (char *)"--menu",
+		};
+		int argc = 8;
+
+		if (access(DIAG_ACTIVE, F_OK) == 0)
+			argv[argc++] = (char *)"--verbose";
+		argv[argc] = NULL;
+		exec_retroarch(argv, base, ra_dir, in_pipe, out_pipe, -1, 0);
+	}
+
+	close(in_pipe[0]);
+	close(out_pipe[1]);
+	session.pid = pid;
+	session.stdin_fd = in_pipe[1];
+	session.stdout_fd = out_pipe[0];
+	(void)fcntl(session.stdin_fd, F_SETFL, O_NONBLOCK);
+	(void)fcntl(session.stdout_fd, F_SETFL, O_NONBLOCK);
+	session.state = SESSION_RUNNING;
+	session.started_ms = monotonic_ms();
+	session.overlay_tick_ms = monotonic_ms() + OVERLAY_TICK_MS;
+	log_msg("emud: launch retroarch menu pid=%d user=%s", (int)pid, session.user);
+	notify_subscribers();
+	return NULL;
+}
+
+/*
+ * RESET_RETROARCH (Settings → System → Recovery, user request 2026-10-27):
+ * the active user's own RetroArch configuration back to the nuubOS
+ * defaults: retroarch.cfg, the core options and config/ (core and game
+ * overrides, remaps, the shader preset) go, and the next session seeds
+ * them again. Saves, states, screenshots, playlists and nuubOS's Game
+ * Settings stay.
+ */
+static void reset_retroarch(struct client *c)
+{
+	static const char *const files[] = {
+		"retroarch.cfg", "retroarch-core-options.cfg", "core-option-updates", NULL,
+	};
+	char user[64];
+	char path[PATH_MAX];
+	pid_t pid;
+	int status = -1;
+
+	if (session.state != SESSION_IDLE) {
+		reply(c, "ERR busy\n");
+		return;
+	}
+	if (!read_active_user(user, sizeof(user))) {
+		reply(c, "ERR no-user\n");
+		return;
+	}
+	for (int i = 0; files[i]; i++) {
+		snprintf(path, sizeof(path), USERS_DIR "/%s/appdata/retroarch/%s", user, files[i]);
+		if (unlink(path) != 0 && errno != ENOENT) {
+			reply(c, "ERR storage\n");
+			return;
+		}
+	}
+	snprintf(path, sizeof(path), USERS_DIR "/%s/appdata/retroarch/config", user);
+	pid = fork();
+	if (pid == 0) {
+		execl("/bin/rm", "rm", "-rf", path, (char *)NULL);
+		_exit(127);
+	}
+	while (pid > 0 && waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+	if (pid < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		reply(c, "ERR storage\n");
+		return;
+	}
+	sync();
+	log_msg("emud: retroarch configuration of %s reset", user);
+	reply(c, "OK\n");
+}
+
+/* The end of a disc change: the new disc goes in. */
+static void close_disc_tray(void)
+{
+	session.disc_insert_ms = 0;
+	ra_command("SET_DISK_EJECTED 0");
+	ra_command("GET_DISK");
+}
+
 static void request_quit(void)
 {
 	if (session.state != SESSION_RUNNING)
 		return;
+	/* Never save or close with the tray open. */
+	if (session.disc_insert_ms)
+		close_disc_tray();
 	/* Silent from here on (RetroArch patch 0011): the game runs unpaused
 	 * while the quit state is written and the content closes, and its
 	 * audio stuttered meanwhile (user report 2026-10-18). */
@@ -3840,7 +4095,8 @@ static void request_quit(void)
 	}
 	/* With slot rotation RetroArch's automatic slot is off: the progress
 	 * goes into the next slot first (once; a failed save still quits). */
-	if (session.settings.slot_rotation && !session.hardcore && !session.quit_saved) {
+	if (session.settings.slot_rotation && !session.hardcore && !session.menu &&
+	    !session.quit_saved) {
 		session.quit_requested = true;
 		notify_subscribers();
 		if (session.pending != PENDING_NONE)
@@ -3975,6 +4231,9 @@ static int session_timeout_ms(void)
 	if (session.state == SESSION_RUNNING && session.settings.overlay &&
 	    (deadline < 0 || session.overlay_tick_ms < deadline))
 		deadline = session.overlay_tick_ms;
+	if (session.state == SESSION_RUNNING && session.disc_insert_ms && !session.paused &&
+	    (deadline < 0 || session.disc_insert_ms < deadline))
+		deadline = session.disc_insert_ms;
 	if (deadline < 0)
 		return -1;
 	if (deadline <= now)
@@ -4001,6 +4260,9 @@ static void session_timers(void)
 			ra_command("GET_FPS");
 		session.overlay_tick_ms = now + OVERLAY_TICK_MS;
 	}
+	if (session.state == SESSION_RUNNING && session.disc_insert_ms && !session.paused &&
+	    now >= session.disc_insert_ms)
+		close_disc_tray();
 	if (session.pending != PENDING_NONE && now >= session.pending_deadline_ms) {
 		log_msg("emud: state operation slot %d timed out", session.pending_slot);
 		finish_pending(false);
@@ -4127,6 +4389,8 @@ static void handle_hotkey(const char *action)
 	if (session.state != SESSION_RUNNING)
 		return;
 	log_msg("emud: hotkey %s", action);
+	if (session.menu && strcmp(action, "quit") != 0)
+		return;
 	if (session.hardcore &&
 	    (!strcmp(action, "save_state") || !strcmp(action, "load_state") ||
 	     !strcmp(action, "slot_next") || !strcmp(action, "slot_prev") ||
@@ -4211,6 +4475,15 @@ static void process_input_link(void)
 }
 
 static bool running(struct client *c)
+{
+	if (session.state == SESSION_RUNNING && !session.menu)
+		return true;
+	reply(c, session.menu ? "ERR menu\n" : "ERR no-session\n");
+	return false;
+}
+
+/* Any running session, the RetroArch menu included (QUIT, PAUSE, RESUME). */
+static bool session_running(struct client *c)
 {
 	if (session.state == SESSION_RUNNING)
 		return true;
@@ -4527,8 +4800,8 @@ static void handle_cheat_change(struct client *c, const char *verb, char *arg)
 }
 
 /* SETTINGS (key, value NULL) lists the active user's settings; SET key
- * value changes one. Hotkeys and the overlay follow at once in a running
- * game of that user; the rest applies at the next launch. */
+ * value changes one. Hotkeys, the overlay and the RetroArch row follow at
+ * once in a running game of that user; the rest applies at the next launch. */
 static void handle_settings(struct client *c, const char *key, const char *value)
 {
 	char user[64];
@@ -4563,6 +4836,7 @@ static void handle_settings(struct client *c, const char *key, const char *value
 	session.settings.overlay = e.overlay;
 	copy_text(session.settings.overlay_items, sizeof(session.settings.overlay_items),
 		  e.overlay_items);
+	session.settings.retroarch_menu = e.retroarch_menu;
 	if (!strncmp(key, "hotkey_", 7))
 		send_hotkeys();
 	session.overlay_tick_ms = monotonic_ms();
@@ -4818,6 +5092,20 @@ static void handle_command(struct client *c, char *line)
 		c->subscribed = true;
 		if (write_all(c->fd, status, len) != 0)
 			close_client(c);
+	} else if (!strcmp(line, "MENU")) {
+		const char *error = launch_menu();
+
+		if (error) {
+			char text[64];
+
+			log_msg("emud: menu refused: %s", error);
+			snprintf(text, sizeof(text), "ERR %s\n", error);
+			reply(c, text);
+		} else {
+			reply(c, "OK\n");
+		}
+	} else if (!strcmp(line, "RESET_RETROARCH")) {
+		reset_retroarch(c);
 	} else if (!strcmp(line, "LAUNCH") && arg) {
 		char *mode = strchr(arg, '\t');
 		char *net = NULL;
@@ -4849,10 +5137,37 @@ static void handle_command(struct client *c, char *line)
 		ra_command("OSD_TEXT %s", arg ? arg : "");
 		reply(c, "OK\n");
 	} else if (!strcmp(line, "PAUSE") || !strcmp(line, "RESUME")) {
-		if (!running(c))
+		if (!session_running(c))
 			return;
 		ra_command("SET_PAUSED %d", !strcmp(line, "PAUSE") ? 1 : 0);
+		/* The Quick Menu opens: its Disc row follows the reply. */
+		if (!strcmp(line, "PAUSE") && !session.menu)
+			ra_command("GET_DISK");
+		/* A disc change waits for the game to run with the tray open. */
+		if (!strcmp(line, "RESUME") && session.disc_insert_ms)
+			session.disc_insert_ms = monotonic_ms() + DISC_INSERT_MS;
 		reply(c, "OK\n");
+	} else if (!strcmp(line, "DISC") && arg) {
+		/* DISC <index> (Quick Menu Disc row): open the tray, change the
+		 * disc, close it once the game has run DISC_INSERT_MS (unpaused). */
+		char *end;
+		long index = strtol(arg, &end, 10);
+
+		if (!running(c))
+			return;
+		if (*end || index < 0 || index >= session.discs) {
+			reply(c, "ERR disc\n");
+			return;
+		}
+		reply(c, "OK\n");
+		if (index == session.disc && !session.disc_insert_ms)
+			return;
+		ra_command("SET_DISK_EJECTED 1");
+		ra_command("SET_DISK_INDEX %ld", index);
+		session.disc = (int)index;
+		session.disc_insert_ms = monotonic_ms() + DISC_INSERT_MS;
+		log_msg("emud: disc %ld", index + 1);
+		notify_subscribers();
 	} else if (session.hardcore && session.state == SESSION_RUNNING &&
 		   (!strcmp(line, "SAVE_STATE") || !strcmp(line, "LOAD_STATE") ||
 		    !strcmp(line, "SLOT") || !strcmp(line, "FAST_FORWARD"))) {
@@ -4914,7 +5229,7 @@ static void handle_command(struct client *c, char *line)
 		ra_command("MENU_TOGGLE");
 		reply(c, "OK\n");
 	} else if (!strcmp(line, "QUIT")) {
-		if (!running(c))
+		if (!session_running(c))
 			return;
 		request_quit();
 		reply(c, "OK\n");
@@ -5024,13 +5339,15 @@ static void handle_command(struct client *c, char *line)
 		}
 		session.power_client = (int)(c - clients);
 		copy_text(session.power_action, sizeof(session.power_action), arg);
+		if (session.disc_insert_ms)
+			close_disc_tray();
 		/* Progress is safe before every power action (CLAUDE §20.1):
 		 * in the automatic slot, or with slot rotation in the next slot
 		 * (the quit before restart/poweroff then does not save again);
 		 * a state operation already running completes first. Hardcore
 		 * sessions have no states: SRAM is written by the quit. */
 		if (session.state == SESSION_RUNNING && !session.hardcore &&
-		    session.pending == PENDING_NONE) {
+		    !session.menu && session.pending == PENDING_NONE) {
 			if (!session.settings.slot_rotation)
 				(void)begin_save(AUTO_SLOT, true);
 			else if (save_next(true) && strcmp(arg, "sleep") != 0)

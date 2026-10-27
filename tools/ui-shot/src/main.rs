@@ -177,6 +177,16 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
             shot(win, w, h, name);
         }
     }
+    /* The RetroArch row, shown with the user's Settings → Gaming switch. */
+    qm.set_game_retroarch(true);
+    qm.set_game_confirm_index(-1);
+    for (name, sel) in [("qm_game_retroarch", 13), ("qm_game_retroarch_quit", 14)] {
+        qm.set_selected_index(sel);
+        for (w, h) in sizes {
+            shot(win, w, h, name);
+        }
+    }
+    qm.set_game_retroarch(false);
     /* State Slot dropdown (every slot, save time or Empty). */
     qm.set_selected_index(11);
     let slot_options: Vec<slint::SharedString> = (0..10)
@@ -210,6 +220,25 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
     }
     qm.set_game_layout_dropdown_open(false);
     qm.set_game_nds(false);
+    /* Multi-disc game: Disc (51) where Stylus would be, then its dropdown. */
+    qm.set_game_discs(3);
+    qm.set_game_disc_label("2 of 3".into());
+    qm.set_selected_index(51);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_disc");
+    }
+    let disc_options: Vec<slint::SharedString> = (1..=3).map(|n| format!("Disc {n}").into()).collect();
+    qm.set_game_slot_options(ModelRc::from(Rc::new(VecModel::from(disc_options))));
+    qm.set_game_slot_dropdown_disc(true);
+    qm.set_game_slot_dropdown_index(1);
+    qm.set_game_slot_dropdown_scroll(0);
+    qm.set_game_slot_dropdown_open(true);
+    for (w, h) in sizes {
+        shot(win, w, h, "qm_game_disc_dropdown");
+    }
+    qm.set_game_slot_dropdown_open(false);
+    qm.set_game_slot_dropdown_disc(false);
+    qm.set_game_discs(0);
     qm.set_game_stylus_on(false);
     /* Cheats (40) and Netplay (41) with their sheets. */
     let model = |v: Vec<&str>| ModelRc::from(Rc::new(VecModel::from(v.into_iter().map(SharedString::from).collect::<Vec<_>>())));
@@ -317,6 +346,15 @@ fn quick_menu(win: &Rc<MinimalSoftwareWindow>) {
     }
     qm.set_port_portmaster(false);
     qm.set_port_section_visible(false);
+    /* RetroArch's own menu without a game (the RetroArch app). */
+    qm.set_ra_section_visible(true);
+    for (name, sel) in [("qm_retroarch", 49), ("qm_retroarch_quit", 50)] {
+        qm.set_selected_index(sel);
+        for (w, h) in sizes {
+            shot(win, w, h, name);
+        }
+    }
+    qm.set_ra_section_visible(false);
     /* Game closing screen (surface-mode 3): with a cover (a synthetic
      * 3:4 gradient), then without. */
     let mut cover = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(300, 400);
@@ -593,7 +631,8 @@ fn main() {
         ("system", Box::new(|ui| { ui.set_display_color_temperature_available(false); ui.set_settings_selected_index(6); ui.set_settings_view(19); ui.set_system_index(5); ui.set_system_scroll_offset(0); })),
         ("power", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(3); ui.set_power_scroll_offset(0); })),
         ("power_quick", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_system_hypersleep(false); ui.set_power_index(3); ui.set_power_scroll_offset(0); })),
-        ("power_devices", Box::new(|ui| { ui.set_settings_open(true); ui.set_system_hypersleep(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(7); ui.set_power_scroll_offset(5); })),
+        ("power_key", Box::new(|ui| { ui.set_settings_open(true); ui.set_system_hypersleep(true); ui.set_system_power_key_sleep(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(5); ui.set_power_scroll_offset(2); })),
+        ("power_devices", Box::new(|ui| { ui.set_settings_open(true); ui.set_system_hypersleep(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(8); ui.set_power_scroll_offset(6); })),
         ("controllers", Box::new(|ui| { ui.set_settings_selected_index(2); ui.set_settings_view(0); })),
         ("lighting", Box::new(|ui| {
             ui.set_lighting_supported(true); ui.set_lighting_effect("orbit".into()); ui.set_lighting_color("theme".into());
@@ -611,6 +650,7 @@ fn main() {
                 (&s(ui, 770), "", &s(ui, 771), false, 1), (&s(ui, 772), "", "", true, -1),
                 (&s(ui, 774), &s(ui, 54), "", true, -1), (&s(ui, 775), "", &s(ui, 776), false, 0),
                 (&s(ui, 777), "", &s(ui, 778), false, 1),
+                (&s(ui, 1391), "", &s(ui, 1392), false, 0),
                 (&s(ui, 804), "", &s(ui, 805), false, -1),
                 (&s(ui, 792), "ScreenScraper", &s(ui, 793), true, -1),
                 (&s(ui, 565), "nuubfan", &s(ui, 567), false, -1),
@@ -618,17 +658,18 @@ fn main() {
                 (&s(ui, 576), "", &s(ui, 581), true, -1),
                 (&s(ui, 669), &s(ui, 222), &s(ui, 489), true, -1),
                 (&s(ui, 1028), "", &s(ui, 1029), true, -1)]));
-            ui.set_gaming_split(8);
-            ui.set_gaming_split2(14);
+            ui.set_gaming_split(9);
+            ui.set_gaming_split2(15);
         })),
         ("gaming", Box::new(|ui| { ui.set_settings_selected_index(3); ui.set_settings_view(68); ui.set_gaming_index(3); })),
-        ("gaming_library", Box::new(|ui| { ui.set_gaming_index(12); })),
-        ("gaming_syncthing", Box::new(|ui| { ui.set_gaming_index(15); })),
+        ("gaming_retroarch", Box::new(|ui| { ui.set_gaming_index(8); })),
+        ("gaming_library", Box::new(|ui| { ui.set_gaming_index(13); })),
+        ("gaming_syncthing", Box::new(|ui| { ui.set_gaming_index(16); })),
         ("gaming_signout", Box::new(|ui| {
-            ui.set_gaming_index(10);
+            ui.set_gaming_index(11);
             /* Sign Out waits for its confirming press. */
             let rows = ui.get_gaming_rows();
-            if let Some(mut r) = rows.row_data(10) { r.armed = true; r.detail = s(ui, 191).into(); rows.set_row_data(10, r); }
+            if let Some(mut r) = rows.row_data(11) { r.armed = true; r.detail = s(ui, 191).into(); rows.set_row_data(11, r); }
         })),
         ("game_hotkeys", Box::new(|ui| {
             ui.set_gaming_index(0);
@@ -890,8 +931,14 @@ fn main() {
                 (&s(ui, 1017), "", &s(ui, 1020), true, -1),
                 (&s(ui, 505), "", &s(ui, 512), false, -1),
                 (&s(ui, 508), "", &s(ui, 513), false, -1),
+                (&s(ui, 1396), "", &s(ui, 1397), false, -1),
                 (&s(ui, 510), "", &s(ui, 514), false, -1),
                 (&s(ui, 511), "", &s(ui, 515), false, -1)]));
+        })),
+        ("recovery_retroarch", Box::new(|ui| {
+            ui.set_gen_index(3); ui.set_gen_scroll(1);
+            let rows = ui.get_gen_rows();
+            if let Some(mut r) = rows.row_data(3) { r.armed = true; r.detail = s(ui, 191).into(); rows.set_row_data(3, r); }
         })),
         ("recovery_scope", Box::new(|ui| {
             ui.set_settings_choice_open(true); ui.set_settings_choice_title(s(ui, 1019).into());
@@ -902,9 +949,9 @@ fn main() {
         })),
         ("recovery_reset_armed", Box::new(|ui| {
             ui.set_settings_choice_open(false);
-            ui.set_gen_index(4); ui.set_gen_scroll(1);
+            ui.set_gen_index(5); ui.set_gen_scroll(2);
             let rows = ui.get_gen_rows();
-            if let Some(mut r) = rows.row_data(4) { r.armed = true; r.detail = s(ui, 517).into(); rows.set_row_data(4, r); }
+            if let Some(mut r) = rows.row_data(5) { r.armed = true; r.detail = s(ui, 517).into(); rows.set_row_data(5, r); }
         })),
         ("recovery_none", Box::new(|ui| {
             ui.set_gen_index(1); ui.set_gen_scroll(0);

@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Afslut terminal
 1387=Terminalen kunne ikke åbnes
+1388=Tænd/sluk-knappen giver dvale
+1389=Hold tænd/sluk-knappen inde for strømmenuen.
+1390=Tænd/sluk-knappen åbner strømmenuen.
+1391=RetroArch i Hurtigmenuen
+1392=Åbner RetroArchs menu under et spil
+1393=RetroArch kunne ikke åbnes
+1394=RETROARCH
+1395=Afslut RetroArch
+1396=Nulstil RetroArch
+1397=Sætter den aktuelle brugers RetroArch-indstillinger, kerneindstillinger og omtildelinger tilbage til standard. Spil, gemte spil og tilstande bevares.
+1398=RetroArch-indstillinger nulstillet
+1399=Disk
+1400=Disk {0}
+1401={0} af {1}

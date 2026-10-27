@@ -1386,3 +1386,17 @@
 1385=TERMINAL
 1386=Avsluta terminalen
 1387=Terminalen kunde inte öppnas
+1388=Strömknappen försätter i viloläge
+1389=Håll in strömknappen för strömmenyn.
+1390=Strömknappen öppnar strömmenyn.
+1391=RetroArch i Snabbmenyn
+1392=Öppnar RetroArchs meny under ett spel
+1393=RetroArch kunde inte öppnas
+1394=RETROARCH
+1395=Avsluta RetroArch
+1396=Återställ RetroArch
+1397=Återställer den aktuella användarens RetroArch-alternativ, kärnalternativ och ommappningar till standard. Spel, sparfiler och lägen behålls.
+1398=RetroArch-inställningar återställda
+1399=Skiva
+1400=Skiva {0}
+1401={0} av {1}

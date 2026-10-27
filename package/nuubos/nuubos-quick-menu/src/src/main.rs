@@ -82,6 +82,10 @@ const TERM_SOCKET: &str = "/run/nuubos/termd.sock";
 const TERM_RESUME_ROW: i32 = 46;
 const TERM_KEYBOARD_ROW: i32 = 47;
 const TERM_QUIT_ROW: i32 = 48;
+/* RETROARCH section: RetroArch's own menu without a game (nuubos-emud
+ * MENU, the RetroArch app): Resume, Quit RetroArch. */
+const RA_RESUME_ROW: i32 = 49;
+const RA_QUIT_ROW: i32 = 50;
 /* The keyboard sheet types into the terminal: it reserves its height
  * (exclusive zone), so labwc shrinks the terminal above it. */
 static TERMINAL_SHEET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -98,6 +102,9 @@ const KEYBOARD_SURFACE_HEIGHT: u32 = 270;
 
 const FRAME_INTERVAL_NS: u64 = 16_666_667;
 const VOLUME_OSD_TIMEOUT_MS: u64 = 1500;
+/* Press Power to Sleep (Settings → Power, EPIC-045): a press released
+ * before this sleeps, holding it this long opens the Power OSD. */
+const POWER_HOLD_MS: u64 = 600;
 const TOAST_INFO_MS: u64 = 4000;
 const TOAST_ALERT_MS: u64 = 6000;
 /* After a long line has scrolled to its end it stays readable this long. */
@@ -852,6 +859,7 @@ fn refresh_switch_user(ui: &QuickMenuWindow) {
             && !ui.get_stream_section_visible()
             && !ui.get_web_section_visible()
             && !ui.get_term_section_visible()
+            && !ui.get_ra_section_visible()
             && switch_user_available(),
     );
 }
@@ -1064,6 +1072,13 @@ fn refresh_system_profile(ui: &QuickMenuWindow) {
             ui.set_performance_profile_label(tr(ui, 241, "Unavailable").into());
         }
     }
+}
+
+/* nuubos-systemd power_key_sleep, read at each power key press. */
+fn power_key_sleeps() -> bool {
+    system_command("STATUS")
+        .map(|reply| reply.lines().any(|line| line == "power_key_sleep=1"))
+        .unwrap_or(false)
 }
 
 fn cycle_system_profile(ui: &QuickMenuWindow, delta: i32) {
@@ -1636,6 +1651,10 @@ impl ToastView {
 
 fn format_arg(template: &str, value: &str) -> String {
     template.replace("{0}", value)
+}
+
+fn format_arg2(template: &str, first: &str, second: &str) -> String {
+    template.replace("{0}", first).replace("{1}", second)
 }
 
 fn join_detail(parts: &[&str], separator: &str) -> String {
@@ -2773,6 +2792,11 @@ struct GameSnapshot {
     overlay: bool,
     overlay_items: String,
     fps: f32,
+    /* GAME → RetroArch row (Settings → Gaming, hidden by default). */
+    retroarch_menu: bool,
+    /* RetroArch's own menu without a game runs (the RetroArch app): the
+     * RETROARCH section instead of GAME; running stays false. */
+    menu: bool,
     /* RetroAchievements hardcore: no save states (EPIC-017). */
     hardcore: bool,
     /* Cheats turned on; netplay (off|starting|host|client), players
@@ -2785,6 +2809,10 @@ struct GameSnapshot {
      * whether the stylus mode is on (Stylus / Screen Layout rows). */
     nds_layout: Option<i32>,
     stylus: bool,
+    /* Multi-disc game: the disc in use (0-based) and how many (0 = no
+     * disc control; read by emud when the menu opens). */
+    disc: i32,
+    discs: i32,
 }
 
 fn parse_game_snapshot(reply: &str) -> GameSnapshot {
@@ -2800,6 +2828,8 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
             Some(("overlay", value)) => snapshot.overlay = value == "1",
             Some(("overlay_items", value)) => snapshot.overlay_items = value.to_owned(),
             Some(("fps", value)) => snapshot.fps = value.parse().unwrap_or(0.0),
+            Some(("retroarch_menu", value)) => snapshot.retroarch_menu = value == "1",
+            Some(("menu", value)) => snapshot.menu = value == "1",
             Some(("hardcore", value)) => snapshot.hardcore = value == "1",
             Some(("cheats_on", value)) => snapshot.cheats_on = value.parse().unwrap_or(0),
             Some(("netplay", value)) => snapshot.netplay = value.to_owned(),
@@ -2809,8 +2839,14 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
                 snapshot.nds_layout = value.parse::<i32>().ok().filter(|v| (0..4).contains(v))
             }
             Some(("stylus", value)) => snapshot.stylus = value != "off",
+            Some(("disc", value)) => snapshot.disc = value.parse().unwrap_or(0),
+            Some(("discs", value)) => snapshot.discs = value.parse().unwrap_or(0),
             _ => {}
         }
+    }
+    snapshot.menu = snapshot.menu && snapshot.running;
+    if snapshot.menu {
+        snapshot.running = false;
     }
     snapshot
 }
@@ -2821,6 +2857,10 @@ fn parse_game_snapshot(reply: &str) -> GameSnapshot {
  * (right stick, else left stick, else D-pad). */
 const STYLUS_ROW: i32 = 42;
 const LAYOUT_ROW: i32 = 43;
+/* GAME → Disc (51) of a multi-disc game (.m3u), where Stylus would be:
+ * the disc dropdown; a choice goes back to the game, emud changes the
+ * disc with the tray open for a moment (RC4 feature, EPIC-005/019). */
+const DISC_ROW: i32 = 51;
 
 fn toggle_stylus(ui: &QuickMenuWindow) {
     let control = input_command("STATUS")
@@ -2890,6 +2930,7 @@ fn open_slot_dropdown(ui: &QuickMenuWindow) {
         .collect();
     let current = read_game_snapshot().slot.clamp(0, (slots - 1).max(0));
     let visible = ui.get_audio_output_dropdown_visible_rows().max(1);
+    ui.set_game_slot_dropdown_disc(false);
     ui.set_game_slot_options(ModelRc::new(Rc::new(VecModel::from(options))));
     ui.set_game_slot_dropdown_index(current);
     ui.set_game_slot_dropdown_scroll((current - visible + 1).clamp(0, (slots - visible).max(0)));
@@ -2920,6 +2961,31 @@ fn apply_slot_dropdown(ui: &QuickMenuWindow) {
     }
     ui.set_game_slot_dropdown_open(false);
     apply_game_snapshot(ui, &read_game_snapshot());
+}
+
+/* The State Slot dropdown listing the discs instead, anchored to Disc. */
+fn open_disc_dropdown(ui: &QuickMenuWindow) {
+    let game = read_game_snapshot();
+    let discs = game.discs.max(1);
+    let options: Vec<SharedString> = (1..=discs)
+        .map(|n| format_arg(&tr(ui, 1400, "Disc {0}"), &n.to_string()).into())
+        .collect();
+    let current = game.disc.clamp(0, discs - 1);
+    let visible = ui.get_audio_output_dropdown_visible_rows().max(1);
+    ui.set_game_slot_dropdown_disc(true);
+    ui.set_game_slot_options(ModelRc::new(Rc::new(VecModel::from(options))));
+    ui.set_game_slot_dropdown_index(current);
+    ui.set_game_slot_dropdown_scroll((current - visible + 1).clamp(0, (discs - visible).max(0)));
+    ui.set_game_slot_dropdown_open(true);
+}
+
+fn apply_disc_dropdown(ui: &QuickMenuWindow) {
+    let disc = ui.get_game_slot_dropdown_index();
+    if let Err(error) = emulation_command(&format!("DISC\t{disc}")) {
+        eprintln!("quick-menu: game DISC failed={error}");
+    }
+    ui.set_game_slot_dropdown_open(false);
+    ui.set_game_slot_dropdown_disc(false);
 }
 
 /* One line of the performance overlay from the game snapshot and
@@ -3039,7 +3105,7 @@ fn read_game_snapshot() -> GameSnapshot {
 
 fn apply_game_snapshot(ui: &QuickMenuWindow, snapshot: &GameSnapshot) {
     let selected = ui.get_selected_index();
-    if !snapshot.running && ((8..TASK_ROW).contains(&selected) || matches!(selected, STYLUS_ROW | LAYOUT_ROW)) {
+    if !snapshot.running && ((8..TASK_ROW).contains(&selected) || matches!(selected, STYLUS_ROW | LAYOUT_ROW | DISC_ROW)) {
         ui.set_selected_index(3);
     }
     let nds = snapshot.running && snapshot.nds_layout.is_some();
@@ -3050,18 +3116,37 @@ fn apply_game_snapshot(ui: &QuickMenuWindow, snapshot: &GameSnapshot) {
         ui.set_game_layout_dropdown_open(false);
     }
     ui.set_game_nds(nds);
+    let discs = if snapshot.running && !nds { snapshot.discs } else { 0 };
+    if discs <= 1 && ui.get_selected_index() == DISC_ROW {
+        ui.set_selected_index(8);
+    }
+    if discs <= 1 && ui.get_game_slot_dropdown_disc() {
+        ui.set_game_slot_dropdown_open(false);
+    }
+    ui.set_game_discs(discs);
+    ui.set_game_disc_label(
+        format_arg2(&tr(ui, 1401, "{0} of {1}"), &(snapshot.disc + 1).to_string(), &discs.to_string()).into(),
+    );
     ui.set_game_nds_layout(snapshot.nds_layout.unwrap_or(0));
     ui.set_game_stylus_on(nds && snapshot.stylus);
     if !snapshot.running {
         ui.set_game_confirm_index(-1);
     }
     ui.set_game_section_visible(snapshot.running);
+    if !snapshot.menu && (RA_RESUME_ROW..=RA_QUIT_ROW).contains(&ui.get_selected_index()) {
+        ui.set_selected_index(3);
+    }
+    ui.set_ra_section_visible(snapshot.menu);
     ui.set_game_hardcore(snapshot.running && snapshot.hardcore);
     if ui.get_game_hardcore() && (9..=11).contains(&ui.get_selected_index()) {
         ui.set_selected_index(8);
         ui.set_game_slot_dropdown_open(false);
     }
     ui.set_game_overlay_on(snapshot.overlay);
+    ui.set_game_retroarch(snapshot.retroarch_menu);
+    if !snapshot.retroarch_menu && ui.get_selected_index() == 13 {
+        ui.set_selected_index(18);
+    }
     ui.set_game_slot_label(
         format_arg(&tr(ui, 423, "Slot {0}"), &snapshot.slot.to_string()).into(),
     );
@@ -4161,7 +4246,8 @@ fn cast_protocol_label(ui: &QuickMenuWindow, protocol: &str) -> String {
 }
 
 fn cast_options(ui: &QuickMenuWindow, state: &CastState) -> Vec<(CastEntry, String)> {
-    let playing = ui.get_game_section_visible() || ui.get_stream_section_visible() || ui.get_port_section_visible();
+    let playing = ui.get_game_section_visible() || ui.get_stream_section_visible() || ui.get_port_section_visible()
+        || ui.get_ra_section_visible();
     let mut options = Vec::new();
     if state.state != "idle" && !state.state.is_empty() {
         options.push((CastEntry::Stop, tr(ui, 1195, "Stop Casting")));
@@ -4773,13 +4859,23 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
         if ui.get_game_nds() {
             indices.extend_from_slice(&[STYLUS_ROW, LAYOUT_ROW]);
         }
-        indices.extend_from_slice(&[12, CHEATS_ROW, NET_ROW, 13, 18, 28, 14]);
+        if ui.get_game_discs() > 1 {
+            indices.push(DISC_ROW);
+        }
+        indices.extend_from_slice(&[12, CHEATS_ROW, NET_ROW]);
+        if ui.get_game_retroarch() {
+            indices.push(13);
+        }
+        indices.extend_from_slice(&[18, 28, 14]);
     }
     if ui.get_port_section_visible() {
         indices.extend_from_slice(&[PORT_RESUME_ROW, PORT_QUIT_ROW]);
     }
     if ui.get_term_section_visible() {
         indices.extend_from_slice(&[TERM_RESUME_ROW, TERM_KEYBOARD_ROW, TERM_QUIT_ROW]);
+    }
+    if ui.get_ra_section_visible() {
+        indices.extend_from_slice(&[RA_RESUME_ROW, RA_QUIT_ROW]);
     }
     if ui.get_stream_section_visible() {
         indices.extend_from_slice(if ui.get_stream_steamlink() { &[15, 36, 37, 38, 16] } else { &[15, 36, 37, 38, 16, 17] });
@@ -4823,6 +4919,8 @@ fn first_selectable_index(ui: &QuickMenuWindow) -> i32 {
         PORT_RESUME_ROW
     } else if ui.get_term_section_visible() {
         TERM_RESUME_ROW
+    } else if ui.get_ra_section_visible() {
+        RA_RESUME_ROW
     } else if ui.get_stream_section_visible() {
         15
     } else if ui.get_web_section_visible() {
@@ -4841,6 +4939,8 @@ fn first_selectable_index_without_music(ui: &QuickMenuWindow) -> i32 {
         PORT_RESUME_ROW
     } else if ui.get_term_section_visible() {
         TERM_RESUME_ROW
+    } else if ui.get_ra_section_visible() {
+        RA_RESUME_ROW
     } else if ui.get_stream_section_visible() {
         15
     } else if ui.get_web_section_visible() {
@@ -5244,7 +5344,7 @@ fn map_overlay(
     /* The game waits underneath the menu (EPIC-005); every way out of the
      * menu resumes it (unmap_overlay). Switch User is not offered over a
      * game. */
-    if game.running {
+    if game.running || game.menu {
         game_action("PAUSE");
     }
     let stream = read_stream_state();
@@ -5552,7 +5652,7 @@ fn unmap_overlay(
     ui.set_power_osd_open(false);
     ui.set_power_osd_confirm(false);
     set_menu_capture(false);
-    if ui.get_game_section_visible() {
+    if ui.get_game_section_visible() || ui.get_ra_section_visible() {
         game_action("RESUME");
     }
     if ui.get_port_section_visible() {
@@ -5799,12 +5899,16 @@ fn activate_game_row(
             open_players_dropdown(ui);
             return redraw_overlay(ui, queue, state, qh, conn);
         }
+        DISC_ROW if ui.get_game_discs() > 1 => {
+            open_disc_dropdown(ui);
+            return redraw_overlay(ui, queue, state, qh, conn);
+        }
         12 => game_action("RESET"),
         CHEATS_ROW | NET_ROW => {
             open_game_sheet(ui, index);
             return redraw_overlay(ui, queue, state, qh, conn);
         }
-        13 => {
+        13 if ui.get_game_retroarch() => {
             /* RetroArch's own menu takes over; it pauses the game. */
             game_action("ADVANCED");
             resume = false;
@@ -5977,6 +6081,15 @@ fn handle_event(
         match event.action.as_str() {
             "menu_up" => move_slot_dropdown(ui, -1),
             "menu_down" => move_slot_dropdown(ui, 1),
+            /* A disc choice goes back to the game: the change needs it
+             * running (the tray closes after a moment of play). */
+            "menu_confirm" if ui.get_game_slot_dropdown_disc() => {
+                apply_disc_dropdown(ui);
+                flush_brightness(ui, brightness_dirty)?;
+                unmap_overlay(ui, queue, state, conn);
+                *mapped = false;
+                return Ok(());
+            }
             "menu_confirm" => apply_slot_dropdown(ui),
             "menu_back" => ui.set_game_slot_dropdown_open(false),
             _ => {}
@@ -6139,6 +6252,20 @@ fn handle_event(
                 }
                 /* Nothing to resume: the port is ending. */
                 ui.set_port_section_visible(false);
+            }
+            flush_brightness(ui, brightness_dirty)?;
+            unmap_overlay(ui, queue, state, conn);
+            *mapped = false;
+        }
+        "menu_confirm" if *mapped
+            && !ui.get_lifecycle_active()
+            && ui.get_ra_section_visible()
+            && (RA_RESUME_ROW..=RA_QUIT_ROW).contains(&ui.get_selected_index()) =>
+        {
+            if ui.get_selected_index() == RA_QUIT_ROW {
+                game_action("QUIT");
+                /* Nothing to resume: RetroArch is closing. */
+                ui.set_ra_section_visible(false);
             }
             flush_brightness(ui, brightness_dirty)?;
             unmap_overlay(ui, queue, state, conn);
@@ -6412,10 +6539,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut animation_deadline: Option<Instant> = None;
     let mut pending_sleep = false;
     let mut brightness_dirty = false;
+    /* Press Power to Sleep: when a held power key opens the Power OSD. */
+    let mut power_hold: Option<Instant> = None;
 
     loop {
         platform::update_timers_and_animations();
-        let wake = [osd_deadline, notifier.toasts.deadline, animation_deadline]
+        let wake = [osd_deadline, notifier.toasts.deadline, animation_deadline, power_hold]
             .into_iter()
             .flatten()
             .min();
@@ -6439,6 +6568,69 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut dirty = false;
         let mut toast_dirty = false;
         let mut hud_dirty = false;
+
+        /* Press Power to Sleep (user request 2026-10-26): the press only
+         * starts the hold; a release before POWER_HOLD_MS sleeps, the hold
+         * opens the Power OSD through the ordinary power press below. With
+         * the switch off, in Media Screen Off, during the lifecycle curtain
+         * or the closing screen and with the Power OSD open (power closes
+         * it) the key works as before. */
+        let mut power_sleep = false;
+        let event = match event {
+            Some(AppEvent::Input(input)) if input.action == "power" => {
+                if input.pressed {
+                    let plain = fs::metadata(SCREEN_OFF_FILE).is_ok()
+                        || ui.get_lifecycle_active()
+                        || ui.get_closing_active()
+                        || (mapped && ui.get_power_osd_open())
+                        || !power_key_sleeps();
+                    if plain {
+                        Some(AppEvent::Input(input))
+                    } else {
+                        power_hold = Some(Instant::now() + Duration::from_millis(POWER_HOLD_MS));
+                        None
+                    }
+                } else if power_hold.take().is_some() {
+                    power_sleep = true;
+                    None
+                } else {
+                    Some(AppEvent::Input(input))
+                }
+            }
+            None if power_hold.is_some_and(|deadline| Instant::now() >= deadline) => {
+                power_hold = None;
+                Some(AppEvent::Input(LogicalEvent { action: "power".into(), pressed: true }))
+            }
+            other => other,
+        };
+
+        if power_sleep {
+            /* As the Quick Menu's Sleep row: every surface down first,
+             * then the canonical suspend helper; the key is already up. */
+            append_action_log("action=sleep phase=power-key-release");
+            if keyboard.visible {
+                hide_keyboard(&ui, &mut keyboard);
+            }
+            if passive.is_some() {
+                unmap_passive(&ui, &mut queue, &mut state, &conn);
+                passive = None;
+                osd_deadline = None;
+            }
+            if mapped {
+                let _ = flush_brightness(&ui, &mut brightness_dirty);
+                unmap_overlay(&ui, &mut queue, &mut state, &conn);
+                mapped = false;
+            }
+            pending_sleep = false;
+            notifier.clear(&ui, &conn);
+            if let Err(error) = run_suspend_sync() {
+                eprintln!("quick-menu: power key sleep failed={}", error);
+            }
+            if notifier.toasts.resume() {
+                notifier.apply(&ui);
+                notifier.sync(&conn, ui.get_lifecycle_active());
+            }
+        }
 
         if let Some(event) = event {
             match event {

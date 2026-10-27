@@ -1,8 +1,9 @@
-nuubOS Netplay application icon
-===============================
+nuubOS Netplay and RetroArch application icons
+==============================================
 
-netplay.png is the "netplay.png" icon of the "XMB Monochrome" theme from
-the libretro RetroArch assets repository, redistributed unmodified:
+netplay.png and retroarch.png are the "netplay.png" and "retroarch.png"
+icons of the "XMB Monochrome" theme from the libretro RetroArch assets
+repository, redistributed unmodified:
 
   https://github.com/libretro/retroarch-assets/tree/master/xmb/monochrome/png
   commit d9f969054dc7fbb6fa89519036d2b971e0855b51

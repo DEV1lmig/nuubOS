@@ -77,6 +77,7 @@ struct config_state {
     int charge_limit;           /* 80..100 %, 100=off */
     bool hypersleep;            /* sleep with the SoC off (default) */
     bool fast_startup;          /* cold starts reuse the DRAM training (experimental, off) */
+    bool power_key_sleep;       /* power key: press = Sleep, hold = power menu */
 };
 
 struct runtime_state {
@@ -283,6 +284,7 @@ static int atomic_save_config(const struct config_state *cfg)
     fprintf(f, "CHARGE_LIMIT=%d\n", cfg->charge_limit);
     fprintf(f, "HYPERSLEEP=%d\n", cfg->hypersleep ? 1 : 0);
     fprintf(f, "EXPERIMENTAL_FAST_STARTUP=%d\n", cfg->fast_startup ? 1 : 0);
+    fprintf(f, "POWER_KEY_SLEEP=%d\n", cfg->power_key_sleep ? 1 : 0);
     if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
         fclose(f); unlink(tmp); return -1;
     }
@@ -313,6 +315,8 @@ static void config_defaults(struct config_state *cfg)
     /* Off until it is qualified on every board (user decision 2026-10-25:
      * an RG SP froze and restarted with it on, ran clean with it off). */
     cfg->fast_startup = false;
+    /* Off: a press opens the power menu, as before RC4 (EPIC-045). */
+    cfg->power_key_sleep = false;
 }
 
 /* Charge limit: 80..100 in steps of 5 (100 = charge to full). */
@@ -355,6 +359,8 @@ static void load_config(struct config_state *cfg)
             /* A new key: FAST_STARTUP=1 was written for everyone while
              * it was on by default, so it is not a choice; ignored. */
             cfg->fast_startup = strcmp(val, "0") != 0;
+        } else if (!strcmp(key, "POWER_KEY_SLEEP")) {
+            cfg->power_key_sleep = strcmp(val, "0") != 0;
         }
     }
     fclose(f);
@@ -1101,6 +1107,7 @@ static void reply_status(int fd, const struct runtime_state *st)
         "charge_limit.supported=%d\n"
         "hypersleep=%d\n"
         "fast_startup=%d\n"
+        "power_key_sleep=%d\n"
         "battery.percent=%d\n"
         "battery.state=%s\n"
         "cpu.freq_khz=%lld\n"
@@ -1148,6 +1155,7 @@ static void reply_status(int fd, const struct runtime_state *st)
         charge_limit_path() ? 1 : 0,
         st->cfg.hypersleep ? 1 : 0,
         st->cfg.fast_startup ? 1 : 0,
+        st->cfg.power_key_sleep ? 1 : 0,
         st->battery_percent,st->battery_state,
         cpu,gpu,tcpu,tgpu,mem_total_kib,mem_available_kib,uptime,model,kernel,ip,
         sv.sd1_health,sv.sd1_action,sv.userdata_total,sv.userdata_free,
@@ -1260,6 +1268,12 @@ static void handle_command(struct client *c, struct runtime_state *st, const cha
         st->cfg.fast_startup=x==1;
         if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
         apply_fast_startup(&st->cfg);
+        (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
+    }
+    if(sscanf(line,"SET POWER_KEY_SLEEP %d",&x)==1){
+        if(x!=0 && x!=1){(void)write_all(c->fd,"ERR invalid value\n");return;}
+        st->cfg.power_key_sleep=x==1;
+        if(atomic_save_config(&st->cfg)!=0){(void)write_all(c->fd,"ERR persist failed\n");return;}
         (void)write_all(c->fd,"OK\n"); notify_subscribers(); return;
     }
     if(sscanf(line,"SET DIAGNOSTICS %d",&x)==1){

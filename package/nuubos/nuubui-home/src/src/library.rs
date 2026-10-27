@@ -1393,6 +1393,35 @@ fn launch_session(ui: &HomeWindow, running: bool) {
     }
 }
 
+/* The RetroArch application (user request 2026-10-27): RetroArch's own
+ * menu without a game, as the active user (nuubos-emud MENU). Its session
+ * covers Home like a game. */
+fn open_retroarch(ui: &HomeWindow) {
+    if GAME_RUNNING.load(Ordering::SeqCst) || PORT_RUNNING.load(Ordering::SeqCst) {
+        return;
+    }
+    play_ui_sound("launch");
+    let weak = ui.as_weak();
+    thread::spawn(move || {
+        let reason = match emulation_command("MENU") {
+            Ok(reply) if reply.trim() == "OK" => return,
+            Ok(reply) => reply.trim().strip_prefix("ERR ").unwrap_or("").to_owned(),
+            Err(error) => {
+                eprintln!("home: retroarch menu failed={error}");
+                String::new()
+            }
+        };
+        if reason == "busy" {
+            return;
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            play_ui_sound("error");
+            show_notice(&ui, tr(&ui, 1393, "RetroArch could not be opened"));
+        });
+    });
+}
+
 /* mode: resume | new | slot:N (nuubos-emud LAUNCH). */
 pub fn launch_with_mode(ui: &HomeWindow, id: &str, available: bool, mode: &str) {
     if !available {
@@ -1820,6 +1849,7 @@ pub fn handle_home_action(ui: &HomeWindow, action: &str) {
                     crate::netplayui::open(ui)
                 }
                 _ if card.key.as_str() == "terminal" => crate::terminalui::open(ui),
+                _ if card.key.as_str() == "retroarch" => open_retroarch(ui),
                 /* Other applications need the future application session
                  * service. */
                 _ => show_notice(ui, tr(ui, 411, "Launching is not available yet")),

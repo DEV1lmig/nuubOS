@@ -196,6 +196,7 @@ struct SystemSnapshot {
     charge_limit_supported: bool,
     hypersleep: bool,
     fast_startup: bool,
+    power_key_sleep: bool,
     /* Diagnostic mode (nuubos-systemd): boots still to log, running boot. */
     diag_boots: i32,
     diag_active: bool,
@@ -226,6 +227,7 @@ impl Default for SystemSnapshot {
             charge_limit_supported: false,
             hypersleep: true,
             fast_startup: true,
+            power_key_sleep: false,
             diag_boots: 0,
             diag_active: false,
             cpu_freq_khz: -1,
@@ -648,6 +650,7 @@ fn parse_system_snapshot(reply: &str) -> SystemSnapshot {
             "charge_limit.supported" => s.charge_limit_supported = value == "1",
             "hypersleep" => s.hypersleep = value != "0",
             "fast_startup" => s.fast_startup = value != "0",
+            "power_key_sleep" => s.power_key_sleep = value == "1",
             "diagnostics.boots" => s.diag_boots = value.parse().unwrap_or(0),
             "diagnostics.active" => s.diag_active = value == "1",
             "cpu.freq_khz" => s.cpu_freq_khz = value.parse().unwrap_or(-1),
@@ -692,6 +695,7 @@ fn apply_system_snapshot(ui: &HomeWindow, s: &SystemSnapshot) {
     ui.set_system_charge_limit(s.charge_limit);
     ui.set_system_hypersleep(s.hypersleep);
     ui.set_system_fast_startup(s.fast_startup);
+    ui.set_system_power_key_sleep(s.power_key_sleep);
     /* Diagnostic Mode row: Off, or the starts still to log (1351); On (222)
      * for the last logged start. */
     ui.set_diag_mode_on(s.diag_active || s.diag_boots > 0);
@@ -4396,10 +4400,11 @@ fn recovery_run(ui: &HomeWindow, args: Vec<String>, ok_index: usize, ok_text: &'
 }
 
 /* Recovery (28, filesui), REPAIR & RESET (EPIC-049/050): Repair Settings,
- * Reset User Profile, Factory Reset, Full Factory Reset, and Exit Safe Mode
- * in safe mode. The resets are armed by the first press and run on the
- * next; the full one needs one more press (recovery-stage). */
-const RECOVERY_KEYS: [&str; 5] = ["repair", "reset-user", "reset-factory", "reset-all", "safe-exit"];
+ * Reset User Profile, Reset RetroArch Settings, Factory Reset, Full Factory
+ * Reset, and Exit Safe Mode in safe mode. The resets are armed by the first
+ * press and run on the next; the full one needs one more press
+ * (recovery-stage). */
+const RECOVERY_KEYS: [&str; 6] = ["repair", "reset-user", "reset-retroarch", "reset-factory", "reset-all", "safe-exit"];
 
 pub(crate) fn is_recovery_key(key: &str) -> bool {
     RECOVERY_KEYS.contains(&key)
@@ -4412,6 +4417,8 @@ pub(crate) fn recovery_rows(ui: &HomeWindow) -> Vec<(String, GenRow, bool)> {
             normal
         } else if key == "reset-all" && ui.get_recovery_stage() == 1 {
             tr(ui, 517, "Press once more to also erase all saves")
+        } else if key == "reset-retroarch" {
+            tr(ui, 191, "Press again to confirm")
         } else {
             tr(ui, 516, "Press again to confirm • the console restarts")
         }
@@ -4422,12 +4429,17 @@ pub(crate) fn recovery_rows(ui: &HomeWindow) -> Vec<(String, GenRow, bool)> {
             tr(ui, 512, "Finds and fixes damaged settings files. Games and saves are not touched.")), true),
         ("reset-user".to_owned(), gameui::row(tr(ui, 508, "Reset User Profile"), String::new(),
             prompt("reset-user", tr(ui, 513, "Resets the current user's preferences, controls and app settings. Saves are kept. The console restarts."))), has_user),
+        /* User request 2026-10-27: only RetroArch's own configuration
+         * (nuubos-emud RESET_RETROARCH). */
+        ("reset-retroarch".to_owned(), gameui::row(tr(ui, 1396, "Reset RetroArch Settings"), String::new(),
+            prompt("reset-retroarch", tr(ui, 1397, "Puts the current user's RetroArch options, core options and remaps back to the defaults. Games, saves and states are kept."))), has_user),
         ("reset-factory".to_owned(), gameui::row(tr(ui, 510, "Factory Reset"), String::new(),
             prompt("reset-factory", tr(ui, 514, "Erases users, settings, Wi-Fi networks and Bluetooth pairings, then starts the initial setup. Games and BIOS are kept."))), true),
         ("reset-all".to_owned(), gameui::row(tr(ui, 511, "Full Factory Reset"), String::new(),
             prompt("reset-all", tr(ui, 515, "Like Factory Reset, and also erases every user's saves, states, screenshots and app data. Games and BIOS are kept."))), true),
     ];
     rows[1].1.enabled = has_user;
+    rows[2].1.enabled = has_user;
     if ui.get_safe_mode() {
         rows.push(("safe-exit".to_owned(), gameui::row(tr(ui, 520, "Restart Normally"), String::new(),
             tr(ui, 712, "Leaves safe mode and restarts with your theme and settings.")), true));
@@ -4462,6 +4474,29 @@ pub(crate) fn recovery_confirm(ui: &HomeWindow, key: &str) -> bool {
                 "reset-factory" => recovery_run(ui, vec!["factory-reset".into(), "settings".into()], 0, ""),
                 _ => recovery_run(ui, vec!["factory-reset".into(), "userdata".into()], 0, ""),
             }
+        }
+        "reset-retroarch" => {
+            if !gameui::arm_or(ui, key) {
+                return true;
+            }
+            gameui::render(ui);
+            let weak = ui.as_weak();
+            thread::spawn(move || {
+                let ok = gameui::emulation("RESET_RETROARCH", false).trim() == "OK";
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        let text = if ok {
+                            tr(&ui, 1398, "RetroArch settings reset")
+                        } else {
+                            tr(&ui, 507, "The recovery operation failed")
+                        };
+                        ui.set_recovery_notice(text.into());
+                        if ui.get_settings_view() == filesui::RECOVERY_VIEW {
+                            gameui::notice(&ui, ui.get_recovery_notice().to_string());
+                        }
+                    }
+                });
+            });
         }
         "safe-exit" if ui.get_safe_mode() => exit_safe_mode(),
         _ => return false,
@@ -4567,17 +4602,18 @@ fn safe_confirm(ui: &HomeWindow, row: i32, settings_active: &Arc<AtomicBool>) {
 const SYSTEM_ROWS: i32 = 6;
 /* Settings → Power (settings-view 69, category 5): POWER (0 Performance
  * Profile, 1 Automatic Battery Saver, 2 Sleep After, 3 Hypersleep, 4 Fast
- * Startup) | BATTERY (5 Charge, 6 Health, read-only; 7 Charge Limit when the
- * battery driver has one) | CONNECTED DEVICES (after them, read-only, at
- * least one row: "none"). */
+ * Startup, 5 Press Power to Sleep) | BATTERY (6 Charge, 7 Health,
+ * read-only; 8 Charge Limit when the battery driver has one) | CONNECTED
+ * DEVICES (after them, read-only, at least one row: "none"). */
 const POWER_VIEW: i32 = 69;
 const POWER_HYPERSLEEP_ROW: i32 = 3;
 const POWER_FAST_STARTUP_ROW: i32 = 4;
-const POWER_BATTERY_START: i32 = 5;
-const POWER_CHARGE_LIMIT_ROW: i32 = 7;
+const POWER_KEY_SLEEP_ROW: i32 = 5;
+const POWER_BATTERY_START: i32 = 6;
+const POWER_CHARGE_LIMIT_ROW: i32 = 8;
 
 fn power_devices_start(ui: &HomeWindow) -> i32 {
-    if ui.get_system_charge_limit_supported() { 8 } else { 7 }
+    if ui.get_system_charge_limit_supported() { 9 } else { 8 }
 }
 
 fn power_row_count(ui: &HomeWindow) -> i32 {
@@ -5320,6 +5356,12 @@ fn handle_settings_action(
                     } else {
                         ui.set_fast_startup_armed(true);
                     }
+                }
+                /* Press Power to Sleep (EPIC-045): the Quick Menu reads it
+                 * at each power key press. */
+                POWER_KEY_SLEEP_ROW => {
+                    let next = if ui.get_system_power_key_sleep() { 0 } else { 1 };
+                    system_set(ui, format!("SET POWER_KEY_SLEEP {next}"));
                 }
                 POWER_CHARGE_LIMIT_ROW if ui.get_system_charge_limit_supported() => open_charge_limit_dropdown(ui),
                 /* Battery and device rows are read-only. */
