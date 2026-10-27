@@ -1377,3 +1377,12 @@
 1376=Hozzáférés a zenékhez és videókhoz
 1377=Ki: ez a port nem látja a zenéidet és videóidat
 1378=Be: ez a port olvashatja a zenéidet és videóidat, de nem módosíthatja őket
+1379=1x
+1380=2x
+1381=Auto: 1x a konzolon, 2x tévén
+1382=A 2x élesebb, de lelassíthatja a játékot
+1383=A Gyors hibásan rajzolhat füstöt és üveget
+1384=Terminál
+1385=TERMINÁL
+1386=Kilépés a terminálból
+1387=A terminált nem sikerült megnyitni

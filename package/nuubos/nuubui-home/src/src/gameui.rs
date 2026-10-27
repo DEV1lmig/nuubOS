@@ -104,6 +104,11 @@ struct Details {
     /* Nintendo 64 accessory: "" = Rumble Pak (default), "memory". */
     pak_supported: bool,
     pak: String,
+    /* 3D render resolution: "" = Auto, "1x", "2x"; the default is "auto"
+     * (by the output), "1x", "2x" or "custom" (the user's core option). */
+    resolution_supported: bool,
+    resolution: String,
+    resolution_default: String,
     /* nuubos-biosctl: missing required firmware for the system. */
     bios_missing: bool,
 }
@@ -323,6 +328,9 @@ fn parse_game_settings(reply: &str, d: &mut Details) {
             "accuracy_default" => d.accuracy_default = value.into(),
             "pak_supported" => d.pak_supported = value == "1",
             "pak" => d.pak = value.into(),
+            "resolution_supported" => d.resolution_supported = value == "1",
+            "resolution" => d.resolution = value.into(),
+            "resolution_default" => d.resolution_default = value.into(),
             _ => {}
         }
     }
@@ -523,13 +531,34 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                     accuracy_label(ui, &d.accuracy)
                 };
                 let mut r = nav(tr(ui, 1314, "Emulation Accuracy"), accuracy);
-                r.detail = tr(ui, 1317, "Choose Accurate if the game misbehaves").into();
+                /* Flycast (translucent sorting, default Accurate) or melonDS-nuubOS. */
+                r.detail = if matches!(d.system.as_str(), "dreamcast" | "naomi" | "atomiswave") {
+                    tr(ui, 1383, "Fast can draw smoke and glass wrong")
+                } else {
+                    tr(ui, 1317, "Choose Accurate if the game misbehaves")
+                }
+                .into();
                 rows.push(("accuracy".into(), r, true));
             }
             if d.pak_supported {
                 let mut r = nav(tr(ui, 1339, "Controller Accessory"), pak_label(ui, &d.pak));
                 r.detail = tr(ui, 1342, "One fits at a time: choose Controller Pak if the game saves on it").into();
                 rows.push(("pak".into(), r, true));
+            }
+            if d.resolution_supported {
+                let value = if d.resolution.is_empty() {
+                    default_label(ui, &resolution_label(ui, &d.resolution_default))
+                } else {
+                    resolution_label(ui, &d.resolution)
+                };
+                let mut r = nav(tr(ui, 454, "Resolution"), value);
+                r.detail = if d.resolution_default == "auto" {
+                    tr(ui, 1381, "Auto: 1x on the console, 2x on a TV")
+                } else {
+                    tr(ui, 1382, "2x is sharper but can slow the game down")
+                }
+                .into();
+                rows.push(("resolution".into(), r, true));
             }
             rows.push(("reset".into(), row(tr(ui, 535, "Reset Game Settings"), String::new(),
                 armed_detail(&st.armed, "reset", tr(ui, 598, "Press again to reset"),
@@ -1330,6 +1359,24 @@ fn pak_label(ui: &HomeWindow, v: &str) -> String {
     if v == "memory" { tr(ui, 1341, "Controller Pak") } else { tr(ui, 1340, "Rumble Pak") }
 }
 
+fn resolution_label(ui: &HomeWindow, v: &str) -> String {
+    match v {
+        "auto" => tr(ui, 52, "Auto"),
+        "2x" => tr(ui, 1380, "2x"),
+        "custom" => tr(ui, 315, "Custom"),
+        _ => tr(ui, 1379, "1x"),
+    }
+}
+
+fn open_resolution_choice(ui: &HomeWindow) {
+    let d = STATE.with(|st| st.borrow().details.clone());
+    let mut options = vec![(String::new(), default_label(ui, &resolution_label(ui, &d.resolution_default)))];
+    for v in ["1x", "2x"] {
+        options.push((v.to_owned(), resolution_label(ui, v)));
+    }
+    open_settings_choice(ui, "game-resolution", &tr(ui, 454, "Resolution"), options, &d.resolution);
+}
+
 /* Nintendo 64: Rumble Pak (the default, stored empty) or Controller Pak. */
 fn open_pak_choice(ui: &HomeWindow) {
     let d = STATE.with(|st| st.borrow().details.clone());
@@ -1381,6 +1428,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-filter" => game_set(ui, "filter", value),
         "game-accuracy" => game_set(ui, "accuracy", value),
         "game-pak" => game_set(ui, "pak", value),
+        "game-resolution" => game_set(ui, "resolution", value),
         "emu-slots" => emu_set(ui, "slots", value),
         "game-fill" => start_bulk(ui, value),
         "update-channel" => {
@@ -1517,6 +1565,7 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
         "filter" => open_filter_choice(ui),
         "accuracy" => open_accuracy_choice(ui),
         "pak" => open_pak_choice(ui),
+        "resolution" => open_resolution_choice(ui),
         "reset" => {
             if arm_or(ui, "reset") {
                 let line = format!("GAME_RESET\t{}", d.id);

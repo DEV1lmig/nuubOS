@@ -1393,8 +1393,10 @@ static bool client_wants_action(const struct client *client,
 		       client->role == CLIENT_ROLE_GENERIC;
 
 	if (strcmp(action, "settings") == 0) {
+		/* Under the Quick Menu (or its keyboard) Start is its own:
+		 * the keyboard's Done / Enter (user request 2026-10-27). */
 		if (menu_open)
-			return false;
+			return client->role == CLIENT_ROLE_QUICK_MENU;
 
 		return client->role == CLIENT_ROLE_HOME ||
 		       client->role == CLIENT_ROLE_GENERIC;
@@ -1770,6 +1772,9 @@ struct vpad {
 	int player;
 	bool pressed[PAD_CONTROL_COUNT];
 	int axis[4];
+	/* The sticks before the deadzone (LX LY RX RY), so it is applied to
+	 * each stick as a whole. */
+	int raw[4];
 	int hat_x;
 	int hat_y;
 	bool dirty;
@@ -2180,6 +2185,7 @@ static void vpad_release(struct vpad *pad)
 			vpad_write(pad, EV_KEY, pad_controls[c].code, 0);
 	}
 	for (a = 0; a < 4; a++) {
+		pad->raw[a] = 0;
 		if (pad->axis[a] == 0)
 			continue;
 		pad->axis[a] = 0;
@@ -2406,16 +2412,46 @@ static int scale_abs(const struct input_dev *input, int code, int value)
 	return (int)scaled;
 }
 
-/* Per-axis deadzone with the remaining travel rescaled to full range. */
-static int apply_deadzone(int value, int percent)
+static long long isqrt(long long v)
+{
+	long long r = 0, bit = 1LL << 62;
+
+	while (bit > v)
+		bit >>= 2;
+	while (bit) {
+		if (v >= r + bit) {
+			v -= r + bit;
+			r = (r >> 1) + bit;
+		} else {
+			r >>= 1;
+		}
+		bit >>= 2;
+	}
+	return r;
+}
+
+/*
+ * Radial deadzone of one stick (GitHub #19, 2026-10-27): the deadzone is
+ * a circle and the travel beyond it is rescaled along the stick's own
+ * direction. The per-axis deadzone before zeroed the small axis near the
+ * cardinal directions, so the stick snapped to them (PSP Zuma, any free
+ * aiming); a square gate's corners are limited to full deflection.
+ */
+static void radial_deadzone(int x, int y, int percent, int *ox, int *oy)
 {
 	long long dz = (long long)PAD_AXIS_MAX * percent / 100;
-	long long magnitude = value < 0 ? -(long long)value : value;
+	long long m = isqrt((long long)x * x + (long long)y * y);
+	long long scaled;
 
-	if (magnitude <= dz || dz >= PAD_AXIS_MAX)
-		return 0;
-	magnitude = (magnitude - dz) * PAD_AXIS_MAX / (PAD_AXIS_MAX - dz);
-	return (int)(value < 0 ? -magnitude : magnitude);
+	if (m <= dz || dz >= PAD_AXIS_MAX) {
+		*ox = *oy = 0;
+		return;
+	}
+	scaled = (m - dz) * PAD_AXIS_MAX / (PAD_AXIS_MAX - dz);
+	if (scaled > PAD_AXIS_MAX)
+		scaled = PAD_AXIS_MAX;
+	*ox = (int)((long long)x * scaled / m);
+	*oy = (int)((long long)y * scaled / m);
 }
 
 /* Held by PADPRESS on player 1 (only the buttons it can hold). */
@@ -2667,10 +2703,17 @@ static bool forward_game_event(const struct input_dev *input,
 				value = (PAD_AXIS_MAX - value) / 2;
 			else if (src->dir < 0)
 				value = -value;
-			value = apply_deadzone(value, map->deadzone[a / 2]);
-			if (value != pad->axis[a]) {
-				pad->axis[a] = value;
-				vpad_write(pad, EV_ABS, pad_controls[c].code, value);
+			{
+				int s = a & ~1, out[2];
+
+				pad->raw[a] = value;
+				radial_deadzone(pad->raw[s], pad->raw[s + 1], map->deadzone[a / 2],
+						&out[0], &out[1]);
+				for (int k = 0; k < 2; k++)
+					if (out[k] != pad->axis[s + k]) {
+						pad->axis[s + k] = out[k];
+						vpad_write(pad, EV_ABS, pad_controls[PAD_AXIS_FIRST + s + k].code, out[k]);
+					}
 			}
 		} else {
 			/* Half axis or trigger bound to a button/D-pad. */
@@ -2727,9 +2770,37 @@ static const struct web_key web_keys[PAD_CONTROL_COUNT] = {
 	[PAD_SELECT] = { KEY_LEFTSHIFT, KEY_TAB, NULL },
 };
 
+/* Terminal (nuubos-termd holds TERMINAL ON; user decision 2026-10-27):
+ * the same keyboard device with terminal keys. Confirm = Enter, back =
+ * Escape, north = the on-screen keyboard (HOTKEY keyboard to termd), west
+ * = Tab, D-pad = arrows, L1/R1 = scrollback (foot Shift+Page Up/Down),
+ * L2/R2/L3 = text size (Ctrl+keypad -, +, 0: layout-neutral), Select =
+ * Ctrl+C. Right stick = scrollback wheel; no pointer. */
+static const struct web_key term_keys[PAD_CONTROL_COUNT] = {
+	[PAD_SOUTH] = { 0, KEY_ESC, NULL },
+	[PAD_EAST] = { 0, KEY_ENTER, NULL },
+	[PAD_NORTH] = { 0, 0, "keyboard" },
+	[PAD_WEST] = { 0, KEY_TAB, NULL },
+	[PAD_UP] = { 0, KEY_UP, NULL },
+	[PAD_DOWN] = { 0, KEY_DOWN, NULL },
+	[PAD_LEFT] = { 0, KEY_LEFT, NULL },
+	[PAD_RIGHT] = { 0, KEY_RIGHT, NULL },
+	[PAD_L1] = { KEY_LEFTSHIFT, KEY_PAGEUP, NULL },
+	[PAD_R1] = { KEY_LEFTSHIFT, KEY_PAGEDOWN, NULL },
+	[PAD_L2] = { KEY_LEFTCTRL, KEY_KPMINUS, NULL },
+	[PAD_R2] = { KEY_LEFTCTRL, KEY_KPPLUS, NULL },
+	[PAD_L3] = { KEY_LEFTCTRL, KEY_KP0, NULL },
+	[PAD_SELECT] = { KEY_LEFTCTRL, KEY_C, NULL },
+};
+
+/* The key table of the mode that owns the device. */
+static const struct web_key *web_map = web_keys;
+static bool web_terminal;
+
 static int web_fd = -1;
 static bool web_pressed[PAD_CONTROL_COUNT];
 static int web_axis[4];  /* -100..100 after deadzone: LX LY RX RY */
+static int web_raw[4];   /* before the (radial) deadzone */
 static int web_rest[4];  /* sub-unit remainders (x1000) */
 static long long web_next_ms;
 
@@ -2758,10 +2829,10 @@ static int web_create(void)
 	(void)ioctl(fd, UI_SET_EVBIT, EV_KEY);
 	(void)ioctl(fd, UI_SET_EVBIT, EV_REL);
 	for (c = 0; c < PAD_CONTROL_COUNT; c++) {
-		if (web_keys[c].mod)
-			(void)ioctl(fd, UI_SET_KEYBIT, web_keys[c].mod);
-		if (web_keys[c].code)
-			(void)ioctl(fd, UI_SET_KEYBIT, web_keys[c].code);
+		if (web_map[c].mod)
+			(void)ioctl(fd, UI_SET_KEYBIT, web_map[c].mod);
+		if (web_map[c].code)
+			(void)ioctl(fd, UI_SET_KEYBIT, web_map[c].code);
 	}
 	(void)ioctl(fd, UI_SET_KEYBIT, BTN_RIGHT);
 	(void)ioctl(fd, UI_SET_RELBIT, REL_X);
@@ -2786,7 +2857,7 @@ static int web_create(void)
 
 static void web_set_button(size_t c, bool pressed)
 {
-	const struct web_key *k = &web_keys[c];
+	const struct web_key *k = &web_map[c];
 
 	if (web_pressed[c] == pressed)
 		return;
@@ -2823,10 +2894,11 @@ static void web_release(void)
 	for (c = 0; c < PAD_CONTROL_COUNT; c++)
 		web_set_button(c, false);
 	memset(web_axis, 0, sizeof(web_axis));
+	memset(web_raw, 0, sizeof(web_raw));
 	memset(web_rest, 0, sizeof(web_rest));
 }
 
-static void set_web(bool enabled)
+static void set_web(bool enabled, bool terminal)
 {
 	if (web_on == enabled)
 		return;
@@ -2835,8 +2907,10 @@ static void set_web(bool enabled)
 	hotkey_held = false;
 	hotkey_used = false;
 	if (enabled) {
+		web_terminal = terminal;
+		web_map = terminal ? term_keys : web_keys;
 		web_fd = web_create();
-		log_message("web on fd=%d errno=%d", web_fd, web_fd < 0 ? errno : 0);
+		log_message("%s on fd=%d errno=%d", terminal ? "terminal" : "web", web_fd, web_fd < 0 ? errno : 0);
 	} else {
 		web_release();
 		if (web_fd >= 0) {
@@ -2868,8 +2942,8 @@ static void web_tick(void)
 	if (!web_on || menu_open || !web_sticks_active() || monotonic_ms() < web_next_ms)
 		return;
 	web_next_ms = monotonic_ms() + WEB_TICK_MS;
-	dx = web_motion(0, WEB_POINTER_MAX);
-	dy = web_motion(1, WEB_POINTER_MAX);
+	dx = web_terminal ? 0 : web_motion(0, WEB_POINTER_MAX);
+	dy = web_terminal ? 0 : web_motion(1, WEB_POINTER_MAX);
 	sx = web_motion(2, WEB_SCROLL_MAX);
 	sy = web_motion(3, WEB_SCROLL_MAX);
 	if (dx)
@@ -2936,10 +3010,17 @@ static bool forward_web_event(const struct input_dev *input,
 				value = (PAD_AXIS_MAX - value) / 2;
 			else if (src->dir < 0)
 				value = -value;
-			value = apply_deadzone(value, map->deadzone[a / 2]);
-			web_axis[a] = (int)((long long)value * 100 / PAD_AXIS_MAX);
-			if (!web_axis[a])
-				web_rest[a] = 0;
+			{
+				int s = a & ~1, out[2];
+
+				web_raw[a] = value;
+				radial_deadzone(web_raw[s], web_raw[s + 1], map->deadzone[a / 2], &out[0], &out[1]);
+				for (int k = 0; k < 2; k++) {
+					web_axis[s + k] = (int)((long long)out[k] * 100 / PAD_AXIS_MAX);
+					if (!web_axis[s + k])
+						web_rest[s + k] = 0;
+				}
+			}
 			if (!was_active && web_sticks_active())
 				web_next_ms = monotonic_ms();
 		} else {
@@ -3258,18 +3339,18 @@ static void handle_command(struct client *client, const char *line)
 
 	/* Web Mode Service (EPIC-030): browser keyboard/pointer for the
 	 * lifetime of this connection. Games and the browser never overlap. */
-	if (strcmp(line, "WEB ON") == 0) {
+	if (strcmp(line, "WEB ON") == 0 || strcmp(line, "TERMINAL ON") == 0) {
 		client->owns_web = true;
-		client->owns_gamepads = true; /* receives the zoom HOTKEYs */
-		set_web(true);
+		client->owns_gamepads = true; /* receives the zoom/keyboard HOTKEYs */
+		set_web(true, line[0] == 'T');
 		(void)write_all(client->fd, "OK\n");
 		return;
 	}
 
-	if (strcmp(line, "WEB OFF") == 0) {
+	if (strcmp(line, "WEB OFF") == 0 || strcmp(line, "TERMINAL OFF") == 0) {
 		client->owns_web = false;
 		client->owns_gamepads = false;
-		set_web(false);
+		set_web(false, false);
 		(void)write_all(client->fd, "OK\n");
 		return;
 	}
@@ -3441,7 +3522,7 @@ static void process_client(struct client *client)
 			set_settings_grab(false);
 
 		if (owned_web)
-			set_web(false);
+			set_web(false, false);
 		else if (owned_gamepads)
 			set_gamepads(false);
 
@@ -3932,7 +4013,7 @@ static void cleanup_runtime(int server_fd,
 	settings_open = false;
 	gamepads_on = false;
 	destroy_vpads();
-	set_web(false);
+	set_web(false, false);
 	sync_input_grab();
 	close_inputs();
 

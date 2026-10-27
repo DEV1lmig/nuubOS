@@ -20,6 +20,7 @@ mod syncui;
 mod themes;
 mod tsui;
 mod webui;
+mod terminalui;
 slint::include_modules!();
 
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, Timer, VecModel};
@@ -5503,6 +5504,7 @@ fn route_input_action(
     if library::GAME_RUNNING.load(Ordering::SeqCst)
         || moonlight::STREAM_RUNNING.load(Ordering::SeqCst)
         || webui::RUNNING.load(Ordering::SeqCst)
+        || terminalui::RUNNING.load(Ordering::SeqCst)
     {
         return;
     }
@@ -6152,6 +6154,9 @@ fn start_lifecycle_listener(ui: &HomeWindow) {
                     if mode != "reboot" && mode != "poweroff" {
                         continue;
                     }
+                    /* Nothing of USERDATA stays open read-write for the
+                     * final splash (init remounts it read-only). */
+                    library::close_cover_pack();
 
                     let weak = weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
@@ -6221,6 +6226,7 @@ fn main() -> Result<(), slint::PlatformError> {
     moonlight::start_listener(&ui);
     mediaui::start_listener(&ui);
     webui::start_listener(&ui);
+    terminalui::start_listener(&ui);
     let system_info_gate = Arc::new((Mutex::new(false), Condvar::new()));
     let _ = SYSTEM_INFO_GATE.set(system_info_gate.clone());
     start_system_info_live(&ui, system_info_gate);

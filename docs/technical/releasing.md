@@ -81,7 +81,7 @@ nuubOS uses [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 
 | Channel | Version | Example | Meaning |
 |---|---|---|---|
-| Stable | `X.Y.Z` | `1.0.0`, `1.0.1` | qualified on every supported device |
+| Stable | `X.Y.Z` | `1.0.0`, `1.0.1` | qualified on every Tested device (README) |
 | RC | `X.Y.Z-rc.N` | `1.0.0-rc.1` | release candidate N of `X.Y.Z`: bug fixes only |
 | Nightly | `X.Y.Z-nightly.YYYYMMDD` | `1.0.0-nightly.20261020` | development build towards `X.Y.Z`, UTC build date |
 
@@ -91,6 +91,10 @@ nuubOS uses [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
   decision, 2026-10-26) brings the bug fixes from RC3 plus four small community
   requests: power key short press = Sleep, a terminal app, hiding RetroArch from the
   Quick Menu, disc change for multi-disc games in the Quick Menu; then `1.0.0`.
+- Qualification (maintainer decision, 2026-10-27): "Tested" = the maintainer's
+  RG40XX-V, RG CubeXX and RG35XX Pro; every other board stays "Community tested"
+  or "Supported, not tested", also for 1.0.0, until more people officially join
+  the development team.
 - `PATCH` = bug fixes only, `MINOR` = new features, `MAJOR` = an incompatible change
   (a new SD card layout, a reflash needed).
 - `VERSION` holds the release in preparation: `1.0.0-rc.1` while RC 1 of 1.0.0 is

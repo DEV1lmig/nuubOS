@@ -16,7 +16,7 @@ Backlog for after 1.0.0 Stable; not prioritized yet, user decision per item; fou
 - Power key: -> RC4 (user 2026-10-26): short press = Sleep directly, long press = the power menu (Restart, Power Off). Today a short press opens the power menu (Controls wiki page). An option in Settings → Power, EPIC-045.
 - Theme customization beyond the Moods: own colours, and replacing "nuubOS" at the top left with the user's name in the same font. EPIC-008 (Themes) / EPIC-003 (per-user).
 - Web browser: EPIC-030 Web Mode (implemented, parked).
-- Terminal: -> RC4 (user 2026-10-26): an app for power users; against the "no terminal in ordinary flows" principle (EPIC-001 US-UI-001), so only as an opt-in app, SSH stays the main way.
+- Terminal: -> RC4 (user 2026-10-26), done 2026-10-27: app installed by default (user), foot + root's login shell, on-screen keyboard (system.md "Terminal application").
 - Hide RetroArch: -> RC4 (user 2026-10-26): a switch to hide the RetroArch entry of the Quick Menu, to prevent accidental changes (per user, maybe tied to child profiles). EPIC-005.
 - Multi-disc (.m3u): -> RC4 (user 2026-10-26): choose and change the disc from the Quick Menu instead of RetroArch's menu (disk control interface: eject, index, insert). EPIC-005 / EPIC-019.
 - More shaders and user bezels: a choice of shaders beyond the CRT look, own bezel images per system/game; check what happens on HDMI (other resolution and aspect). EPIC-018.

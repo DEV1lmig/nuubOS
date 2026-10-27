@@ -481,6 +481,22 @@ fn index_record(key: u64, off: u64, n: u32) -> [u8; COVER_INDEX_RECORD] {
 }
 
 static COVER_PACK_STATE: Mutex<Option<CoverPack>> = Mutex::new(None);
+/* Closed for good when the console powers off or restarts: nuubUI lives on
+ * for the final splash, and a file open read-write kept init's `umount -a
+ * -r` from making USERDATA read-only, so exFAT came up dirty (fsck at the
+ * next boot, about one boot in three). */
+static COVER_PACK_CLOSED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn close_cover_pack() {
+    COVER_PACK_CLOSED.store(true, Ordering::SeqCst);
+    let mut guard = COVER_PACK_STATE.lock().unwrap();
+    if let Some(pack) = guard.take() {
+        let _ = pack.file.sync_data();
+        if let Some(idx) = pack.index_file.as_ref() {
+            let _ = idx.sync_data();
+        }
+    }
+}
 
 /* Opens the pack and reads its index once; a torn last record (power cut
  * while writing) is cut off. The index comes from COVER_PACK_INDEX, read in
@@ -492,6 +508,9 @@ static COVER_PACK_STATE: Mutex<Option<CoverPack>> = Mutex::new(None);
 fn with_pack<T>(f: impl FnOnce(&mut CoverPack) -> Option<T>) -> Option<T> {
     use std::os::unix::fs::FileExt;
     let mut guard = COVER_PACK_STATE.lock().unwrap();
+    if COVER_PACK_CLOSED.load(Ordering::SeqCst) {
+        return None;
+    }
     if guard.is_none() {
         let _ = std::fs::create_dir_all(Path::new(COVER_PACK).parent()?);
         let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(COVER_PACK).ok()?;
@@ -996,6 +1015,7 @@ fn build_home(ui: &HomeWindow) {
                         "web" => tr(ui, 678, "Web").into(),
                         "netplay" => tr(ui, 1239, "Netplay").into(),
                         "portmaster" => tr(ui, 1358, "PortMaster").into(),
+                        "terminal" => tr(ui, 1384, "Terminal").into(),
                         _ => a.name.clone().into(),
                     },
                     cover_path: icon_path.clone().into(),
@@ -1662,7 +1682,7 @@ pub fn notice(ui: &HomeWindow, text: String) {
     show_notice(ui, text);
 }
 
-fn show_notice(ui: &HomeWindow, text: String) {
+pub(crate) fn show_notice(ui: &HomeWindow, text: String) {
     let serial = STATE.with(|st| {
         let mut st = st.borrow_mut();
         st.notice_serial += 1;
@@ -1799,6 +1819,7 @@ pub fn handle_home_action(ui: &HomeWindow, action: &str) {
                     app_page_icon(ui, &card);
                     crate::netplayui::open(ui)
                 }
+                _ if card.key.as_str() == "terminal" => crate::terminalui::open(ui),
                 /* Other applications need the future application session
                  * service. */
                 _ => show_notice(ui, tr(ui, 411, "Launching is not available yet")),

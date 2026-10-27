@@ -1,0 +1,12 @@
+config BR2_PACKAGE_NUUBOS_TERMINAL
+	bool "nuubos-terminal"
+	depends on BR2_TOOLCHAIN_USES_GLIBC || BR2_TOOLCHAIN_USES_MUSL # foot
+	depends on !BR2_STATIC_LIBS # foot
+	select BR2_PACKAGE_FOOT
+	help
+	  Terminal application (RC4, user decision 2026-10-27): root's
+	  login shell, the same environment as an SSH login, in foot
+	  under labwc. nuubos-termd owns the session; nuubos-inputd turns
+	  the controller into terminal keys and the Quick Menu provides
+	  the on-screen keyboard through the Wayland input method.
+	  Needs a UTF-8 locale (BR2_GENERATE_LOCALE C.UTF-8).

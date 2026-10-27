@@ -788,6 +788,11 @@ export component QuickMenuWindow inherits Window {
      * Resume, 27 Keyboard, 21 Go Back, 22 Go Forward, 23 Reload, 24 Zoom
      * (left/right, confirm restores), 25 Add Bookmark, 26 Quit Web. */
     in-out property <bool> web-section-visible: false;
+    /* TERMINAL (nuubos-termd): the session runs; its on-screen keyboard is
+     * on; kb-terminal = the keyboard sheet types into the terminal. */
+    in-out property <bool> term-section-visible: false;
+    in-out property <bool> term-keyboard-on: false;
+    in-out property <bool> kb-terminal: false;
     in-out property <string> web-zoom-label: "100%";
     /* A text field of the page has the focus (input method active). */
     in-out property <bool> web-ime-active: false;
@@ -899,8 +904,10 @@ export component QuickMenuWindow inherits Window {
     property <length> game-end: root.game-row0-y + (root.game-section-visible ? 7 + root.game-states + root.game-extra + root.game-nds-rows : 7) * root.game-step + root.row-height;
     property <length> stream-end: root.game-row0-y + (root.stream-steamlink ? 4 : 8) * root.game-step + root.row-height;
     property <length> port-end: root.game-row0-y + root.game-step + root.row-height;
+    property <length> term-end: root.game-row0-y + 2 * root.game-step + root.row-height;
     property <length> music-y: root.game-section-visible ? root.game-end + root.section-gap
         : root.port-section-visible ? root.port-end + root.section-gap
+        : root.term-section-visible ? root.term-end + root.section-gap
         : root.stream-section-visible ? root.stream-end + root.section-gap
         : root.web-section-visible ? root.game-end + root.section-gap
         : root.content-top;
@@ -953,6 +960,10 @@ export component QuickMenuWindow inherits Window {
         /* PORT: 44 Resume, 45 Quit Game. */
         : root.selected-index == 44 ? root.game-row0-y
         : root.selected-index == 45 ? root.game-row0-y + root.game-step
+        /* TERMINAL: 46 Resume, 47 Keyboard, 48 Quit Terminal. */
+        : root.selected-index == 46 ? root.game-row0-y
+        : root.selected-index == 47 ? root.game-row0-y + root.game-step
+        : root.selected-index == 48 ? root.game-row0-y + 2 * root.game-step
         : root.selected-index == 13 ? root.game-row0-y + (4 + root.game-states + root.game-extra + root.game-nds-rows) * root.game-step
         : root.selected-index == 31 ? root.music-row0-y
         : root.selected-index == 32 ? root.music-row0-y + root.game-step
@@ -994,7 +1005,7 @@ export component QuickMenuWindow inherits Window {
     property <length> scroll: min(
         max(0px, root.focus-bottom - root.viewport-bottom),
         max(0px, root.focus-top - root.viewport-top
-            - (root.focus-top == root.audio-row-y || root.selected-index == 8 || root.selected-index == 15 || root.selected-index == 44
+            - (root.focus-top == root.audio-row-y || root.selected-index == 8 || root.selected-index == 15 || root.selected-index == 44 || root.selected-index == 46
                 || root.selected-index == 20 || root.selected-index == 29 || root.selected-index == 31
                 ? root.section-header : 0px)));
 
@@ -1166,6 +1177,36 @@ export component QuickMenuWindow inherits Window {
             title: row.title;
             selected: root.selected-index == row.index;
             visible: root.port-section-visible;
+        }
+
+        /* TERMINAL: the running terminal, first in the menu. */
+        QmSectionHeader {
+            x: 16px; y: root.game-y - root.scroll; width: parent.width - 32px;
+            label: root.i18n-strings[1385];
+            visible: root.term-section-visible;
+        }
+        QmRow {
+            x: 16px; y: root.game-row0-y - root.scroll;
+            width: parent.width - 32px; height: root.row-height;
+            title: root.i18n-strings[416];
+            selected: root.selected-index == 46;
+            visible: root.term-section-visible;
+        }
+        QmRow {
+            x: 16px; y: root.game-row0-y + root.game-step - root.scroll;
+            width: parent.width - 32px; height: root.row-height;
+            title: root.i18n-strings[699];
+            toggle: true;
+            toggle-on: root.term-keyboard-on;
+            selected: root.selected-index == 47;
+            visible: root.term-section-visible;
+        }
+        QmRow {
+            x: 16px; y: root.game-row0-y + 2 * root.game-step - root.scroll;
+            width: parent.width - 32px; height: root.row-height;
+            title: root.i18n-strings[1386];
+            selected: root.selected-index == 48;
+            visible: root.term-section-visible;
         }
 
         /* STREAM: the running PC stream, first in the menu. */
@@ -1806,7 +1847,7 @@ export component QuickMenuWindow inherits Window {
         QmTextEntryField {
             x: parent.pad; y: 12px;
             width: parent.width - 2 * parent.pad;
-            title: root.i18n-strings[678];
+            title: root.kb-terminal ? root.i18n-strings[1384] : root.i18n-strings[678];
             /* The end of the field (where typing happens) stays visible. */
             Text {
                 x: min(12px, parent.width - 12px - self.preferred-width);
@@ -1826,7 +1867,10 @@ export component QuickMenuWindow inherits Window {
             spacing: parent.key-gap;
             for key[i] in keys: QmKey {
                 label: key;
-                selected: root.kb-index == r * 10 + i;
+                /* The bottom row's space bar covers columns 4 and 5: the
+                 * keys after it are one column on. */
+                selected: root.kb-index == r * 10 + i + (r == 3 && i > 4 ? 1 : 0);
+                horizontal-stretch: key == "␣" ? 2 : 1;
             }
         }
         HorizontalLayout {

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Terminal: end the session before Restart/Power Off (foot hangs up the
+# shell). Sleep keeps it.
+exec /usr/bin/nuubos-termctl pre-power "$1" >/dev/null

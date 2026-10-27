@@ -1377,3 +1377,12 @@
 1376=Müzik ve videolara erişim
 1377=Kapalı: bu port müziklerini ve videolarını göremez
 1378=Açık: bu port müziklerini ve videolarını okuyabilir, değiştiremez
+1379=1x
+1380=2x
+1381=Otomatik: konsolda 1x, TV'de 2x
+1382=2x daha keskindir ancak oyunu yavaşlatabilir
+1383=Hızlı, duman ve camı hatalı çizebilir
+1384=Terminal
+1385=TERMİNAL
+1386=Terminalden çık
+1387=Terminal açılamadı

@@ -1377,3 +1377,12 @@
 1376=Music & Videos Access
 1377=Off: this port cannot see your music and videos
 1378=On: this port can read your music and videos, not change them
+1379=1x
+1380=2x
+1381=Auto: 1x on the console, 2x on a TV
+1382=2x is sharper but can slow the game down
+1383=Fast can draw smoke and glass wrong
+1384=Terminal
+1385=TERMINAL
+1386=Quit Terminal
+1387=The terminal could not be opened

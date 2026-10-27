@@ -77,6 +77,14 @@ const PORTS_SOCKET: &str = "/run/nuubos/portsd.sock";
 const PORT_RESUME_ROW: i32 = 44;
 const PORT_QUIT_ROW: i32 = 45;
 const WEB_SOCKET: &str = "/run/nuubos/webd.sock";
+/* TERMINAL section (nuubos-termd): Resume, Keyboard, Quit Terminal. */
+const TERM_SOCKET: &str = "/run/nuubos/termd.sock";
+const TERM_RESUME_ROW: i32 = 46;
+const TERM_KEYBOARD_ROW: i32 = 47;
+const TERM_QUIT_ROW: i32 = 48;
+/* The keyboard sheet types into the terminal: it reserves its height
+ * (exclusive zone), so labwc shrinks the terminal above it. */
+static TERMINAL_SHEET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const MEDIA_SOCKET: &str = "/run/nuubos/mediad.sock";
 const CAST_SOCKET: &str = "/run/nuubos/castd.sock";
 /* Cast Screen row (DISPLAY & AUDIO). */
@@ -357,7 +365,8 @@ impl WaylandState {
             }
             SurfaceKind::Keyboard => {
                 /* The Web Mode keyboard: a full-width bottom sheet over the
-                 * browser, which keeps its size. */
+                 * browser, which keeps its size; over the terminal it
+                 * reserves its height so the prompt stays visible. */
                 layer_surface.set_size(0, KEYBOARD_SURFACE_HEIGHT);
                 layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
             }
@@ -368,7 +377,13 @@ impl WaylandState {
                 );
             }
         }
-        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_exclusive_zone(
+            if kind == SurfaceKind::Keyboard && TERMINAL_SHEET.load(std::sync::atomic::Ordering::SeqCst) {
+                KEYBOARD_SURFACE_HEIGHT as i32
+            } else {
+                -1
+            },
+        );
         layer_surface.set_keyboard_interactivity(
             KeyboardInteractivity::None,
         );
@@ -836,6 +851,7 @@ fn refresh_switch_user(ui: &QuickMenuWindow) {
             && !ui.get_port_section_visible()
             && !ui.get_stream_section_visible()
             && !ui.get_web_section_visible()
+            && !ui.get_term_section_visible()
             && switch_user_available(),
     );
 }
@@ -1452,6 +1468,8 @@ enum AppEvent {
     Notify(Notification, Instant),
     /* Web Mode Service (nuubos-webd): browser running, zoom percent. */
     Web(bool, i32),
+    /* Terminal (nuubos-termd): session running, on-screen keyboard on. */
+    Terminal(bool, bool),
     /* Input method: a text field of the page has the focus or not. */
     Ime(ime::ImeState),
     /* Media music (nuubos-mediad): the MUSIC section. */
@@ -3896,6 +3914,63 @@ fn apply_web_state(ui: &QuickMenuWindow, running: bool, zoom: i32) {
     ui.set_web_zoom_label(format!("{zoom}%").into());
 }
 
+/* Terminal (nuubos-termd). The shell stays live under the menu. */
+fn term_command(command: &str) {
+    let command = command.to_owned();
+    thread::spawn(move || {
+        let result = (|| -> std::io::Result<String> {
+            let mut stream = UnixStream::connect(TERM_SOCKET)?;
+            stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+            stream.write_all(command.as_bytes())?;
+            stream.write_all(b"\n")?;
+            let mut reply = String::new();
+            BufReader::new(stream).read_line(&mut reply)?;
+            Ok(reply)
+        })();
+        if let Err(error) = result {
+            eprintln!("quick-menu: terminal {command} failed={error}");
+        }
+    });
+}
+
+/* (terminal running, on-screen keyboard on) */
+fn term_state_from(reply: &str) -> (bool, bool) {
+    (reply.lines().any(|line| line == "state=running"), reply.lines().any(|line| line == "keyboard=1"))
+}
+
+fn apply_term_state(ui: &QuickMenuWindow, running: bool, keyboard: bool) {
+    if !running && (TERM_RESUME_ROW..=TERM_QUIT_ROW).contains(&ui.get_selected_index()) {
+        ui.set_selected_index(3);
+    }
+    ui.set_term_section_visible(running);
+    ui.set_term_keyboard_on(running && keyboard);
+}
+
+fn start_term_subscription(tx: Sender<AppEvent>) {
+    thread::spawn(move || loop {
+        if let Ok(mut stream) = UnixStream::connect(TERM_SOCKET) {
+            if stream.write_all(b"SUBSCRIBE\n").is_ok() {
+                let mut block = String::new();
+                for line in BufReader::new(stream).lines() {
+                    let Ok(line) = line else { break };
+                    block.push_str(&line);
+                    block.push('\n');
+                    if line == "end=1" {
+                        let state = term_state_from(&block);
+                        block.clear();
+                        if tx.send(AppEvent::Terminal(state.0, state.1)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = tx.send(AppEvent::Terminal(false, false));
+        /* Only reached while termd is absent or restarting. */
+        thread::sleep(Duration::from_secs(1));
+    });
+}
+
 /* MUSIC (user request 2026-10-12): the Media app's music, with its own
  * controls and, over a game, the mixer (Music volume in nuubos-mediad,
  * Game volume = Applications in nuubos-audiod). */
@@ -4356,6 +4431,12 @@ struct WebKeyboard {
     page: i32,
     shift: bool,
     layout: String,
+    /* Typing into the terminal (nuubos-termd): terminal keys on the
+     * bottom row, Ctrl held for the next key, what was typed since the
+     * last Enter as the preview (foot reports no surrounding text). */
+    terminal: bool,
+    ctrl: bool,
+    typed: String,
 }
 
 const KEY_SHIFT: &str = "⇧";
@@ -4365,6 +4446,10 @@ const KEY_NUMBERS: &str = "123";
 const KEY_SYMBOLS: &str = "#+=";
 const KEY_LETTERS: &str = "abc";
 const KEY_DONE: &str = "\u{1}done";
+const KEY_CTRL: &str = "\u{1}ctrl";
+const KEY_ESC: &str = "\u{1}esc";
+const KEY_TAB: &str = "\u{1}tab";
+const KEY_ENTER: &str = "\u{1}enter";
 
 fn keyboard_layout() -> String {
     let reply = (|| -> std::io::Result<String> {
@@ -4385,7 +4470,18 @@ fn keyboard_layout() -> String {
 }
 
 fn keyboard_rows(kb: &WebKeyboard) -> [Vec<&'static str>; 4] {
-    let bottom = |page: &'static str| vec![page, KEY_SYMBOLS, "@", "/", KEY_SPACE, KEY_SPACE, ".", "-", KEY_BACKSPACE, KEY_DONE];
+    let bottom = |page: &'static str| {
+        if kb.terminal {
+            /* Shell keys instead of Done (Back closes the keyboard). */
+            if page == KEY_LETTERS {
+                vec![page, KEY_SYMBOLS, KEY_CTRL, "/", KEY_SPACE, KEY_SPACE, "|", "-", KEY_BACKSPACE, KEY_ENTER]
+            } else {
+                vec![page, KEY_CTRL, KEY_ESC, KEY_TAB, KEY_SPACE, KEY_SPACE, ".", "-", KEY_BACKSPACE, KEY_ENTER]
+            }
+        } else {
+            vec![page, KEY_SYMBOLS, "@", "/", KEY_SPACE, KEY_SPACE, ".", "-", KEY_BACKSPACE, KEY_DONE]
+        }
+    };
     match kb.page {
         1 => [
             vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
@@ -4397,7 +4493,11 @@ fn keyboard_rows(kb: &WebKeyboard) -> [Vec<&'static str>; 4] {
             vec!["`", "^", "€", "£", "¥", "°", "§", "|", "\\", "¿"],
             vec!["[", "]", "{", "}", "¡", "«", "»", "·", "¨", "´"],
             vec!["à", "è", "é", "ì", "ò", "ù", "ç", "ñ", "ä", "ö"],
-            vec![KEY_LETTERS, KEY_NUMBERS, "ü", "ß", KEY_SPACE, KEY_SPACE, "ê", "â", KEY_BACKSPACE, KEY_DONE],
+            if kb.terminal {
+                vec![KEY_LETTERS, KEY_NUMBERS, KEY_CTRL, KEY_ESC, KEY_SPACE, KEY_SPACE, KEY_TAB, "@", KEY_BACKSPACE, KEY_ENTER]
+            } else {
+                vec![KEY_LETTERS, KEY_NUMBERS, "ü", "ß", KEY_SPACE, KEY_SPACE, "ê", "â", KEY_BACKSPACE, KEY_DONE]
+            },
         ],
         _ => {
             let (r0, r1, r2): (Vec<&'static str>, Vec<&'static str>, Vec<&'static str>) = match kb.layout.as_str() {
@@ -4425,6 +4525,15 @@ fn keyboard_rows(kb: &WebKeyboard) -> [Vec<&'static str>; 4] {
 fn key_label(ui: &QuickMenuWindow, kb: &WebKeyboard, key: &str) -> String {
     if key == KEY_DONE {
         tr(ui, 697, "Done")
+    } else if key == KEY_CTRL {
+        /* Key cap names, as printed on keyboards. */
+        if kb.ctrl { "CTRL".into() } else { "Ctrl".into() }
+    } else if key == KEY_ESC {
+        "Esc".into()
+    } else if key == KEY_TAB {
+        "Tab".into()
+    } else if key == KEY_ENTER {
+        "↵".into()
     } else if kb.shift && kb.page == 0 && key.chars().count() == 1 && key.chars().all(char::is_alphabetic) {
         key.to_uppercase()
     } else {
@@ -4435,14 +4544,22 @@ fn key_label(ui: &QuickMenuWindow, kb: &WebKeyboard, key: &str) -> String {
 fn apply_keyboard(ui: &QuickMenuWindow, kb: &WebKeyboard) {
     let rows = keyboard_rows(kb);
     let model = |row: &Vec<&'static str>| -> ModelRc<SharedString> {
-        let labels: Vec<SharedString> = row.iter().map(|k| key_label(ui, kb, k).into()).collect();
+        /* The space bar is two keys wide (columns 4 and 5 of the bottom
+         * row): one key drawn twice as wide, keys after it one column on
+         * (quick_menu.slint). */
+        let labels: Vec<SharedString> = row
+            .iter()
+            .enumerate()
+            .filter(|(i, k)| !(**k == KEY_SPACE && *i > 0 && row[*i - 1] == KEY_SPACE))
+            .map(|(_, k)| key_label(ui, kb, k).into())
+            .collect();
         ModelRc::from(Rc::new(VecModel::from(labels)))
     };
     ui.set_kb_row_zero(model(&rows[0]));
     ui.set_kb_row_one(model(&rows[1]));
     ui.set_kb_row_two(model(&rows[2]));
     ui.set_kb_row_three(model(&rows[3]));
-    ui.set_kb_preview(kb.field.surrounding.clone().into());
+    ui.set_kb_preview(if kb.terminal { kb.typed.clone() } else { kb.field.surrounding.clone() }.into());
     ui.set_kb_mode_label(match kb.page {
         1 => "123".into(),
         2 => "#+=".into(),
@@ -4456,9 +4573,13 @@ fn show_keyboard(ui: &QuickMenuWindow, kb: &mut WebKeyboard) {
     }
     kb.visible = true;
     ui.set_kb_visible(true);
+    ui.set_kb_terminal(kb.terminal);
+    TERMINAL_SHEET.store(kb.terminal, std::sync::atomic::Ordering::SeqCst);
     kb.dismissed = false;
     kb.page = 0;
     kb.shift = false;
+    kb.ctrl = false;
+    kb.typed.clear();
     kb.layout = keyboard_layout();
     refresh_i18n(ui);
     refresh_hint_mapping(ui);
@@ -4491,6 +4612,10 @@ fn keyboard_move(ui: &QuickMenuWindow, kb: &WebKeyboard, dx: i32, dy: i32) {
             col = (col + dx).rem_euclid(len);
         }
     }
+    /* Its second half is not drawn: the focus sits on the first. */
+    if col > 0 && keys[col as usize] == KEY_SPACE && keys[col as usize - 1] == KEY_SPACE {
+        col -= 1;
+    }
     ui.set_kb_index(row * 10 + col);
 }
 
@@ -4505,7 +4630,29 @@ fn keyboard_action(ui: &QuickMenuWindow, kb: &mut WebKeyboard, action: &str) -> 
         "menu_back" => {
             kb.dismissed = true;
             hide_keyboard(ui, kb);
+            if kb.terminal {
+                ui.set_term_keyboard_on(false);
+                term_command("KEYBOARD\t0");
+            }
             return false;
+        }
+        /* Start: Enter in the terminal, Done in a page's field (as the
+         * system keyboard of Settings). */
+        "settings" if kb.terminal => {
+            terminal_type(ui, kb, "\r");
+            kb.typed.clear();
+            kb.ctrl = false;
+            apply_keyboard(ui, kb);
+        }
+        "settings" => {
+            kb.dismissed = true;
+            hide_keyboard(ui, kb);
+            return false;
+        }
+        "face_north" if kb.terminal => {
+            terminal_type(ui, kb, "\u{7f}");
+            kb.typed.pop();
+            apply_keyboard(ui, kb);
         }
         "face_north" => {
             if let Some(ime) = kb.ime.as_ref() {
@@ -4525,12 +4672,44 @@ fn keyboard_action(ui: &QuickMenuWindow, kb: &mut WebKeyboard, action: &str) -> 
                     return false;
                 }
                 KEY_SHIFT => kb.shift = !kb.shift,
+                KEY_CTRL => kb.ctrl = !kb.ctrl,
+                KEY_ESC => terminal_type(ui, kb, "\u{1b}"),
+                KEY_TAB => terminal_type(ui, kb, "\t"),
+                KEY_ENTER => {
+                    terminal_type(ui, kb, "\r");
+                    kb.typed.clear();
+                }
+                KEY_BACKSPACE if kb.terminal => {
+                    terminal_type(ui, kb, "\u{7f}");
+                    kb.typed.pop();
+                }
                 KEY_NUMBERS => kb.page = 1,
                 KEY_SYMBOLS => kb.page = 2,
                 KEY_LETTERS => kb.page = 0,
                 KEY_BACKSPACE => {
                     if let Some(ime) = kb.ime.as_ref() {
                         ime.delete_before(&kb.field);
+                    }
+                }
+                _ if kb.terminal => {
+                    let text = if key == KEY_SPACE { " ".to_owned() } else { key_label(ui, kb, key) };
+                    let mut chars = text.chars();
+                    match (kb.ctrl, chars.next(), chars.next()) {
+                        /* Ctrl + a letter (or @ [ \ ] ^ _): the control
+                         * character, as a keyboard sends it. */
+                        (true, Some(c), None) if c.is_ascii_alphabetic() || "@[\\]^_".contains(c) => {
+                            let code = (c.to_ascii_uppercase() as u8) & 0x1f;
+                            terminal_type(ui, kb, &(code as char).to_string());
+                            kb.ctrl = false;
+                        }
+                        _ => {
+                            terminal_type(ui, kb, &text);
+                            kb.typed.push_str(&text);
+                            kb.ctrl = false;
+                        }
+                    }
+                    if kb.shift && kb.page == 0 && key != KEY_SPACE {
+                        kb.shift = false;
                     }
                 }
                 _ => {
@@ -4551,6 +4730,36 @@ fn keyboard_action(ui: &QuickMenuWindow, kb: &mut WebKeyboard, action: &str) -> 
     true
 }
 
+/* Text (or a control character) straight to the terminal's shell: foot
+ * writes the input method's commits to the terminal as they are. Only the
+ * end of what was typed stays in the preview. */
+fn terminal_type(_ui: &QuickMenuWindow, kb: &mut WebKeyboard, text: &str) {
+    if let Some(ime) = kb.ime.as_ref() {
+        ime.commit_text(text);
+    }
+    if kb.typed.chars().count() > 60 {
+        let cut: String = kb.typed.chars().skip(20).collect();
+        kb.typed = cut;
+    }
+}
+
+/* The terminal's on-screen keyboard follows termd's keyboard=, while the
+ * menu is closed and the terminal has the input method. */
+fn sync_terminal_keyboard(ui: &QuickMenuWindow, kb: &mut WebKeyboard, mapped: bool) -> bool {
+    let want = ui.get_term_section_visible() && ui.get_term_keyboard_on() && !mapped
+        && kb.field.active && !ui.get_lifecycle_active();
+    if want && !kb.visible {
+        kb.terminal = true;
+        show_keyboard(ui, kb);
+        true
+    } else if !want && kb.visible && kb.terminal && !mapped {
+        hide_keyboard(ui, kb);
+        true
+    } else {
+        false
+    }
+}
+
 fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
     let mut indices = Vec::new();
     if ui.get_game_section_visible() {
@@ -4568,6 +4777,9 @@ fn selectable_menu_indices(ui: &QuickMenuWindow) -> Vec<i32> {
     }
     if ui.get_port_section_visible() {
         indices.extend_from_slice(&[PORT_RESUME_ROW, PORT_QUIT_ROW]);
+    }
+    if ui.get_term_section_visible() {
+        indices.extend_from_slice(&[TERM_RESUME_ROW, TERM_KEYBOARD_ROW, TERM_QUIT_ROW]);
     }
     if ui.get_stream_section_visible() {
         indices.extend_from_slice(if ui.get_stream_steamlink() { &[15, 36, 37, 38, 16] } else { &[15, 36, 37, 38, 16, 17] });
@@ -4609,6 +4821,8 @@ fn first_selectable_index(ui: &QuickMenuWindow) -> i32 {
         8
     } else if ui.get_port_section_visible() {
         PORT_RESUME_ROW
+    } else if ui.get_term_section_visible() {
+        TERM_RESUME_ROW
     } else if ui.get_stream_section_visible() {
         15
     } else if ui.get_web_section_visible() {
@@ -4625,6 +4839,8 @@ fn first_selectable_index_without_music(ui: &QuickMenuWindow) -> i32 {
         8
     } else if ui.get_port_section_visible() {
         PORT_RESUME_ROW
+    } else if ui.get_term_section_visible() {
+        TERM_RESUME_ROW
     } else if ui.get_stream_section_visible() {
         15
     } else if ui.get_web_section_visible() {
@@ -5930,6 +6146,28 @@ fn handle_event(
         }
         "menu_confirm" if *mapped
             && !ui.get_lifecycle_active()
+            && ui.get_term_section_visible()
+            && (TERM_RESUME_ROW..=TERM_QUIT_ROW).contains(&ui.get_selected_index()) =>
+        {
+            match ui.get_selected_index() {
+                /* The keyboard follows termd once the menu has closed. */
+                TERM_KEYBOARD_ROW => {
+                    let on = !ui.get_term_keyboard_on();
+                    ui.set_term_keyboard_on(on);
+                    term_command(if on { "KEYBOARD\t1" } else { "KEYBOARD\t0" });
+                }
+                TERM_QUIT_ROW => {
+                    term_command("QUIT");
+                    ui.set_term_section_visible(false);
+                }
+                _ => {}
+            }
+            flush_brightness(ui, brightness_dirty)?;
+            unmap_overlay(ui, queue, state, conn);
+            *mapped = false;
+        }
+        "menu_confirm" if *mapped
+            && !ui.get_lifecycle_active()
             && ui.get_stream_section_visible()
             && ui.get_selected_index() >= 15 =>
         {
@@ -6137,6 +6375,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     start_port_subscription(tx.clone());
     start_stream_stats_subscription(tx.clone());
     start_web_subscription(tx.clone());
+    start_term_subscription(tx.clone());
     start_media_subscription(tx.clone());
     start_cast_subscription(tx.clone());
     let mut keyboard = WebKeyboard { ime: ime::start(tx.clone()), ..WebKeyboard::default() };
@@ -6322,8 +6561,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::Web(running, zoom) => {
                     apply_web_state(&ui, running, zoom);
-                    if !running && keyboard.visible {
+                    if !running && keyboard.visible && !keyboard.terminal {
                         hide_keyboard(&ui, &mut keyboard);
+                    }
+                    if mapped && !running {
+                        refresh_switch_user(&ui);
+                    }
+                    dirty = true;
+                }
+                AppEvent::Terminal(running, on) => {
+                    apply_term_state(&ui, running, on);
+                    if !running {
+                        keyboard.terminal = false;
                     }
                     if mapped && !running {
                         refresh_switch_user(&ui);
@@ -6337,7 +6586,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let active = field.active;
                     keyboard.field = field;
                     ui.set_web_ime_active(active);
-                    if !active {
+                    if ui.get_term_section_visible() {
+                        if !active {
+                            hide_keyboard(&ui, &mut keyboard);
+                        }
+                    } else if !active {
                         hide_keyboard(&ui, &mut keyboard);
                     } else if keyboard.visible {
                         apply_keyboard(&ui, &keyboard);
@@ -6490,6 +6743,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+        }
+
+        /* Terminal keyboard: shown and hidden with termd's keyboard=. */
+        if sync_terminal_keyboard(&ui, &mut keyboard, mapped) {
+            dirty = true;
         }
 
         /* Keyboard row of the menu: shown once the menu has closed. */

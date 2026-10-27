@@ -385,6 +385,7 @@ fn can_ask(ui: &HomeWindow) -> bool {
         && !crate::mediaui::PLAYING.load(Ordering::SeqCst)
         && !crate::moonlight::STREAM_RUNNING.load(Ordering::SeqCst)
         && !crate::webui::RUNNING.load(Ordering::SeqCst)
+        && !crate::terminalui::RUNNING.load(Ordering::SeqCst)
         && !ui.get_settings_choice_open()
 }
 

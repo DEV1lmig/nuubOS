@@ -723,6 +723,27 @@ fn main() {
                 (&s(ui, 1314), &s(ui, 528).replace("{0}", &s(ui, 1315)), &s(ui, 1317), true, -1),
                 (&s(ui, 535), "", &s(ui, 536), false, -1)]));
         })),
+        ("game_settings_psx", Box::new(|ui| {
+            ui.set_gen_index(4);
+            ui.set_details_title("Ape Escape".into());
+            ui.set_details_subtitle("PlayStation".into());
+            ui.set_gen_rows(gen(&[(&s(ui, 525), &s(ui, 528).replace("{0}", "pcsx_rearmed"), "", true, -1),
+                (&s(ui, 1253), "", "", true, -1),
+                (&s(ui, 526), &s(ui, 528).replace("{0}", &s(ui, 531)), "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
+                (&s(ui, 454), &s(ui, 528).replace("{0}", &s(ui, 52)), &s(ui, 1381), true, -1),
+                (&s(ui, 535), "", &s(ui, 536), false, -1)]));
+        })),
+        ("game_settings_dreamcast", Box::new(|ui| {
+            ui.set_gen_index(4);
+            ui.set_details_title("Dead or Alive 2".into());
+            ui.set_details_subtitle("Dreamcast".into());
+            ui.set_gen_rows(gen(&[(&s(ui, 525), &s(ui, 528).replace("{0}", "flycast_nuubos"), "", true, -1),
+                (&s(ui, 1253), "", "", true, -1),
+                (&s(ui, 526), &s(ui, 528).replace("{0}", &s(ui, 531)), "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
+                (&s(ui, 1314), &s(ui, 528).replace("{0}", &s(ui, 1316)), &s(ui, 1383), true, -1),
+                (&s(ui, 454), &s(ui, 528).replace("{0}", &s(ui, 1379)), &s(ui, 1382), true, -1),
+                (&s(ui, 535), "", &s(ui, 536), false, -1)]));
+        })),
         ("game_settings_core_download", Box::new(|ui| {
             ui.set_gen_index(1);
             let rows = gen(&[(&s(ui, 525), "bsnes", "", true, -1),
