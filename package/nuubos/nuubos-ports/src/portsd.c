@@ -84,6 +84,13 @@
 
 #define PORTS_ROOT "/userdata/roms/ports"
 #define PORTMASTER_DIR PORTS_ROOT "/PortMaster"
+/* nuubOS's PortMaster module in the image, and a line only its copies
+ * carry (a release that ships its own module is never touched). */
+#ifndef MOD_SOURCE
+#define MOD_SOURCE "/usr/share/nuubos/ports/mod_nuubOS.txt"
+#endif
+#define MOD_INSTALLED PORTMASTER_DIR "/mod_nuubOS.txt"
+#define MOD_MARK "controllers are the nuubOS virtual gamepads"
 /* nuubOS's own files in the ports folder (dot folder: not a port). */
 #define STATE_DIR PORTS_ROOT "/.nuubos"
 #define HOME_DIR STATE_DIR "/home"
@@ -325,13 +332,55 @@ static void read_version_file(const char *dir, char *out, size_t size)
 	fclose(fp);
 }
 
+/* A small text file, whole ("" when missing or too big). */
+static size_t read_small(const char *path, char *buf, size_t size)
+{
+	FILE *fp = fopen(path, "rb");
+	size_t n = 0;
+
+	buf[0] = '\0';
+	if (!fp)
+		return 0;
+	n = fread(buf, 1, size - 1, fp);
+	if (!feof(fp))
+		n = 0;
+	fclose(fp);
+	buf[n] = '\0';
+	return n;
+}
+
+/* The module copied at install stays as it was: an image with a newer one
+ * replaces the installed copy when it is nuubOS's own (2026-10-27). */
+static void refresh_mod(void)
+{
+	static char shipped[65536], installed[65536];
+	char tmp[] = MOD_INSTALLED ".tmp";
+	size_t n = read_small(MOD_SOURCE, shipped, sizeof(shipped));
+	FILE *fp;
+
+	if (!n || !read_small(MOD_INSTALLED, installed, sizeof(installed)) ||
+	    !strstr(installed, MOD_MARK) || !strcmp(installed, shipped))
+		return;
+	fp = fopen(tmp, "wb");
+	if (!fp)
+		return;
+	if (fwrite(shipped, 1, n, fp) != n || fclose(fp) != 0 || rename(tmp, MOD_INSTALLED) != 0) {
+		unlink(tmp);
+		log_msg("portsd: mod_nuubOS.txt update failed: %s", strerror(errno));
+		return;
+	}
+	log_msg("portsd: mod_nuubOS.txt updated from the image");
+}
+
 static void read_portmaster(void)
 {
 	/* version alone (an interrupted removal) is not an installation. */
-	if (access(PORTMASTER_DIR "/PortMaster.sh", R_OK) == 0)
+	if (access(PORTMASTER_DIR "/PortMaster.sh", R_OK) == 0) {
 		read_version_file(PORTMASTER_DIR, pm_version, sizeof(pm_version));
-	else
+		refresh_mod();
+	} else {
 		pm_version[0] = '\0';
+	}
 	read_version_file(PREVIOUS_DIR, pm_previous, sizeof(pm_previous));
 }
 
@@ -1506,6 +1555,7 @@ static void finish_job(int slot, int status)
 	case JOB_SESSION: {
 		char port[sizeof(session.port)], game[sizeof(session.game)];
 		bool relaunch = session_relaunch(status);
+		bool portmaster = session.portmaster;
 
 		log_msg("portsd: session %s exited status=%d user_quit=%d",
 			session.portmaster ? "PortMaster" : session.port, status, session.user_quit ? 1 : 0);
@@ -1528,6 +1578,15 @@ static void finish_job(int slot, int status)
 		panel_native(false);
 		/* PortMaster may have updated itself. */
 		read_portmaster();
+		/* Ports it installed or removed reach Home now, not at the next
+		 * start (community report 2026-10-26). */
+		if (portmaster) {
+			char answer[16];
+
+			library_request("SCAN", answer, sizeof(answer));
+			if (strcmp(answer, "OK") != 0)
+				log_msg("portsd: libraryd SCAN failed: %s", answer[0] ? answer : "no reply");
+		}
 		finish_power_wait();
 		break;
 	}
