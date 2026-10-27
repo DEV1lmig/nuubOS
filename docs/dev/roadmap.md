@@ -13,7 +13,7 @@ Pulled forward into rc.2 and implemented 2026-10-22 (user request): docs/dev/sys
 ## Community requests after 1.0 (Reddit, RC3 feedback, 2026-10-26)
 Backlog for after 1.0.0 Stable; not prioritized yet, user decision per item; four of them go into RC4 (open-items.md "RC4 plan").
 - USB device mode: MTP (copy games to the console from a PC over the USB cable, the main ask) and ADB. Today: web panel, SMB, SFTP, USB drives. Fits EPIC-024 (USB & External Accessories); needs the USB OTG port in peripheral mode (configfs gadget, e.g. umtprd) per board, and a choice between charging/host and device mode.
-- Power key: -> RC4 (user 2026-10-26), done 2026-10-27: Settings → Power "Press Power to Sleep" (quick-menu-notify.md "Power key"). Off by default: a press opens the power menu as before (Controls wiki page).
+- Power key: -> RC4 (user 2026-10-26), done 2026-10-27: Settings → Power "Press Power to Sleep" (quick-menu-notify.md "Power key"). On by default (user 2026-10-27): a press sleeps, a hold opens the power menu (Controls wiki page to update).
 - Theme customization beyond the Moods: own colours, and replacing "nuubOS" at the top left with the user's name in the same font. EPIC-008 (Themes) / EPIC-003 (per-user).
 - Web browser: EPIC-030 Web Mode (implemented, parked).
 - Terminal: -> RC4 (user 2026-10-26), done 2026-10-27: app installed by default (user), foot + root's login shell, on-screen keyboard (system.md "Terminal application").

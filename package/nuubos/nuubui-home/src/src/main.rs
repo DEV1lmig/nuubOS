@@ -227,7 +227,7 @@ impl Default for SystemSnapshot {
             charge_limit_supported: false,
             hypersleep: true,
             fast_startup: true,
-            power_key_sleep: false,
+            power_key_sleep: true,
             diag_boots: 0,
             diag_active: false,
             cpu_freq_khz: -1,

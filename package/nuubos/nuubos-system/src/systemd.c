@@ -315,8 +315,9 @@ static void config_defaults(struct config_state *cfg)
     /* Off until it is qualified on every board (user decision 2026-10-25:
      * an RG SP froze and restarted with it on, ran clean with it off). */
     cfg->fast_startup = false;
-    /* Off: a press opens the power menu, as before RC4 (EPIC-045). */
-    cfg->power_key_sleep = false;
+    /* On (user decision 2026-10-27, EPIC-045): a press sleeps, a hold
+     * opens the power menu. */
+    cfg->power_key_sleep = true;
 }
 
 /* Charge limit: 80..100 in steps of 5 (100 = charge to full). */
