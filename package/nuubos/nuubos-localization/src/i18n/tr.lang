@@ -1400,3 +1400,8 @@
 1399=Disk
 1400=Disk {0}
 1401={0}/{1}
+1402=Titreşim şiddeti
+1403=Hafif
+1404=Güçlü
+1405=Bazı oyunların sürekli gönderdiği en zayıf titreşimleri atlar
+1406=Oyunun istediği her titreşim

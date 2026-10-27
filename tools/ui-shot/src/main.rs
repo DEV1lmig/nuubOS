@@ -631,6 +631,7 @@ fn main() {
         ("system", Box::new(|ui| { ui.set_display_color_temperature_available(false); ui.set_settings_selected_index(6); ui.set_settings_view(19); ui.set_system_index(5); ui.set_system_scroll_offset(0); })),
         ("power", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(3); ui.set_power_scroll_offset(0); })),
         ("power_quick", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_system_hypersleep(false); ui.set_power_index(3); ui.set_power_scroll_offset(0); })),
+        ("rumble", Box::new(|ui| { ui.set_settings_open(true); ui.set_settings_selected_index(2); ui.set_rumble_supported(true); ui.set_rumble_mode("light".into()); ui.set_settings_view(16); ui.set_rumble_index(0); })),
         ("power_key", Box::new(|ui| { ui.set_settings_open(true); ui.set_system_hypersleep(true); ui.set_system_power_key_sleep(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(5); ui.set_power_scroll_offset(2); })),
         ("power_devices", Box::new(|ui| { ui.set_settings_open(true); ui.set_system_hypersleep(true); ui.set_settings_selected_index(5); ui.set_settings_view(69); ui.set_power_index(8); ui.set_power_scroll_offset(6); })),
         ("controllers", Box::new(|ui| { ui.set_settings_selected_index(2); ui.set_settings_view(0); })),

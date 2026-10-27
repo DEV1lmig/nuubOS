@@ -1187,6 +1187,7 @@ page('controllers', 'settings', () => C(6, 'Controllers & Input'), async (path) 
   if (path[0] === 'lighting') return lightingPage();
   const [c, rm, li] = await Promise.all([get('controllers').catch(() => ({ devices: [], players: [] })), get('rumble').catch(() => null), get('lighting').catch(() => null)]);
   const rumble = rm && rm.supported;
+  const intensity = rm ? RUMBLE_MODES[rm.mode] || RUMBLE_MODES.light : null;
   const lights = li && li.supported;
   const nodes = [
     section(C(734, 'CONTROLLERS'), 'user'),
@@ -1195,8 +1196,8 @@ page('controllers', 'settings', () => C(6, 'Controllers & Input'), async (path) 
       row({ key: 'list', title: C(14, 'Controllers'), value: c.devices.length + C(219, ' available'), chevron: true, on: () => go('controllers/list') })),
     section(lights ? C(735, 'RUMBLE & LIGHTING') : C(899, 'RUMBLE'), 'user'),
     group(
-      row({ key: 'rumble', title: C(17, 'Internal Rumble'), value: rumble ? (rm.enabled ? C(112, 'Enabled') : C(113, 'Disabled')) : C(205, 'Unavailable'),
-        chevron: rumble, disabled: !rumble, on: () => go('controllers/rumble') }),
+      row({ key: 'rumble', title: C(1402, 'Vibration Intensity'), value: intensity ? C(...intensity) : C(205, 'Unavailable'),
+        chevron: !!rm, disabled: !rm, on: () => go('controllers/rumble') }),
       lights ? row({ key: 'light', title: C(18, 'RGB Lighting'), value: C(...(LIGHT_EFFECTS.find((e) => e[0] === li.effect) || [0, 54, 'Off']).slice(1, 3)), chevron: true,
         on: () => go('controllers/lighting') }) : null),
   ];
@@ -1244,13 +1245,19 @@ async function controllerPage(id) {
 }
 
 /* Internal Rumble (console page 16): the preference and a test. */
+/* Vibration Intensity (rumbled, every controller; GitHub #20). */
+const RUMBLE_MODES = { off: [54, 'Off'], light: [1403, 'Light'], strong: [1404, 'Strong'] };
+const RUMBLE_DETAILS = { light: [1405, 'Skips the faintest vibration some games keep sending'], strong: [1406, 'Every vibration the game asks for'] };
+
 async function rumblePage() {
   const rm = await get('rumble', {}, true);
+  const mode = RUMBLE_MODES[rm.mode] ? rm.mode : 'light';
   return {
-    title: C(17, 'Internal Rumble'), back: 'controllers', topics: ['rumble'],
+    title: C(1402, 'Vibration Intensity'), back: 'controllers', topics: ['rumble'],
     nodes: [group(
-      row({ key: 'on', title: C(112, 'Enabled'), detail: C(37, 'User preference for the internal console rumble'), toggle: rm.enabled, set: (v) => act('rumble.enable', { v }) }),
-      row({ key: 'test', title: C(125, 'Test Rumble'), disabled: !rm.enabled, on: () => act('rumble.test') }))],
+      row({ key: 'mode', title: C(1402, 'Vibration Intensity'), value: C(...RUMBLE_MODES[mode]), detail: RUMBLE_DETAILS[mode] ? C(...RUMBLE_DETAILS[mode]) : '', chevron: true,
+        on: () => pickAndAct(C(1402, 'Vibration Intensity'), Object.entries(RUMBLE_MODES).map(([value, l]) => ({ value, label: C(...l) })), mode, 'rumble.mode', 'v', ['rumble']) }),
+      ...(rm.supported ? [row({ key: 'test', title: C(125, 'Test Rumble'), disabled: mode === 'off', on: () => act('rumble.test') })] : []))],
   };
 }
 

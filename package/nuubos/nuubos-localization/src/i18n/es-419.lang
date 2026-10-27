@@ -1400,3 +1400,8 @@
 1399=Disco
 1400=Disco {0}
 1401={0} de {1}
+1402=Intensidad de vibración
+1403=Suave
+1404=Fuerte
+1405=Omite las vibraciones más débiles que algunos juegos envían sin parar
+1406=Todas las vibraciones que pide el juego

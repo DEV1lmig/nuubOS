@@ -1400,3 +1400,8 @@
 1399=Disk
 1400=Disk {0}
 1401={0} z {1}
+1402=Síla vibrací
+1403=Slabá
+1404=Silná
+1405=Vynechá nejslabší vibrace, které některé hry posílají neustále
+1406=Všechny vibrace, které hra požaduje

@@ -1400,3 +1400,8 @@
 1399=Lemez
 1400={0}. lemez
 1401={0}/{1}
+1402=Rezgés erőssége
+1403=Gyenge
+1404=Erős
+1405=Kihagyja a leggyengébb rezgéseket, amelyeket egyes játékok folyamatosan küldenek
+1406=Minden rezgés, amit a játék kér

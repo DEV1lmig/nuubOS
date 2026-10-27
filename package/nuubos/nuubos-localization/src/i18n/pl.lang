@@ -1400,3 +1400,8 @@
 1399=Płyta
 1400=Płyta {0}
 1401={0} z {1}
+1402=Siła wibracji
+1403=Lekka
+1404=Mocna
+1405=Pomija najsłabsze wibracje, które niektóre gry wysyłają bez przerwy
+1406=Każda wibracja, o którą prosi gra

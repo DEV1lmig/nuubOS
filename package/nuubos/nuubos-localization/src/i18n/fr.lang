@@ -1400,3 +1400,8 @@
 1399=Disque
 1400=Disque {0}
 1401={0} sur {1}
+1402=Intensité des vibrations
+1403=Légère
+1404=Forte
+1405=Ignore les vibrations les plus faibles que certains jeux envoient en continu
+1406=Toutes les vibrations demandées par le jeu

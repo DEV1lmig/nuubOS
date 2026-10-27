@@ -242,7 +242,8 @@ pub fn topic(t: &str, q: &dyn Fn(&str) -> String) -> R {
         }
         "rumble" => {
             let (supported, enabled): (bool, bool) = call("Rumble", "GetState", &())?;
-            json!({ "supported": supported, "enabled": enabled })
+            let mode: String = call("Rumble", "GetMode", &())?;
+            json!({ "supported": supported, "enabled": enabled, "mode": mode })
         }
         "avatars" => kv(&sock("usersd", &format!("LIST_AVATARS\t{}", token(&q("user"))?))?),
         "games" => {
@@ -489,6 +490,7 @@ pub fn action(b: &Value) -> R {
         }
         "ctl.resetmapping" => { call0("Controllers", "ResetMapping", &(plain(&a("id"), 128)?.as_str(),))?; done("controllers") }
         "rumble.enable" => { call0("Rumble", "SetEnabled", &(flag(&a("v"))? == "1",))?; ok() }
+        "rumble.mode" => { call0("Rumble", "SetMode", &(one_of(&a("v"), &["off", "light", "strong"])?,))?; ok() }
         "rumble.test" => { call0("Rumble", "Test", &())?; ok() }
         "light.effect" => { call0("Lighting", "SetEffect", &(token(&a("v"))?.as_str(),))?; ok() }
         "light.color" => { call0("Lighting", "SetColor", &(token(&a("v"))?.as_str(),))?; ok() }

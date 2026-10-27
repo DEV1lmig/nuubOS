@@ -1400,3 +1400,8 @@
 1399=Levy
 1400=Levy {0}
 1401={0}/{1}
+1402=Värinän voimakkuus
+1403=Kevyt
+1404=Voimakas
+1405=Ohittaa heikoimmat värinät, joita jotkin pelit lähettävät jatkuvasti
+1406=Kaikki pelin pyytämät värinät

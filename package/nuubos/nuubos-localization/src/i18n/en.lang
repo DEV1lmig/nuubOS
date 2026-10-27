@@ -1400,3 +1400,8 @@
 1399=Disc
 1400=Disc {0}
 1401={0} of {1}
+1402=Vibration Intensity
+1403=Light
+1404=Strong
+1405=Skips the faintest vibration some games keep sending
+1406=Every vibration the game asks for

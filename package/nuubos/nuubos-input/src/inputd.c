@@ -1908,45 +1908,86 @@ static void vpad_sync(struct vpad *pad)
  * that have FF_RUMBLE (the kernel driver's force feedback, the built-in
  * motor for "builtin"). Controllers without kernel force feedback get none.
  */
-static bool internal_rumble_on = true;
-static char internal_rumble_user[128];
-static struct timespec internal_rumble_mtime;
+/*
+ * Vibration Intensity (user decision 2026-10-27, GitHub #20): rumbled's
+ * per-user RUMBLE= for every controller. Light drops requests below
+ * RUMBLE_LIGHT_MIN, the faint pulses some games keep sending (Crazy Taxi's
+ * road feel: ~70 ms at 1/7 every 0.1-0.5 s while driving, a constant buzz
+ * on the motors); strong plays everything. A former INTERNAL_RUMBLE=0
+ * counts as off.
+ */
+enum rumble_mode { RUMBLE_OFF, RUMBLE_LIGHT, RUMBLE_STRONG };
+#define RUMBLE_LIGHT_MIN 0x3333 /* 20 % */
 
-/* rumbled's per-user switch for the built-in motor, re-read when the file
- * or the active user changes. */
-static bool internal_rumble_enabled(void)
+static enum rumble_mode rumble_mode_value = RUMBLE_LIGHT;
+static char rumble_mode_user[128];
+static struct timespec rumble_mode_mtime;
+
+static void input_ff_reset(struct input_dev *input);
+
+/* Re-read when the file or the active user changes. */
+static enum rumble_mode rumble_mode(void)
 {
+	enum rumble_mode next = RUMBLE_LIGHT;
 	char user[128];
 	char path[384];
 	char line[128];
+	char value[16];
+	bool found = false;
 	struct stat st;
 	FILE *fp;
+	size_t i;
 
 	read_active_user(user, sizeof(user));
 	snprintf(path, sizeof(path), "/state/users/%s/" INPUT_FEEDBACK_CONF, user);
-	if (stat(path, &st) != 0) {
-		internal_rumble_user[0] = '\0';
-		return true;
-	}
-	if (strcmp(user, internal_rumble_user) == 0 &&
-	    st.st_mtim.tv_sec == internal_rumble_mtime.tv_sec &&
-	    st.st_mtim.tv_nsec == internal_rumble_mtime.tv_nsec)
-		return internal_rumble_on;
+	if (stat(path, &st) != 0)
+		memset(&st, 0, sizeof(st));
+	if (strcmp(user, rumble_mode_user) == 0 &&
+	    st.st_mtim.tv_sec == rumble_mode_mtime.tv_sec &&
+	    st.st_mtim.tv_nsec == rumble_mode_mtime.tv_nsec)
+		return rumble_mode_value;
 
-	snprintf(internal_rumble_user, sizeof(internal_rumble_user), "%s", user);
-	internal_rumble_mtime = st.st_mtim;
-	internal_rumble_on = true;
+	snprintf(rumble_mode_user, sizeof(rumble_mode_user), "%s", user);
+	rumble_mode_mtime = st.st_mtim;
 	fp = fopen(path, "r");
 	if (fp) {
 		while (fgets(line, sizeof(line), fp)) {
-			int value;
+			int old;
 
-			if (sscanf(line, "INTERNAL_RUMBLE=%d", &value) == 1)
-				internal_rumble_on = value != 0;
+			if (sscanf(line, "RUMBLE=%15s", value) == 1) {
+				found = true;
+				next = !strcmp(value, "off") ? RUMBLE_OFF
+				     : !strcmp(value, "strong") ? RUMBLE_STRONG : RUMBLE_LIGHT;
+			} else if (!found && sscanf(line, "INTERNAL_RUMBLE=%d", &old) == 1 && old == 0) {
+				next = RUMBLE_OFF;
+			}
 		}
 		fclose(fp);
 	}
-	return internal_rumble_on;
+	if (next != rumble_mode_value) {
+		log_message("rumble mode=%s", next == RUMBLE_OFF ? "off"
+			    : next == RUMBLE_STRONG ? "strong" : "light");
+		/* Effects are uploaded again, filtered the new way. */
+		for (i = 0; i < input_count; i++)
+			if (inputs[i].ff_player)
+				input_ff_reset(&inputs[i]);
+		rumble_mode_value = next;
+	}
+	return rumble_mode_value;
+}
+
+/* The effect as the intensity plays it; false when nothing is left. */
+static bool rumble_filter(struct ff_effect *effect, enum rumble_mode mode)
+{
+	if (mode == RUMBLE_OFF)
+		return false;
+	if (mode == RUMBLE_LIGHT) {
+		if (effect->u.rumble.strong_magnitude < RUMBLE_LIGHT_MIN)
+			effect->u.rumble.strong_magnitude = 0;
+		if (effect->u.rumble.weak_magnitude < RUMBLE_LIGHT_MIN)
+			effect->u.rumble.weak_magnitude = 0;
+	}
+	return effect->u.rumble.strong_magnitude || effect->u.rumble.weak_magnitude;
 }
 
 static bool input_is_motor(const struct input_dev *input)
@@ -1954,7 +1995,8 @@ static bool input_is_motor(const struct input_dev *input)
 	return strcmp(input->name, RUMBLE_MOTOR_NAME) == 0;
 }
 
-static bool rumble_target(const struct input_dev *input, int player)
+static bool rumble_target(const struct input_dev *input, int player,
+			  enum rumble_mode mode)
 {
 	const struct padmap *map;
 
@@ -1963,7 +2005,7 @@ static bool rumble_target(const struct input_dev *input, int player)
 	map = padmap_for(input_is_motor(input) ? "builtin" : input->controller_id);
 	if (!map || map->player != player)
 		return false;
-	return !input_is_motor(input) || internal_rumble_enabled();
+	return mode != RUMBLE_OFF;
 }
 
 static void input_ff_write(struct input_dev *input, int id, int value)
@@ -1993,13 +2035,16 @@ static void input_ff_reset(struct input_dev *input)
 
 static void vpad_ff_play(struct vpad *pad, int e, int value)
 {
+	enum rumble_mode mode = rumble_mode();
+	struct ff_effect filtered = pad->ff[e];
+	bool audible = rumble_filter(&filtered, mode);
 	size_t i;
 
 	for (i = 0; i < input_count; i++) {
 		struct input_dev *input = &inputs[i];
 		struct ff_effect effect;
 
-		if (value == 0 || !rumble_target(input, pad->player)) {
+		if (value == 0 || !audible || !rumble_target(input, pad->player, mode)) {
 			if (input->ff_player == pad->player && input->ff_ids[e] >= 0)
 				input_ff_write(input, input->ff_ids[e], 0);
 			continue;
@@ -2011,7 +2056,7 @@ static void vpad_ff_play(struct vpad *pad, int e, int value)
 				    pad->player, input->path, input->name);
 		}
 		if (input->ff_ids[e] < 0 || input->ff_gen[e] != pad->ff_gen[e]) {
-			effect = pad->ff[e];
+			effect = filtered;
 			effect.id = (short)input->ff_ids[e];
 			if (ioctl(input->fd, EVIOCSFF, &effect) < 0) {
 				log_message("rumble upload failed path=%s errno=%d",

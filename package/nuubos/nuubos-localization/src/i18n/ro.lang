@@ -1400,3 +1400,8 @@
 1399=Disc
 1400=Discul {0}
 1401={0} din {1}
+1402=Intensitatea vibrației
+1403=Ușoară
+1404=Puternică
+1405=Omite cele mai slabe vibrații pe care unele jocuri le trimit continuu
+1406=Toate vibrațiile cerute de joc

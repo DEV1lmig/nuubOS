@@ -2608,6 +2608,7 @@ fn apply_settings_choice(ui: &HomeWindow) {
         c if c.starts_with("media-") => mediaui::apply_choice(ui, c, value),
         c if storageui::owns_choice(c) => storageui::apply_choice(ui, c, value),
         c if syncui::owns_choice(c) => syncui::apply_choice(ui, c, value),
+        "rumble-mode" => rumble_set_mode(ui, value),
         "player-assignment" => {
             let player_index = ui.get_player_assignment_index().max(0) as usize;
             let Some(assignment) = ui.get_player_assignments().row_data(player_index) else {
@@ -2744,40 +2745,55 @@ fn cancel_controller_remap(ui: &HomeWindow) {
 fn refresh_rumble(ui: &HomeWindow) {
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let result = (|| -> zbus::Result<(bool, bool)> {
+        let result = (|| -> zbus::Result<(bool, String)> {
             let connection = crate::bus::system()?;
             let proxy = rumble_proxy(&connection)?;
-            proxy.call("GetState", &())
+            let (supported, _enabled): (bool, bool) = proxy.call("GetState", &())?;
+            let mode: String = proxy.call("GetMode", &())?;
+            Ok((supported, mode))
         })();
-        if let Ok((supported, enabled)) = result {
+        if let Ok((supported, mode)) = result {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.set_rumble_supported(supported);
-                    ui.set_rumble_enabled(enabled);
+                    ui.set_rumble_mode(mode.into());
                 }
             });
         }
     });
 }
 
-fn rumble_set_enabled(ui: &HomeWindow, enabled: bool) {
+/* Vibration Intensity (rumbled SetMode): off | light | strong, for every
+ * controller (GitHub #20). */
+fn rumble_set_mode(ui: &HomeWindow, mode: String) {
     let weak = ui.as_weak();
     thread::spawn(move || {
         let result = (|| -> zbus::Result<()> {
             let connection = crate::bus::system()?;
             let proxy = rumble_proxy(&connection)?;
-            proxy.call("SetEnabled", &(enabled,))
+            proxy.call("SetMode", &(mode.as_str(),))
         })();
-        if result.is_ok() {
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_rumble_enabled(enabled);
-                }
-            });
-        } else if let Err(error) = result {
-            eprintln!("home: rumble toggle failed={error}");
+        match result {
+            Ok(()) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_rumble_mode(mode.into());
+                    }
+                });
+            }
+            Err(error) => eprintln!("home: rumble mode failed={error}"),
         }
     });
+}
+
+fn open_rumble_mode_dropdown(ui: &HomeWindow) {
+    let options = vec![
+        ("off".to_owned(), tr(ui, 54, "Off")),
+        ("light".to_owned(), tr(ui, 1403, "Light")),
+        ("strong".to_owned(), tr(ui, 1404, "Strong")),
+    ];
+    let current = ui.get_rumble_mode().to_string();
+    open_settings_choice(ui, "rumble-mode", &tr(ui, 1402, "Vibration Intensity"), options, &current);
 }
 
 fn rumble_test() {
@@ -2956,12 +2972,12 @@ fn start_rumble_listener(ui: &HomeWindow) {
         };
 
         for message in &mut signals {
-            if let Ok((supported, enabled)) = message.body().deserialize::<(bool, bool)>() {
+            if message.body().deserialize::<(bool, bool)>().is_ok() {
+                /* The intensity is read again with the state. */
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        ui.set_rumble_supported(supported);
-                        ui.set_rumble_enabled(enabled);
+                        refresh_rumble(&ui);
                     }
                 });
             }
@@ -5167,7 +5183,7 @@ fn handle_settings_action(
                     navigate_settings_view(ui, 12);
                 }
                 2 => toggle_action_button_swap(ui),
-                3 if ui.get_rumble_supported() => {
+                3 => {
                     ui.set_rumble_index(0);
                     navigate_settings_view(ui, 16);
                 }
@@ -5276,19 +5292,22 @@ fn handle_settings_action(
                 _ => {}
             }
         }
-        16 => match action {
-            "menu_up" => ui.set_rumble_index(
-                move_model_selection(ui.get_rumble_index(), 2, -1)
-            ),
-            "menu_down" => ui.set_rumble_index(
-                move_model_selection(ui.get_rumble_index(), 2, 1)
-            ),
-            "menu_left" | "menu_right" | "menu_confirm" if ui.get_rumble_index() == 0 => {
-                rumble_set_enabled(ui, !ui.get_rumble_enabled());
+        /* Vibration: 0 Vibration Intensity (every controller), 1 Test
+         * Rumble (the built-in motor, when there is one). */
+        16 => {
+            let rows = if ui.get_rumble_supported() { 2 } else { 1 };
+            match action {
+                "menu_up" => ui.set_rumble_index(
+                    move_model_selection(ui.get_rumble_index(), rows, -1)
+                ),
+                "menu_down" => ui.set_rumble_index(
+                    move_model_selection(ui.get_rumble_index(), rows, 1)
+                ),
+                "menu_confirm" if ui.get_rumble_index() == 0 => open_rumble_mode_dropdown(ui),
+                "menu_confirm" if ui.get_rumble_index() == 1 && ui.get_rumble_supported() => rumble_test(),
+                _ => {}
             }
-            "menu_confirm" if ui.get_rumble_index() == 1 => rumble_test(),
-            _ => {}
-        },
+        }
         17 => lighting::handle_page(ui, action),
         23 => match action {"menu_up"=>{ui.set_general_index(move_model_selection(ui.get_general_index(),12,-1));update_general_scroll(ui);},"menu_down"=>{ui.set_general_index(move_model_selection(ui.get_general_index(),12,1));update_general_scroll(ui);},_ if (6..=9).contains(&ui.get_general_index())=>date_time_row_action(ui,ui.get_general_index()-6,action),"menu_confirm"=>match ui.get_general_index(){0=>open_active_user(ui),1=>open_language_dropdown(ui),2=>themes::open_choice(ui),3=>{ui.set_user_list_index(0);ui.set_user_list_scroll(0);navigate_settings_view(ui,25);},4 if ui.get_user_count()>1=>open_startup(ui),5 if ui.get_user_count()>1&&ui.get_user_login_mode().as_str()=="default"=>open_default_user(ui),10 if ui.get_automatic_time()=>{ui.set_regional_notice(tr(ui,323,"Syncing…").into());let w=ui.as_weak();thread::spawn(move||{let ok=regional_sync_command().map(|r|r.starts_with("OK")).unwrap_or(false);let _=slint::invoke_from_event_loop(move||if let Some(ui)=w.upgrade(){ui.set_regional_notice(if ok{tr(&ui,299,"Time synchronized").into()}else{tr(&ui,300,"Time synchronization failed").into()});});});},11=>open_keyboard_choice(ui),_=>{}},_=>{}},
         24 => match action {"menu_up"|"menu_down"=>{ui.set_profile_index(move_model_selection(ui.get_profile_index(),2,if action=="menu_up"{-1}else{1}));ui.set_profile_scroll(guarded_scroll_offset(ui.get_profile_index(),2,ui.get_settings_list_visible_rows(),ui.get_profile_scroll()));},"menu_confirm" if ui.get_profile_index()==0=>open_system_keyboard(ui,&tr(ui,285,"Username"),8,24,"text",ui.get_profile_edit_name().as_str()),"menu_confirm" if ui.get_profile_index()==1=>open_avatar_picker(ui),_=>{}},

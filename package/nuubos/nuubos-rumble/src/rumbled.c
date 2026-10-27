@@ -29,6 +29,15 @@ static volatile sig_atomic_t running = 1;
 static char active_user[128] = "default";
 static bool supported;
 static bool enabled = true;
+/*
+ * Vibration Intensity (user decision 2026-10-27, GitHub #20), per user, for
+ * game rumble on every controller (nuubos-inputd reads RUMBLE= from the
+ * same file): off, light (requests below ~20 % are dropped: the constant
+ * faint pulses some games send, e.g. Crazy Taxi's road feel) or strong
+ * (everything). enabled = mode is not off.
+ */
+static const char *const modes[] = { "off", "light", "strong" };
+static int mode = 1;
 static char rumble_path[PATH_MAX];
 static int test_fd = -1;
 static int test_effect_id = -1;
@@ -43,6 +52,12 @@ static const char introspection_xml[] =
 	"</method>"
 	"<method name='SetEnabled'>"
 	"<arg name='enabled' type='b' direction='in'/>"
+	"</method>"
+	"<method name='GetMode'>"
+	"<arg name='mode' type='s' direction='out'/>"
+	"</method>"
+	"<method name='SetMode'>"
+	"<arg name='mode' type='s' direction='in'/>"
 	"</method>"
 	"<method name='Test'/>"
 	"<signal name='StateChanged'>"
@@ -102,18 +117,29 @@ static void load_settings(void)
 	FILE *fp;
 	char line[128];
 
-	enabled = true;
+	char value[16];
+	bool found = false;
+
+	mode = 1;
 	settings_path(path, sizeof(path));
 	fp = fopen(path, "r");
-	if (!fp)
-		return;
+	if (fp) {
+		while (fgets(line, sizeof(line), fp)) {
+			int old;
 
-	while (fgets(line, sizeof(line), fp)) {
-		int value;
-		if (sscanf(line, "INTERNAL_RUMBLE=%d", &value) == 1)
-			enabled = value != 0;
+			if (sscanf(line, "RUMBLE=%15s", value) == 1) {
+				for (int i = 0; i < 3; i++)
+					if (!strcmp(value, modes[i]))
+						mode = i;
+				found = true;
+			} else if (!found && sscanf(line, "INTERNAL_RUMBLE=%d", &old) == 1 && old == 0) {
+				/* The former internal-only switch, off. */
+				mode = 0;
+			}
+		}
+		fclose(fp);
 	}
-	fclose(fp);
+	enabled = mode != 0;
 }
 
 static int save_settings(void)
@@ -135,7 +161,7 @@ static int save_settings(void)
 	fp = fopen(tmp, "w");
 	if (!fp)
 		return -1;
-	if (fprintf(fp, "INTERNAL_RUMBLE=%d\n", enabled ? 1 : 0) < 0 ||
+	if (fprintf(fp, "RUMBLE=%s\n", modes[mode]) < 0 ||
 	    fflush(fp) != 0 || fsync(fileno(fp)) != 0 || fclose(fp) != 0) {
 		unlink(tmp);
 		return -1;
@@ -350,7 +376,52 @@ static DBusHandlerResult handle_message(DBusConnection *conn,
 			return DBUS_HANDLER_RESULT_HANDLED;
 		}
 		dbus_error_free(&error);
-		enabled = value != FALSE;
+		/* The former on/off switch: on keeps a chosen intensity. */
+		if (value == FALSE)
+			mode = 0;
+		else if (mode == 0)
+			mode = 1;
+		enabled = mode != 0;
+		if (save_settings() != 0) {
+			send_reply(conn, dbus_message_new_error(message,
+				"org.nuubOS.Rumble.Error.PersistFailed",
+				"Unable to persist rumble preference"));
+			return DBUS_HANDLER_RESULT_HANDLED;
+		}
+		send_reply(conn, dbus_message_new_method_return(message));
+		emit_state(conn);
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+
+	if (dbus_message_is_method_call(message, INTERFACE_NAME, "GetMode")) {
+		DBusMessage *reply = dbus_message_new_method_return(message);
+		const char *m = modes[mode];
+		if (reply)
+			dbus_message_append_args(reply, DBUS_TYPE_STRING, &m, DBUS_TYPE_INVALID);
+		send_reply(conn, reply);
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+
+	if (dbus_message_is_method_call(message, INTERFACE_NAME, "SetMode")) {
+		const char *value = NULL;
+		int next = -1;
+		DBusError error;
+		dbus_error_init(&error);
+		if (dbus_message_get_args(message, &error,
+					  DBUS_TYPE_STRING, &value,
+					  DBUS_TYPE_INVALID))
+			for (int i = 0; i < 3; i++)
+				if (!strcmp(value, modes[i]))
+					next = i;
+		dbus_error_free(&error);
+		if (next < 0) {
+			send_reply(conn, dbus_message_new_error(message,
+				"org.nuubOS.Rumble.Error.InvalidArgument",
+				"Mode off, light or strong is required"));
+			return DBUS_HANDLER_RESULT_HANDLED;
+		}
+		mode = next;
+		enabled = mode != 0;
 		if (save_settings() != 0) {
 			send_reply(conn, dbus_message_new_error(message,
 				"org.nuubOS.Rumble.Error.PersistFailed",
