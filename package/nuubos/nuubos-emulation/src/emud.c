@@ -393,6 +393,10 @@ struct session {
 	/* Performance overlay: last RetroArch frame rate, next sample. */
 	double fps;
 	long long overlay_tick_ms;
+	/* Frame-rate aware CPU limit: step in game_cpu_caps, uncapped until
+	 * cpu_grace_ms. */
+	int cpu_level;
+	long long cpu_grace_ms;
 	/* Cheats turned on in the session (0 = none loaded). */
 	int cheats_on;
 	/* Netplay: what the launch asked for ("host", "connect"), the state
@@ -1284,6 +1288,119 @@ static bool heavy_system(const char *system)
 		if (!strcmp(system, heavy[i]))
 			return true;
 	return false;
+}
+
+/* Frame-rate aware CPU limit (docs/dev/perf-power.md 3.1). Up to 1032 MHz
+ * the H700 runs at 900 mV, 1416 MHz needs ~1.1 V; schedutil still spent
+ * 35-70 % of the time at 1416 MHz in SNES, GBA, PS1, N64 and NDS games that
+ * keep their full frame rate at 1032 (CubeXX 2026-10-28). A game starts
+ * capped at the lowest step and goes up a step in the first second with
+ * RetroArch's audio buffer running low (the emulation falls behind real
+ * time: the same signal the cores' auto frameskip uses); it never goes back
+ * down in a session (a needless step costs a little power, a late one a
+ * visible stutter). Launch, state loads, resume from pause and
+ * fast-forward run uncapped. power.sh applies the file as one more upper
+ * limit next to the profile and the screen-off cap. */
+#define GAME_CPU_FILE RUN_ROOT "/game-cpu-max"
+#define GAME_CPU_LEVELS 3
+/* Frames with the audio buffer below 25 % in a one-second check. */
+#define GAME_CPU_LOW_FRAMES 3
+#define GAME_CPU_START_GRACE_MS 10000
+#define GAME_CPU_GRACE_MS 3000
+
+static const int game_cpu_caps[GAME_CPU_LEVELS] = { 1032000, 1200000, 0 };
+
+/* Systems that need the full clock from the start (PSP: God of War at
+ * 20 instead of 30 fps at 1032 MHz). */
+static bool full_clock_system(const char *system)
+{
+	static const char *const full[] = {
+		"psp", "dreamcast", "naomi", "atomiswave", "saturn", NULL
+	};
+	int i;
+
+	for (i = 0; full[i]; i++)
+		if (!strcmp(system, full[i]))
+			return true;
+	return false;
+}
+
+/* 0 = no game limit. */
+static void game_cpu_apply(int khz)
+{
+	static int applied = -1;
+	pid_t pid;
+
+	if (khz == applied)
+		return;
+	applied = khz;
+	if (khz > 0) {
+		char tmp[] = GAME_CPU_FILE ".tmp";
+		FILE *f = fopen(tmp, "w");
+
+		if (!f)
+			return;
+		fprintf(f, "%d\n", khz);
+		if (fclose(f) != 0 || rename(tmp, GAME_CPU_FILE) != 0) {
+			unlink(tmp);
+			return;
+		}
+	} else {
+		unlink(GAME_CPU_FILE);
+	}
+	/* Reaped by the main loop like any other child. */
+	pid = fork();
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+		if (null >= 0) {
+			dup2(null, STDIN_FILENO);
+			dup2(null, STDOUT_FILENO);
+			dup2(null, STDERR_FILENO);
+		}
+		execl("/usr/sbin/nuubos-power-mode", "nuubos-power-mode", "refresh", (char *)NULL);
+		_exit(127);
+	}
+}
+
+static void game_cpu_grace(long long ms)
+{
+	long long until = monotonic_ms() + ms;
+
+	if (until > session.cpu_grace_ms)
+		session.cpu_grace_ms = until;
+}
+
+static void game_cpu_update(void)
+{
+	int khz = 0;
+
+	if (session.state == SESSION_RUNNING && !session.menu && !session.fast_forward &&
+	    monotonic_ms() >= session.cpu_grace_ms)
+		khz = game_cpu_caps[session.cpu_level];
+	game_cpu_apply(khz);
+}
+
+/* A game below the top step is asked for its frame rate once a second. */
+static bool game_cpu_watching(void)
+{
+	return !session.menu && session.cpu_level < GAME_CPU_LEVELS - 1;
+}
+
+/* One GET_FPS reply a second: frames that ran with the audio buffer low. */
+static void game_cpu_check(unsigned low)
+{
+	if (session.state != SESSION_RUNNING || session.menu || session.paused ||
+	    session.fast_forward || session.cpu_level >= GAME_CPU_LEVELS - 1 ||
+	    monotonic_ms() < session.cpu_grace_ms)
+		return;
+	if (low < GAME_CPU_LOW_FRAMES)
+		return;
+	session.cpu_level++;
+	log_msg("emud: %s behind (%u low audio frames), CPU limit %d kHz", session.system,
+		low, game_cpu_caps[session.cpu_level]);
+	game_cpu_grace(GAME_CPU_GRACE_MS);
+	game_cpu_update();
 }
 
 /* RetroArch user_language for the user's nuubOS language. */
@@ -2700,6 +2817,8 @@ static void finish_pending(bool ok)
 			notify_state(ok ? "game.state.loaded" : "game.state.failed",
 				     slot, ok ? NULL : "load");
 	}
+	if (kind == PENDING_LOAD && ok)
+		game_cpu_grace(GAME_CPU_GRACE_MS);
 	if (kind == PENDING_SAVE)
 		log_msg("emud: save slot %d %s", slot, ok ? "written" : "failed");
 	finish_power_wait();
@@ -2828,8 +2947,17 @@ static void handle_ra_reply(char *line)
 		return;
 	}
 	if (!strncmp(line, "GET_FPS ", 8)) {
-		session.fps = atof(line + 8);
-		notify_subscribers();
+		/* "GET_FPS <fps> <frames with the audio buffer low>" (RetroArch
+		 * patches 0003 and 0015). The snapshot changes only for the
+		 * overlay: no Quick Menu wakeup a second otherwise. */
+		double fps = 0;
+		unsigned low = 0;
+
+		if (sscanf(line + 8, "%lf %u", &fps, &low) >= 1 && session.settings.overlay) {
+			session.fps = fps;
+			notify_subscribers();
+		}
+		game_cpu_check(low);
 		return;
 	}
 	if (sscanf(line, "SET_PAUSED %d", &slot) == 1) {
@@ -2837,6 +2965,8 @@ static void handle_ra_reply(char *line)
 
 		if (paused != session.paused) {
 			session.paused = paused;
+			if (!paused)
+				game_cpu_grace(GAME_CPU_GRACE_MS);
 			notify_subscribers();
 		}
 	}
@@ -3515,6 +3645,7 @@ static void reset_session(void)
 	session.inotify_wd = -1;
 	session.power_client = -1;
 	session.shot_fd = -1;
+	game_cpu_apply(0);
 }
 
 /*
@@ -3952,6 +4083,8 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	session.fps = 0;
 	session.overlay_tick_ms = monotonic_ms() + OVERLAY_TICK_MS;
 	session.fast_forward = false;
+	session.cpu_level = full_clock_system(session.system) ? GAME_CPU_LEVELS - 1 : 0;
+	game_cpu_grace(GAME_CPU_START_GRACE_MS);
 	session.started_ms = monotonic_ms();
 	copy_text(session.net_launch, sizeof(session.net_launch), net_address[0] ? "connect" : net);
 	/* The user's cheats for the game (never with netplay or hardcore).
@@ -4326,7 +4459,7 @@ static int session_timeout_ms(void)
 		deadline = session.shot_deadline_ms;
 	if (discovery.fd >= 0 && (deadline < 0 || discovery.deadline_ms < deadline))
 		deadline = discovery.deadline_ms;
-	if (session.state == SESSION_RUNNING && session.settings.overlay &&
+	if (session.state == SESSION_RUNNING && (session.settings.overlay || game_cpu_watching()) &&
 	    (deadline < 0 || session.overlay_tick_ms < deadline))
 		deadline = session.overlay_tick_ms;
 	if (session.state == SESSION_RUNNING && session.disc_insert_ms && !session.paused &&
@@ -4352,11 +4485,12 @@ static void session_timers(void)
 	/* Performance overlay: ask RetroArch for its frame rate; the reply
 	 * updates the snapshot the Quick Menu draws from. Not while paused
 	 * (the Quick Menu hides the overlay then). */
-	if (session.state == SESSION_RUNNING && session.settings.overlay &&
+	if (session.state == SESSION_RUNNING && (session.settings.overlay || game_cpu_watching()) &&
 	    now >= session.overlay_tick_ms) {
 		if (!session.paused)
 			ra_command("GET_FPS");
 		session.overlay_tick_ms = now + OVERLAY_TICK_MS;
+		game_cpu_update();
 	}
 	if (session.state == SESSION_RUNNING && session.disc_insert_ms && !session.paused &&
 	    now >= session.disc_insert_ms)
@@ -4540,6 +4674,9 @@ static void handle_hotkey(const char *action)
 	} else if (!strcmp(action, "fast_forward")) {
 		session.fast_forward = !session.fast_forward;
 		ra_command("FAST_FORWARD");
+		if (!session.fast_forward)
+			game_cpu_grace(GAME_CPU_GRACE_MS);
+		game_cpu_update();
 		notify_fast_forward(session.fast_forward);
 		notify_subscribers();
 	}

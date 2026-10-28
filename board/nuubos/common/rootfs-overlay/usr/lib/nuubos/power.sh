@@ -16,6 +16,8 @@ BATTERY_SAVER_GPU_MAX=504000000
 # vdd-cpu change over I2C, ~30/s on the CubeXX) stops (battery audit
 # 2026-10-14).
 SCREEN_OFF_CPU_MAX=1032000
+# Written by nuubos-emud while a game runs (docs/dev/perf-power.md 3.1).
+GAME_CPU_MAX_FILE=/run/nuubos/game-cpu-max
 
 power_log()
 {
@@ -97,6 +99,18 @@ apply_limits()
 	if [ -e /run/nuubos/screen-off ] && [ "$CPU_MAX" -gt "$SCREEN_OFF_CPU_MAX" ]; then
 		CPU_MAX="$SCREEN_OFF_CPU_MAX"
 	fi
+
+	# A running game that keeps its frame rate with less (nuubos-emud,
+	# frame-rate aware limit; the file is gone when no game runs).
+	GAME_CPU_MAX="$(cat "$GAME_CPU_MAX_FILE" 2>/dev/null)"
+	case "$GAME_CPU_MAX" in
+		''|*[!0-9]*) ;;
+		*)
+			if [ "$GAME_CPU_MAX" -gt 0 ] && [ "$CPU_MAX" -gt "$GAME_CPU_MAX" ]; then
+				CPU_MAX="$GAME_CPU_MAX"
+			fi
+			;;
+	esac
 
 	echo "$CPU_MAX" > "$CPU_POLICY/scaling_max_freq" || return 1
 	echo "$GPU_MAX" > "$GPU_DEVFREQ/max_freq" || return 1

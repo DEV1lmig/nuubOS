@@ -28,6 +28,7 @@ show_status()
 
 	echo "cpu_governor=$(cat "$CPU_POLICY/scaling_governor")"
 	echo "profile_cpu_max=$PROFILE_CPU_MAX"
+	echo "game_cpu_max=$(cat "$GAME_CPU_MAX_FILE" 2>/dev/null || echo 0)"
 	echo "effective_cpu_max=$(cat "$CPU_POLICY/scaling_max_freq")"
 
 	echo "gpu_governor=$(cat "$GPU_DEVFREQ/governor")"

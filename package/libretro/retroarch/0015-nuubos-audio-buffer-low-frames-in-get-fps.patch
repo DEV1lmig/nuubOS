@@ -1,0 +1,74 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS GET_FPS reports frames run with the audio buffer low
+
+The audio buffer occupancy is now measured every frame, not only for
+cores that registered the buffer status callback, and GET_FPS replies
+"GET_FPS <fps> <frames>" with the frames that ran with the buffer below
+RetroArch's 25 % low-water mark since the previous GET_FPS. When the
+emulation falls behind real time the buffer drains, whether the core
+drops frames or skips them: nuubos-emud raises its CPU limit on it.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/runloop.c
++++ b/runloop.c
+@@ -318,6 +318,10 @@
+ #define PERF_LOG_FMT "[PERF] Avg (%s): %llu ticks, %llu runs.\n"
+ #endif
+ 
++/* nuubOS: frames run with the audio buffer below 25 %, read and reset
++ * by GET_FPS. */
++unsigned nuubos_audio_low_frames;
++
+ static runloop_state_t runloop_state      = {0};
+ 
+ /* GLOBAL POINTER GETTERS */
+@@ -7243,8 +7247,9 @@
+    }
+ 
+    /* Update audio buffer occupancy if buffer status
+-    * callback is in use by the core */
+-   if (runloop_st->audio_buffer_status.callback)
++    * callback is in use by the core; nuubOS always measures it: frames
++    * that run with the buffer low tell nuubos-emud that the emulation
++    * falls behind (GET_FPS, frame-rate aware CPU limit). */
+    {
+       bool audio_buf_active        = false;
+       unsigned audio_buf_occupancy = 0;
+@@ -7275,9 +7280,11 @@
+          audio_buf_underrun  = audio_buf_occupancy < 25;
+ 
+          audio_buf_active    = true;
++         if (audio_buf_underrun && !core_paused)
++            nuubos_audio_low_frames++;
+       }
+ 
+-      if (!core_paused)
++      if (runloop_st->audio_buffer_status.callback && !core_paused)
+          runloop_st->audio_buffer_status.callback(
+                audio_buf_active, audio_buf_occupancy, audio_buf_underrun);
+    }
+--- a/command.c
++++ b/command.c
+@@ -881,6 +881,8 @@
+ 
+ /* Frames presented per second since the previous GET_FPS (nuubOS
+  * performance overlay, asked about once a second). */
++extern unsigned nuubos_audio_low_frames;
++
+ bool command_get_fps(command_t *cmd, const char *arg)
+ {
+    static uint64_t last_count;
+@@ -895,7 +897,11 @@
+       fps = (double)(count - last_count) * 1000000.0 / (double)(now - last_time);
+    last_count = count;
+    last_time  = now;
+-   _len = snprintf(reply, sizeof(reply), "GET_FPS %.1f\n", fps);
++   /* Then the frames that ran with the audio buffer low since the
++    * previous GET_FPS (nuubos-emud raises its CPU limit on them). */
++   _len = snprintf(reply, sizeof(reply), "GET_FPS %.1f %u\n", fps,
++         nuubos_audio_low_frames);
++   nuubos_audio_low_frames = 0;
+    cmd->replier(cmd, reply, _len);
+    return true;
+ }
