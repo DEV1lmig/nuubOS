@@ -9,7 +9,7 @@
 # (tools/melonds-dev) to /tmp. Never while the user plays.
 T=$1; K=$2; X=$3; shift 3
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
-U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
+U=/userdata/users/$(cat /run/nuubos/user/active)/; C=$U/appdata/retroarch/retroarch-core-options.cfg
 . /tmp/opts.sh
 for kv in "$@"; do opt_set $C "${kv%%=*}" "${kv#*=}"; done
 cp /usr/bin/retroarch /tmp/retroarch.real

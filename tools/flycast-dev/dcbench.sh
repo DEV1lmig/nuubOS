@@ -7,7 +7,7 @@
 # gpubusy.sh (tools/melonds-dev) to /tmp with it. Never while the user plays.
 T=$1; N=$2; X=$3; shift 3
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
-U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
+U=/userdata/users/$(cat /run/nuubos/user/active)/; C=$U/appdata/retroarch/retroarch-core-options.cfg
 S=$U/appdata/nuubos-emulation/settings.conf
 cp $S /tmp/dcb-settings.conf; . /tmp/opts.sh
 nuubos-emuctl set overlay 1 >/dev/null; nuubos-emuctl set overlay_items "" >/dev/null

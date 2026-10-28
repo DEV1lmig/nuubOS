@@ -468,6 +468,7 @@ fn aspect_label(ui: &HomeWindow, v: &str) -> String {
         "16:9" => "16:9".into(),
         "full" => tr(ui, 530, "Full Screen"),
         "integer" => tr(ui, 531, "Integer Scaling"),
+        "square" => tr(ui, 1413, "Square Pixels"),
         _ => String::new(),
     }
 }
@@ -1345,7 +1346,7 @@ fn open_core_choice(ui: &HomeWindow) {
 fn open_aspect_choice(ui: &HomeWindow) {
     let d = STATE.with(|st| st.borrow().details.clone());
     let mut options = vec![(String::new(), default_label(ui, &tr(ui, 531, "Integer Scaling")))];
-    for v in ["core", "4:3", "16:9", "full", "integer"] {
+    for v in ["core", "4:3", "16:9", "full", "integer", "square"] {
         options.push((v.to_owned(), aspect_label(ui, v)));
     }
     open_settings_choice(ui, "game-aspect", &tr(ui, 526, "Aspect Ratio"), options, &d.aspect);
@@ -1430,6 +1431,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-pak" => game_set(ui, "pak", value),
         "game-resolution" => game_set(ui, "resolution", value),
         "emu-slots" => emu_set(ui, "slots", value),
+        "emu-position" => emu_set(ui, "position", value),
         "game-fill" => start_bulk(ui, value),
         "update-channel" => {
             STATE.with(|st| st.borrow_mut().update_result.clear());
@@ -1659,6 +1661,14 @@ fn source_detail(ui: &HomeWindow, id: &str) -> String {
     }
 }
 
+fn position_label(ui: &HomeWindow, v: &str) -> String {
+    match v {
+        "top" => tr(ui, 1410, "Top"),
+        "bottom" => tr(ui, 1412, "Bottom"),
+        _ => tr(ui, 1411, "Center"),
+    }
+}
+
 fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     let mut rows = Vec::new();
     let on = |k: &str| emu_get(st, k) == "1";
@@ -1673,6 +1683,9 @@ fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     rows.push(("hotkeys".into(), nav(tr(ui, 772, "Game Hotkeys"), String::new()), true));
     rows.push(("overlay".into(), nav(tr(ui, 774, "Performance Overlay"),
         if on("overlay") { tr(ui, 222, "On") } else { tr(ui, 54, "Off") }), true));
+    /* Where a picture lower than the screen sits (GitHub #13). */
+    rows.push(("position".into(), GenRow { navigates: true, ..row(tr(ui, 1408, "Picture Position"),
+        position_label(ui, &emu_get(st, "position")), tr(ui, 1409, "Where the game sits when it does not fill the screen")) }, true));
     rows.push(("bezels".into(), toggle(tr(ui, 775, "Bezels"), on("bezels"),
         tr(ui, 776, "Frames the game when it does not fill the screen")), true));
     rows.push(("crt".into(), toggle(tr(ui, 777, "CRT Effect"), on("crt"),
@@ -1857,6 +1870,11 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
                     let current = STATE.with(|st| emu_get(&st.borrow(), "slots"));
                     let options = ["3", "5", "10", "20", "50", "99"].iter().map(|n| (n.to_string(), n.to_string())).collect();
                     open_settings_choice(ui, "emu-slots", &tr(ui, 769, "Save State Slots"), options, &current);
+                }
+                "position" => {
+                    let current = STATE.with(|st| emu_get(&st.borrow(), "position"));
+                    let options = ["top", "center", "bottom"].iter().map(|v| (v.to_string(), position_label(ui, v))).collect();
+                    open_settings_choice(ui, "emu-position", &tr(ui, 1408, "Picture Position"), options, &current);
                 }
                 "hotkeys" => {
                     set_back(ui, GAMING_VIEW);

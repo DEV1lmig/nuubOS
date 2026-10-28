@@ -524,7 +524,7 @@ async function gamePage(id, from) {
 async function gameSettingsPage(id, system) {
   const s = await get('game_settings', { id, system }, true);
   const def = (v) => C(528, 'Default ({0})', v);
-  const aspects = { core: C(529, 'As the game'), '4:3': '4:3', '16:9': '16:9', full: C(530, 'Full Screen'), integer: C(531, 'Integer Scaling') };
+  const aspects = { core: C(529, 'As the game'), '4:3': '4:3', '16:9': '16:9', full: C(530, 'Full Screen'), integer: C(531, 'Integer Scaling'), square: C(1413, 'Square Pixels') };
   const filters = { sharp: C(532, 'Sharp'), smooth: C(533, 'Smooth'), pixel: C(534, 'Pixel Perfect'), crt: C(777, 'CRT Effect') };
   const accuracies = { fast: C(1315, 'Fast'), accurate: C(1316, 'Accurate') };
   const paks = { '': C(1340, 'Rumble Pak'), memory: C(1341, 'Controller Pak') };
@@ -1104,7 +1104,8 @@ async function syncPage() {
   /* Existing folders of the user's other devices (folderid: kind, id, custom). */
   const custom = Object.fromEntries(rows(s.folderid).filter((f) => f[2] === '1').map((f) => [f[0], f[1]]));
   const folderIds = Object.fromEntries(rows(s.folderid).map((f) => [f[0], f[1]]));
-  const KINDS3 = [['saves', C(673, 'Saves')], ['states', C(674, 'Save States')], ['screenshots', C(675, 'Screenshots')]];
+  const KINDS3 = [['saves', C(673, 'Saves')], ['states', C(674, 'Save States')], ['screenshots', C(675, 'Screenshots')],
+    ['roms', C(1414, 'Games')], ['roms-sd2', C(1416, 'Games on SD2')]];
   const code = (id) => (id || '').slice(0, 7);
   const label = (d) => d[1] || C(1059, 'Device {0}', code(d[0]));
   const syncing = (f) => ['syncing', 'sync-preparing', 'sync-waiting'].includes(f[2]);
@@ -1143,7 +1144,9 @@ async function syncPage() {
     nodes.push(section(C(1031, 'WHAT TO SYNC'), 'user'), group(
       [['saves', C(673, 'Saves'), ''], ['states', C(674, 'Save States'), ''], ['screenshots', C(675, 'Screenshots'), ''],
         ['library', C(1089, 'Covers & Metadata'), C(1090, 'Shared by every profile on this console')],
-        ['history', C(1091, 'Play Activity'), C(1092, 'Time played and Recently Played, added up across your devices')]].map(([k, title, note]) => row({ key: 'f:' + k,
+        ['history', C(1091, 'Play Activity'), C(1092, 'Time played and Recently Played, added up across your devices')],
+        ['roms', C(1414, 'Games'), C(1415, "The ROM folder on this console's card, shared by every profile")],
+        ['roms-sd2', C(1416, 'Games on SD2'), C(1417, "The SD2 card's ROM folder; it waits while the card is out")]].map(([k, title, note]) => row({ key: 'f:' + k,
         title,
         detail: folders[k] && folders[k][1] === '1' ? (syncing(folders[k]) ? C(323, 'Syncing…') : folders[k][2] === 'error' ? C(1084, 'Cannot sync') : folderIds[k] ? C(1324, 'Folder ID {0}', folderIds[k]) : note) : note,
         toggle: !!folders[k] && folders[k][1] === '1', set: (v) => act('sync.folder', { kind: k, v }) })),
@@ -1312,6 +1315,7 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
   const avail = on01(ss.available);
   const src = SOURCES[ss.provider] || SOURCES.screenscraper;
   const scanning = lib.scanning === '1';
+  const positions = { top: C(1410, 'Top'), center: C(1411, 'Center'), bottom: C(1412, 'Bottom') };
   const nodes = [section(C(703, 'GAMING'), 'user'), group(
     row({ key: 'ra', title: C(584, 'RetroAchievements'), value: ra.user || C(566, 'Not signed in'), chevron: true, on: () => go('gaming/ra') }),
     row({ key: 'boot', title: C(767, 'Console Boot Screens'), detail: C(768, "Shows the console's start-up logo when its BIOS is available"), toggle: on01(emu.boot_screens), set: (v) => set('boot_screens', v ? '1' : '0') }),
@@ -1322,6 +1326,11 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
     row({ key: 'rot', title: C(770, 'Rotate Save Slots'), detail: C(771, 'Each save goes to the next slot, then starts again from slot 0'), toggle: on01(emu.slot_rotation), set: (v) => set('slot_rotation', v ? '1' : '0') }),
     row({ key: 'hk', title: C(772, 'Game Hotkeys'), chevron: true, on: () => go('gaming/hotkeys') }),
     row({ key: 'ov', title: C(774, 'Performance Overlay'), value: on01(emu.overlay) ? C(222, 'On') : C(54, 'Off'), chevron: true, on: () => go('gaming/overlay') }),
+    row({ key: 'pos', title: C(1408, 'Picture Position'), detail: C(1409, 'Where the game sits when it does not fill the screen'),
+      value: positions[emu.position] || positions.center, chevron: true, on: async () => {
+        const v = await choose(C(1408, 'Picture Position'), Object.entries(positions).map(([value, label]) => ({ value, label })), emu.position || 'center');
+        if (v) await set('position', v);
+      } }),
     row({ key: 'bez', title: C(775, 'Bezels'), detail: C(776, 'Frames the game when it does not fill the screen'), toggle: on01(emu.bezels), set: (v) => set('bezels', v ? '1' : '0') }),
     row({ key: 'crt', title: C(777, 'CRT Effect'), detail: C(778, 'Scanlines for consoles played on TVs'), toggle: on01(emu.crt), set: (v) => set('crt', v ? '1' : '0') }),
     row({ key: 'ramenu', title: C(1391, 'RetroArch in the Quick Menu'), detail: C(1392, "Opens RetroArch's own menu during a game"), toggle: on01(emu.retroarch_menu), set: (v) => set('retroarch_menu', v ? '1' : '0') })),
@@ -1431,7 +1440,10 @@ page('display', 'settings', () => C(7, 'Display & Audio'), async () => {
     vol === 'unsupported' ? row({ key: 'vol', title: C(134, 'Volume'), value: a.selected === 'hdmi' ? C(223, 'TV / Receiver') : C(205, 'Unavailable'), detail: C(273, 'Volume controlled by TV / receiver'), disabled: true })
       : row({ key: 'vol', title: C(134, 'Volume'), slider: { value: Number(vol) || 0, set: (v) => act('audio.volume', { v }, { quiet: true }) } }),
     row({ key: 'apps', title: C(135, 'Applications'), slider: { value: Number(a['volume.applications']) || 0, set: (v) => act('audio.apps', { v }, { quiet: true }) } }),
-    row({ key: 'music', title: C(139, 'Home Music'), slider: { value: Number(a['volume.home_music']) || 0, set: (v) => act('audio.music', { v }, { quiet: true }) } }),
+    /* Home Music On/Off (user request 2026-10-28), then its volume. */
+    row({ key: 'musicon', title: C(139, 'Home Music'), toggle: a['home_music.enabled'] !== '0', set: (v) => act('audio.musicon', { v }) }),
+    row({ key: 'music', title: C(1116, 'Music Volume'), disabled: a['home_music.enabled'] === '0',
+      slider: { value: Number(a['volume.home_music']) || 0, set: (v) => act('audio.music', { v }, { quiet: true }) } }),
     on01(a['home_music.playing']) ? row({ key: 'skip', title: C(329, 'Skip Track'), detail: a['home_music.track'] || '', on: () => act('audio.musicplay', { v: 'NEXT' }) }) : null,
     row({ key: 'test', title: C(140, 'Test Sound'), value: C(142, 'Play'), detail: T('on_console'), on: () => act('audio.test', { v: 'START' }) })),
   section(C(730, 'SOUNDS'), 'device'), group(

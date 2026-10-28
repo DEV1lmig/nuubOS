@@ -3,7 +3,7 @@
 V=$1; G=$2; SL=$3; T=${4:-15}
 for w in 1 2 3 4 5; do nuubos-emuctl status | grep -q "^state=idle" && break; sleep 2; done
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
-U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
+U=/userdata/users/$(cat /run/nuubos/user/active)/; C=$U/appdata/retroarch/retroarch-core-options.cfg
 . /tmp/opts.sh
 opt_set $C melonds_accuracy fast
 for kv in $OPTS; do opt_set $C ${kv%%=*} "$(echo "${kv#*=}" | tr _ ' ')"; done

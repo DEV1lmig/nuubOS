@@ -1406,3 +1406,13 @@
 1405=Ignore les vibrations les plus faibles que certains jeux envoient en continu
 1406=Toutes les vibrations demandées par le jeu
 1407=Vibrations
+1408=Position de l'image
+1409=Où se place le jeu lorsqu'il ne remplit pas l'écran
+1410=En haut
+1411=Au centre
+1412=En bas
+1413=Pixels carrés
+1414=Jeux
+1415=Le dossier des ROM de la carte de cette console, partagé par tous les profils
+1416=Jeux sur SD2
+1417=Le dossier des ROM de la carte SD2 ; il attend tant que la carte est retirée

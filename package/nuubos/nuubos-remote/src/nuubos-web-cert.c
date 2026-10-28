@@ -63,7 +63,7 @@ int main(int argc, char **argv)
 	X509 *cert = NULL;
 	X509_EXTENSION *ext;
 	X509V3_CTX ctx;
-	X509_NAME *name;
+	X509_NAME *name = NULL;
 	unsigned char md[EVP_MAX_MD_SIZE];
 	unsigned int mdlen = 0;
 	unsigned char serial[16];
@@ -103,10 +103,13 @@ int main(int argc, char **argv)
 		goto out;
 	if (!X509_set_pubkey(cert, key))
 		goto out;
-	name = X509_get_subject_name(cert);
-	if (!X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, (const unsigned char *)"nuubOS", -1, -1, 0) ||
+	/* OpenSSL 4 hands out the certificate's own name as const: build it
+	 * apart and copy it in as subject and issuer. */
+	name = X509_NAME_new();
+	if (!name ||
+	    !X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, (const unsigned char *)"nuubOS", -1, -1, 0) ||
 	    !X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const unsigned char *)argv[3], -1, -1, 0) ||
-	    !X509_set_issuer_name(cert, name))
+	    !X509_set_subject_name(cert, name) || !X509_set_issuer_name(cert, name))
 		goto out;
 	snprintf(san, sizeof(san), "DNS:%s,DNS:%s.local,DNS:nuubos.local", argv[3], argv[3]);
 	X509V3_set_ctx(&ctx, cert, cert, NULL, NULL, 0);
@@ -135,6 +138,7 @@ out:
 	if (rc)
 		fprintf(stderr, "nuubos-web-cert: could not create the certificate\n");
 	BN_free(bn);
+	X509_NAME_free(name);
 	X509_free(cert);
 	EVP_PKEY_free(key);
 	return rc;

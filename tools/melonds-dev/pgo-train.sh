@@ -6,7 +6,7 @@
 # the user's NDS saves/states are snapshotted and put back byte- and mtime-identical before Syncthing restarts.
 T=$1; shift
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
-U=$(ls -d /userdata/users/*/ | head -1); C=${U}appdata/retroarch/retroarch-core-options.cfg
+U=/userdata/users/$(cat /run/nuubos/user/active)/; C=${U}appdata/retroarch/retroarch-core-options.cfg
 . /tmp/opts.sh
 /etc/init.d/S49nuubos-syncd stop >/dev/null 2>&1; sleep 2
 pidof syncthing >/dev/null && { echo "syncthing still running"; /etc/init.d/S49nuubos-syncd start; exit 1; }

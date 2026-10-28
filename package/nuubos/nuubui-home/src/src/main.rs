@@ -2069,6 +2069,16 @@ fn set_notify_sounds_enabled(ui: &HomeWindow, enabled: bool) {
     });
 }
 
+/* Home Music On/Off (user request 2026-10-28): audiod stops or resumes the
+ * music; the volume stays as it was. */
+fn set_home_music_enabled(ui: &HomeWindow, enabled: bool) {
+    ui.set_home_music_enabled(enabled);
+    thread::spawn(move || {
+        let value = if enabled { 1 } else { 0 };
+        let _ = audio_socket_command(&format!("MUSIC ENABLED SET {value}"));
+    });
+}
+
 fn set_power_sounds_enabled(ui: &HomeWindow, enabled: bool) {
     ui.set_power_sounds_enabled(enabled);
     thread::spawn(move || {
@@ -2091,12 +2101,14 @@ fn refresh_audio_policy(ui: &HomeWindow) {
         let navigation = parse_audio_policy_int("SYSTEM NAVIGATION GET", 1) != 0;
         let power = parse_audio_policy_int("SYSTEM POWER GET", 1) != 0;
         let notify = parse_audio_policy_int("SYSTEM NOTIFY GET", 1) != 0;
+        let music = parse_audio_policy_int("MUSIC ENABLED GET", 1) != 0;
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_applications_volume(applications);
                 ui.set_navigation_sounds_enabled(navigation);
                 ui.set_power_sounds_enabled(power);
                 ui.set_notify_sounds_enabled(notify);
+                ui.set_home_music_enabled(music);
             }
         });
     });
@@ -4327,20 +4339,20 @@ fn update_display_audio_scroll(ui: &HomeWindow, count: i32) {
 /// Display & Audio rows by function. Color Temperature (row 1) exists only
 /// when the panel supports it; the rows below it move up when it does not.
 #[derive(Clone, Copy, PartialEq)]
-enum DaRow { Brightness, ColorTemperature, Output, Volume, Applications, HomeMusic, TestSound, SystemSounds, NavigationSounds, NotifySounds, PowerSounds,
+enum DaRow { Brightness, ColorTemperature, Output, Volume, Applications, HomeMusicOn, HomeMusic, TestSound, SystemSounds, NavigationSounds, NotifySounds, PowerSounds,
     CastSound, CastLatency, CastEncoder }
 
 /* Rows without Color Temperature and without SCREEN CASTING (3 rows, only
  * while nuubos-castd runs). */
-const DA_ROWS: i32 = 10;
+const DA_ROWS: i32 = 11;
 
 fn display_audio_count(ui: &HomeWindow) -> i32 {
     DA_ROWS + ui.get_da_temp() + if ui.get_cast_available() { 3 } else { 0 }
 }
 
 fn display_audio_row(ui: &HomeWindow) -> DaRow {
-    const ROWS: [DaRow; 14] = [DaRow::Brightness, DaRow::ColorTemperature, DaRow::Output, DaRow::Volume, DaRow::Applications,
-        DaRow::HomeMusic, DaRow::TestSound, DaRow::SystemSounds, DaRow::NavigationSounds, DaRow::NotifySounds, DaRow::PowerSounds,
+    const ROWS: [DaRow; 15] = [DaRow::Brightness, DaRow::ColorTemperature, DaRow::Output, DaRow::Volume, DaRow::Applications,
+        DaRow::HomeMusicOn, DaRow::HomeMusic, DaRow::TestSound, DaRow::SystemSounds, DaRow::NavigationSounds, DaRow::NotifySounds, DaRow::PowerSounds,
         DaRow::CastSound, DaRow::CastLatency, DaRow::CastEncoder];
     let index = ui.get_display_audio_index().clamp(0, display_audio_count(ui) - 1);
     let logical = if ui.get_da_temp() == 0 && index >= 1 { index + 1 } else { index };
@@ -5433,7 +5445,8 @@ fn handle_settings_action(
                     DaRow::ColorTemperature => adjust_display_color_temperature(ui, 250 * step),
                     DaRow::Volume => audio_adjust_volume(ui, step),
                     DaRow::Applications => adjust_applications_volume(ui, step),
-                    DaRow::HomeMusic => adjust_home_music_volume(ui, step),
+                    DaRow::HomeMusicOn => set_home_music_enabled(ui, !ui.get_home_music_enabled()),
+                    DaRow::HomeMusic if ui.get_home_music_enabled() => adjust_home_music_volume(ui, step),
                     DaRow::SystemSounds => adjust_system_sounds_volume(ui, step),
                     DaRow::NavigationSounds => set_navigation_sounds_enabled(ui, !ui.get_navigation_sounds_enabled()),
                     DaRow::NotifySounds => set_notify_sounds_enabled(ui, !ui.get_notify_sounds_enabled()),
@@ -5446,7 +5459,8 @@ fn handle_settings_action(
                     DaRow::Output => open_audio_output_dropdown(ui),
                     DaRow::Volume => audio_toggle_mute(ui),
                     DaRow::Applications => toggle_stream_mute(ui, false),
-                    DaRow::HomeMusic => toggle_stream_mute(ui, true),
+                    DaRow::HomeMusicOn => set_home_music_enabled(ui, !ui.get_home_music_enabled()),
+                    DaRow::HomeMusic if ui.get_home_music_enabled() => toggle_stream_mute(ui, true),
                     DaRow::TestSound => audio_toggle_test_tone(ui),
                     DaRow::NavigationSounds => set_navigation_sounds_enabled(ui, !ui.get_navigation_sounds_enabled()),
                     DaRow::NotifySounds => set_notify_sounds_enabled(ui, !ui.get_notify_sounds_enabled()),

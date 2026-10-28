@@ -103,6 +103,8 @@ struct audio_state {
 	int unmute_music;
 	bool navigation_sounds_enabled;
 	bool power_sounds_enabled;
+	/* Home Music On/Off (user request 2026-10-28): off keeps the volume. */
+	bool home_music_enabled;
 	/* Notification, error and screenshot cues (Quick Menu toasts). */
 	bool notify_sounds_enabled;
 
@@ -164,6 +166,12 @@ static void emit_state_changed(DBusConnection *conn,
 static void reroute_owned_streams(struct audio_state *state);
 static void service_owned_streams(struct audio_state *state);
 static bool start_music_new(struct audio_state *state);
+
+/* Home Music is on and its volume above 0%. */
+static bool music_audible(const struct audio_state *state)
+{
+	return state->home_music_enabled && state->volume_home_music > 0;
+}
 static void stop_music(struct audio_state *state);
 static void stop_child(pid_t *pid);
 static void stop_system_sound(struct audio_state *state);
@@ -785,6 +793,7 @@ static void load_config(struct audio_state *state)
 	state->unmute_music = 0;
 	state->navigation_sounds_enabled = DEFAULT_NAVIGATION_SOUNDS;
 	state->power_sounds_enabled = DEFAULT_POWER_SOUNDS;
+	state->home_music_enabled = true;
 	state->notify_sounds_enabled = DEFAULT_NOTIFY_SOUNDS;
 	state->test_pid = -1;
 	state->system_pid = -1;
@@ -866,6 +875,8 @@ static void load_config(struct audio_state *state)
 			state->power_sounds_enabled = strcmp(line + 27, "0") != 0;
 		} else if (strncmp(line, "AUDIO_SYSTEM_NOTIFY_ENABLED=", 28) == 0) {
 			state->notify_sounds_enabled = strcmp(line + 28, "0") != 0;
+		} else if (strncmp(line, "AUDIO_HOME_MUSIC_ENABLED=", 25) == 0) {
+			state->home_music_enabled = strcmp(line + 25, "0") != 0;
 		}
 	}
 
@@ -1172,7 +1183,7 @@ static int set_selected_volume(struct audio_state *state,
 		stop_system_sound(state);
 		stop_music(state);
 	} else if (volume > 0 && old_volume == 0 &&
-		   state->music_requested && state->volume_home_music > 0) {
+		   state->music_requested && music_audible(state)) {
 		state->music_file[0] = '\0';
 		state->music_offset_ms = 0;
 		(void)start_music_new(state);
@@ -1376,7 +1387,7 @@ static bool handle_audio_method(DBusConnection *conn,
 		state->music_requested = true;
 		ensure_ui_anchor(state);
 
-		if (state->volume_home_music > 0 &&
+		if (music_audible(state) &&
 		    state->music_pid <= 0)
 			(void)start_music_new(state);
 
@@ -1507,6 +1518,7 @@ static void status_reply(const struct audio_state *state,
 		 "system.navigation_enabled=%d\n"
 		 "system.power_enabled=%d\n"
 		 "volume.home_music=%d\n"
+		 "home_music.enabled=%d\n"
 		 "home_music.playing=%d\n"
 		 "home_music.track=%s\n",
 		 state->mode,
@@ -1523,6 +1535,7 @@ static void status_reply(const struct audio_state *state,
 		 state->navigation_sounds_enabled ? 1 : 0,
 		 state->power_sounds_enabled ? 1 : 0,
 		 state->volume_home_music,
+		 state->home_music_enabled ? 1 : 0,
 		 state->music_pid > 0 ? 1 : 0,
 		 state->music_file[0] != '\0' ? state->music_file : "");
 }
@@ -1923,7 +1936,7 @@ static void stop_system_sound(struct audio_state *state)
 static bool start_music_current(struct audio_state *state)
 {
 	if (!state->music_requested ||
-	    state->volume_home_music <= 0 ||
+	    !music_audible(state) ||
 	    !product_audio_master_enabled(state) ||
 	    state->music_file[0] == '\0')
 		return false;
@@ -2159,7 +2172,7 @@ static bool start_music_new(struct audio_state *state)
 	state->music_offset_ms = 0;
 
 	if (!state->music_requested ||
-	    state->volume_home_music <= 0 ||
+	    !music_audible(state) ||
 	    !product_audio_master_enabled(state)) {
 		state->music_file[0] = '\0';
 		return false;
@@ -2208,7 +2221,7 @@ static void reroute_owned_streams(struct audio_state *state)
 		stop_system_sound(state);
 
 	if (state->music_requested &&
-	    state->volume_home_music > 0) {
+	    music_audible(state)) {
 		if (state->music_file[0] != '\0') {
 			state->music_offset_ms += elapsed_ms(&state->music_started);
 			(void)start_music_current(state);
@@ -2365,12 +2378,12 @@ static void service_owned_streams(struct audio_state *state)
 			state->music_offset_ms = 0;
 
 			if (state->music_requested &&
-			    state->volume_home_music > 0 &&
+			    music_audible(state) &&
 			    product_audio_master_enabled(state))
 				(void)start_music_new(state);
 		}
 	} else if (state->music_requested &&
-		   state->volume_home_music > 0 &&
+		   music_audible(state) &&
 		   product_audio_master_enabled(state) &&
 		   state->music_file[0] == '\0') {
 		(void)start_music_new(state);
@@ -2618,12 +2631,38 @@ static void handle_command(struct audio_state *state,
 		return;
 	}
 
+	if (strcmp(command, "MUSIC ENABLED GET") == 0) {
+		snprintf(reply, reply_size, "%d\n", state->home_music_enabled ? 1 : 0);
+		return;
+	}
+
+	/* Off stops the music now and keeps Home's request, so On plays again
+	 * at once while Home is in front. The volume is not touched. */
+	if (sscanf(command, "MUSIC ENABLED SET %31s", arg1) == 1) {
+		bool enabled = strcmp(arg1, "0") != 0 &&
+			       strcasecmp(arg1, "off") != 0 &&
+			       strcasecmp(arg1, "false") != 0;
+
+		if (update_config("AUDIO_HOME_MUSIC_ENABLED", enabled ? "1" : "0") != 0) {
+			snprintf(reply, reply_size, "ERR home music update failed\n");
+			return;
+		}
+		state->home_music_enabled = enabled;
+		if (!enabled)
+			stop_music_player(state);
+		else if (state->music_requested && music_audible(state) && state->music_pid <= 0)
+			(void)start_music_new(state);
+		emit_state_changed(dbus_conn, state);
+		snprintf(reply, reply_size, "OK\n");
+		return;
+	}
+
 	if (strcmp(command, "MUSIC START") == 0) {
 		state->home_session_active = true;
 		state->music_requested = true;
 		ensure_ui_anchor(state);
 
-		if (state->volume_home_music > 0 &&
+		if (music_audible(state) &&
 		    state->music_pid <= 0)
 			(void)start_music_new(state);
 
@@ -2648,7 +2687,7 @@ static void handle_command(struct audio_state *state,
 		state->music_offset_ms = 0;
 
 		if (state->music_requested &&
-		    state->volume_home_music > 0)
+		    music_audible(state))
 			(void)start_music_new(state);
 
 		emit_state_changed(dbus_conn, state);

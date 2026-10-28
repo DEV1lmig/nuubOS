@@ -39,11 +39,22 @@ info = t + '/info'
 os.makedirs(info)
 for c, db, name in (('snes9x', 'Nintendo - Super Nintendo Entertainment System', 'Snes9x'),
                     ('mesen-s', 'Nintendo - Super Nintendo Entertainment System|Nintendo - Game Boy', 'Mesen-S'),
-                    ('gpsp', 'Nintendo - Game Boy Advance', 'gpSP')):
+                    ('gpsp', 'Nintendo - Game Boy Advance', 'gpSP'),
+                    ('needsgl', 'Nintendo - Super Nintendo Entertainment System', 'Needs GL'),
+                    ('listed', 'Nintendo - Super Nintendo Entertainment System', 'Listed')):
     open('%s/%s_libretro.info' % (info, c), 'w').write('corename = "%s"\ndatabase = "%s"\n' % (name, db))
+# Downloaded cores are real shared objects (emud reads their libraries,
+# core-check.h, GitHub #22): needsgl needs a library the system lacks,
+# listed is in unsupported-cores.conf.
 os.makedirs(ud + '/retroarch/cores')
-for c in ('mesen-s', 'gpsp'):
-    open(ud + '/retroarch/cores/%s_libretro.so' % c, 'w').write('')
+open(t + '/core.c', 'w').write('int retro_api_version(void) { return 1; }\n')
+open(t + '/libnuubosmissing.c', 'w').write('int nuubos_missing(void) { return 0; }\n')
+subprocess.check_call(['gcc', '-shared', '-fPIC', t + '/libnuubosmissing.c', '-o', t + '/libnuubosmissing.so'])
+for c in ('mesen-s', 'gpsp', 'listed'):
+    subprocess.check_call(['gcc', '-shared', '-fPIC', t + '/core.c', '-o', ud + '/retroarch/cores/%s_libretro.so' % c])
+subprocess.check_call(['gcc', '-shared', '-fPIC', t + '/core.c', '-L' + t, '-Wl,--no-as-needed', '-lnuubosmissing',
+                       '-o', ud + '/retroarch/cores/needsgl_libretro.so'])
+open(emu_share + '/unsupported-cores.conf', 'w').write('# comment\nlisted  # does not run\n')
 # Cheats: the user's own file, the collection's of the same title.
 coll = ud + '/cheats/libretro/Nintendo - Super Nintendo Entertainment System'
 os.makedirs(ud + '/cheats/snes')
@@ -76,6 +87,7 @@ done
 echo "$core" > "%s/launched-core"
 echo "${NUUBOS_RA_RENDER_HEIGHT:-}" > "%s/render-height"
 echo "${NUUBOS_RA_BEZEL:-}" > "%s/bezel"
+echo "${NUUBOS_RA_PIXEL_CROP:-}" > "%s/pixel-crop"
 cp "$app" "%s/last-session.cfg"
 grep -q -- '--host' "%s/args" && { echo "NETPLAY hosting"; echo "NETPLAY joined bob"; }
 shots=$(sed -n 's/^screenshot_directory = "\(.*\)"/\1/p' "$app")
@@ -94,7 +106,7 @@ done
 # config_save_on_exit: the appended keys end up in the user file.
 awk -F' = ' 'NR==FNR{v[$1]=$0; next} ($1 in v){print v[$1]; delete v[$1]; next} {print} END{for(k in v) print v[k]}' "$app" "$cfg" > "$cfg.new" && mv "$cfg.new" "$cfg"
 exit 0
-''' % (t, t, t, t, t, t, t))
+''' % (t, t, t, t, t, t, t, t))
 os.chmod(fake, 0o755)
 
 common = ['-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-Wno-format-truncation',
@@ -160,6 +172,8 @@ try:
     check('match without extension', cmd('libraryd.sock', 'MATCH\tMario.zip') == 'OK %s\tsnes\n' % game)
     check('match none', cmd('libraryd.sock', 'MATCH\tZelda.sfc').startswith('ERR'))
     check('reject unknown core', cmd('emud.sock', 'GAME_SET\t%s\tsnes\tcore\tmissing' % game).startswith('ERR'))
+    check('reject core that cannot run', cmd('emud.sock', 'GAME_SET\t%s\tsnes\tcore\tneedsgl' % game).startswith('ERR')
+          and cmd('emud.sock', 'GAME_SET\t%s\tsnes\tcore\tlisted' % game).startswith('ERR'))
     check('reject bad aspect', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taspect\t5:4' % game).startswith('ERR'))
     check('set core', cmd('emud.sock', 'GAME_SET\t%s\tsnes\tcore\tbsnes' % game).startswith('OK'))
     check('set aspect', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taspect\t4:3' % game).startswith('OK'))
@@ -274,7 +288,9 @@ try:
     # User emulation settings.
     st0 = cmd('emud.sock', 'SETTINGS')
     check('settings defaults', 'slots=10\n' in st0 and 'slot_rotation=1\n' in st0 and 'crt=1\n' in st0
-          and 'hotkey_save_state=r1\n' in st0 and 'hotkey_quit=settings\n' in st0)
+          and 'hotkey_save_state=r1\n' in st0 and 'hotkey_quit=settings\n' in st0
+          and 'position=center\n' in st0)
+    check('reject position', cmd('emud.sock', 'SET\tposition\tleft').startswith('ERR'))
     check('reject slots', cmd('emud.sock', 'SET\tslots\t0').startswith('ERR'))
     check('reject hotkey', cmd('emud.sock', 'SET\thotkey_quit\tquick_menu').startswith('ERR'))
     check('reject overlay item', cmd('emud.sock', 'SET\toverlay_items\tfps,disk').startswith('ERR'))
@@ -306,8 +322,9 @@ try:
     check('launch new', launch('new'))
     check('panel renders native', wait(lambda: open(t + '/render-height').read() == '\n'))
     sess = session()
-    check('integer scaling', 'aspect_ratio_index = "22"' in sess and 'video_scale_integer = "true"' in sess
-          and 'video_viewport_bias_y = "0.000000"' in sess and 'video_shader_enable = "true"' in sess)
+    check('integer scaling, centred', 'aspect_ratio_index = "22"' in sess and 'video_scale_integer = "true"' in sess
+          and 'video_viewport_bias_y = "0.500000"' in sess and 'video_shader_enable = "true"' in sess
+          and open(t + '/pixel-crop').read() == '\n')
     # Slot rotation (default): emud saves the next slot at quit, not RetroArch.
     check('no auto save with rotation, no auto load', 'savestate_auto_save = "false"' in sess and 'savestate_auto_load = "false"' in sess)
     check('RetroArch notifications off', 'notification_show_save_state = "false"' in sess
@@ -359,6 +376,24 @@ try:
           and 'slot=1\n' in cmd('emud.sock', 'STATUS'))
     cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
     check('reject missing state', cmd('emud.sock', 'LAUNCH\t%s\tslot:-2' % game).startswith('ERR'))
+
+    # Picture Position (GitHub #13) and per-game Square Pixels (#15).
+    check('set position top', cmd('emud.sock', 'SET\tposition\ttop').startswith('OK'))
+    launch('new')
+    check('picture at the top', 'video_viewport_bias_y = "0.000000"' in session()
+          and 'video_viewport_bias_portrait_y = "0.000000"' in session())
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    check('set position bottom', cmd('emud.sock', 'SET\tposition\tbottom').startswith('OK')
+          and 'position=bottom\n' in cmd('emud.sock', 'SETTINGS'))
+    check('set square pixels', cmd('emud.sock', 'GAME_SET\t%s\tsnes\taspect\tsquare' % game).startswith('OK'))
+    launch('new')
+    sess = session()
+    check('square pixels', 'aspect_ratio_index = "21"' in sess and 'video_scale_integer = "true"' in sess
+          and 'video_viewport_bias_y = "1.000000"' in sess and open(t + '/pixel-crop').read() == '8\n'
+          and open(t + '/bezel').read() == '\n')
+    cmd('emud.sock', 'QUIT'); wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+    cmd('emud.sock', 'GAME_SET\t%s\tsnes\taspect\t' % game)
+    cmd('emud.sock', 'SET\tposition\tcenter')
 
     # CRT look and bezels.
     check('set crt', cmd('emud.sock', 'SET\tcrt\t1').startswith('OK'))

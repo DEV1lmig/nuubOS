@@ -191,17 +191,22 @@ function reason(code) {
   return known[code] || '';
 }
 
-/* PUT a file with progress; resolves to the reply. */
-function upload(dir, file, opts = {}, onProgress = () => {}) {
+/* PUT a file with progress; resolves to the reply. onSent: every byte has
+ * left the browser and the console is writing the file to the card (the
+ * reply comes once it is safely there). opts.xhr receives the request
+ * (abort() cancels). */
+function upload(dir, file, opts = {}, onProgress = () => {}, onSent = () => {}) {
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
+    if (opts.xhr) opts.xhr.current = x;
     const q = { dir, name: opts.name || file.name };
     if (opts.after) q.after = opts.after;
     if (opts.replace) q.replace = '1';
     if (opts.mkdirs) q.mkdirs = '1';
     x.open('PUT', '/api/upload?' + new URLSearchParams(q));
     x.setRequestHeader('X-NuubOS', '1');
-    x.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    x.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total, e.loaded);
+    x.upload.onload = () => onSent();
     x.onload = () => {
       let body = {};
       try { body = JSON.parse(x.responseText); } catch (e) { /* empty */ }
@@ -212,32 +217,78 @@ function upload(dir, file, opts = {}, onProgress = () => {}) {
       }
     };
     x.onerror = () => reject(new ApiError('network', 0));
+    x.onabort = () => reject(new ApiError('cancelled', 0));
     x.send(file);
   });
 }
 
-/* Several files, one notification card with the progress. */
+/* Uploads under way: closing or reloading the page would stop them. */
+let uploadsRunning = 0;
+window.addEventListener('beforeunload', (e) => {
+  if (uploadsRunning) { e.preventDefault(); e.returnValue = ''; }
+});
+
+/* "12 s" / "3 min" in the page's language. */
+function etaText(seconds) {
+  const s = Math.max(1, Math.round(seconds));
+  const [v, unit] = s < 60 ? [s, 'second'] : s < 5400 ? [Math.round(s / 60), 'minute'] : [Math.round(s / 3600), 'hour'];
+  try { return new Intl.NumberFormat(LANG, { style: 'unit', unit, unitDisplay: 'short' }).format(v); } catch (e) { return v + ' ' + unit[0]; }
+}
+
+/* Several files, one progress card (user request 2026-10-28: uploads ran
+ * in the background without a clear sign they were still going): overall
+ * bytes, file N of M, speed and time left, "saving to the card" while the
+ * console writes the last bytes, Cancel; it cannot be dismissed while it
+ * works and the page warns before it is closed. The result stays until
+ * clicked. */
 async function uploadFiles(files, dirFor, opts = {}) {
   const items = [...files];
   if (!items.length) return 0;
-  const card = toast(T('uploading', items[0].name), '', false, 0);
+  const total = items.reduce((n, f) => n + f.size, 0) || 1;
+  const card = toast(items.length > 1 ? T('up_many', items.length) : T('uploading', items[0].name), '', false, 0, false);
   const bar = h('progress', { max: 100, value: 0 });
-  card.body.append(bar);
-  let done = 0;
-  for (const f of items) {
-    card.title.textContent = T('uploading', f.name);
-    card.detail.textContent = items.length > 1 ? T('n_of_m', done + 1, items.length) : sizeText(f.size);
-    try {
-      await upload(dirFor(f), f, opts, (p) => { bar.value = p * 100; });
-      done++;
-    } catch (e) {
-      card.close();
-      toast(T('upload_failed', f.name), reason(e.code), true);
-      return done;
+  const amount = h('div', { class: 'td' });
+  const rate = h('div', { class: 'td' });
+  const xhr = { current: null };
+  let cancelled = false;
+  const stop = h('button', { class: 'btn small', type: 'button', text: C(619, 'Cancel'), on: { click: (e) => {
+    e.stopPropagation();
+    cancelled = true;
+    if (xhr.current) xhr.current.abort();
+  } } });
+  card.body.append(bar, amount, rate, h('div', { class: 'tact' }, stop));
+  const started = performance.now();
+  let doneBytes = 0, done = 0;
+  const show = (sent) => {
+    bar.value = sent / total * 100;
+    amount.textContent = T('up_amount', sizeText(sent), sizeText(total));
+    const secs = (performance.now() - started) / 1000;
+    const speed = secs > 1 ? sent / secs : 0;
+    rate.textContent = speed > 0 && sent < total ? T('up_rate', sizeText(speed), etaText((total - sent) / speed)) : '';
+  };
+  uploadsRunning++;
+  try {
+    for (const f of items) {
+      card.detail.textContent = items.length > 1 ? f.name + ' · ' + T('n_of_m', done + 1, items.length) : sizeText(f.size);
+      show(doneBytes);
+      try {
+        await upload(dirFor(f), f, { ...opts, xhr }, (p, loaded) => show(doneBytes + loaded),
+          () => { rate.textContent = T('up_saving', f.name); });
+        doneBytes += f.size;
+        done++;
+      } catch (e) {
+        card.close();
+        if (cancelled || e.code === 'cancelled') toast(T('up_stopped'), T('n_files', done), false, 0);
+        else toast(T('upload_failed', f.name), reason(e.code), true, 0);
+        return done;
+      }
     }
+  } finally {
+    uploadsRunning--;
   }
   card.close();
-  toast(T('upload_done'), items.length > 1 ? T('n_files', done) : items[0].name);
+  const what = items.length > 1 ? T('n_files', done) : items[0].name;
+  toast(T('upload_done'), opts.after === 'scan' ? what + ' · ' + T('up_added') : what, false, 0);
   return done;
 }
 
@@ -319,7 +370,7 @@ async function loadLanguage() {
 /* ----------------------------------------------------- notifications */
 
 /* A notification card like the console's; ms 0 stays until closed. */
-function toast(title, detail = '', bad = false, ms = 4000) {
+function toast(title, detail = '', bad = false, ms = 4000, closable = true) {
   const titleEl = h('div', { class: 'tt', text: title });
   const detailEl = h('div', { class: 'td', text: detail });
   const body = h('div', { class: 'tb' }, titleEl, detail ? detailEl : null);
@@ -327,7 +378,7 @@ function toast(title, detail = '', bad = false, ms = 4000) {
   $('#toasts').append(card);
   const close = () => card.remove();
   if (ms) setTimeout(close, ms);
-  card.addEventListener('click', close);
+  if (closable) card.addEventListener('click', close);
   if (!detail) body.append(detailEl);
   return { close, title: titleEl, detail: detailEl, body };
 }

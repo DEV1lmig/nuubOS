@@ -5,7 +5,7 @@
 # counted by GET_FPS) and the mean fps. Puts A back at the end.
 N=$1; T=$2; X=$3; A=$4; B=$5; L=/usr/lib/libretro/flycast_nuubos_libretro.so
 G=${X%%:*}; M=${X#*:}
-U=$(ls -d /userdata/users/*/ | head -1); S=$U/appdata/nuubos-emulation/settings.conf
+U=/userdata/users/$(cat /run/nuubos/user/active)/; S=$U/appdata/nuubos-emulation/settings.conf
 cp $S /tmp/ab-settings.conf
 nuubos-emuctl set overlay 1 >/dev/null; nuubos-emuctl set overlay_items "" >/dev/null
 i=0

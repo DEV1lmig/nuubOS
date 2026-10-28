@@ -1,0 +1,58 @@
+From: nuubOS Project <nuubos@localhost>
+Date: Wed, 28 Oct 2026 12:00:00 +0100
+Subject: [PATCH 7/7] libgamestream: OpenSSL 4 certificate name and signature
+
+OpenSSL 4.0 returns X509_get_subject_name() as const X509_NAME *: the
+client certificate's subject can no longer be edited in place. Build a
+new X509_NAME and set it as subject and issuer.
+
+ASN1_STRING is opaque in OpenSSL 4.0: the pairing challenge reads the
+certificate signature through ASN1_STRING_length() and
+ASN1_STRING_get0_data() (both exist since OpenSSL 1.1, same bytes).
+---
+--- a/libgamestream/client.c
++++ b/libgamestream/client.c
+@@ -550,18 +550,21 @@
+ 
+   const ASN1_BIT_STRING *asnSignature;
+   X509_get0_signature(&asnSignature, NULL, cert);
++  /* ASN1_STRING is opaque since OpenSSL 4: read it through the accessors. */
++  const int sigLength = ASN1_STRING_length(asnSignature);
++  const unsigned char *sigData = ASN1_STRING_get0_data(asnSignature);
+ 
+-  challenge_response = malloc(16 + asnSignature->length + sizeof(client_secret_data));
++  challenge_response = malloc(16 + sigLength + sizeof(client_secret_data));
+   char challenge_response_hash[32];
+   char challenge_response_hash_enc[sizeof(challenge_response_hash)];
+   char challenge_response_hex[SIZEOF_AS_HEX_STR(challenge_response_hash_enc)];
+   memcpy(challenge_response, challenge_response_data + hash_length, 16);
+-  memcpy(challenge_response + 16, asnSignature->data, asnSignature->length);
+-  memcpy(challenge_response + 16 + asnSignature->length, client_secret_data, sizeof(client_secret_data));
++  memcpy(challenge_response + 16, sigData, sigLength);
++  memcpy(challenge_response + 16 + sigLength, client_secret_data, sizeof(client_secret_data));
+   if (server->serverMajorVersion >= 7)
+-    SHA256(challenge_response, 16 + asnSignature->length + sizeof(client_secret_data), challenge_response_hash);
++    SHA256(challenge_response, 16 + sigLength + sizeof(client_secret_data), challenge_response_hash);
+   else
+-    SHA1(challenge_response, 16 + asnSignature->length + sizeof(client_secret_data), challenge_response_hash);
++    SHA1(challenge_response, 16 + sigLength + sizeof(client_secret_data), challenge_response_hash);
+ 
+   encrypt(challenge_response_hash, sizeof(challenge_response_hash), aes_key, challenge_response_hash_enc);
+   bytes_to_hex(challenge_response_hash_enc, challenge_response_hex, sizeof(challenge_response_hash_enc));
+--- a/libgamestream/mkcert.c
++++ b/libgamestream/mkcert.c
+@@ -101,9 +101,13 @@
+ 
+     X509_set_pubkey(cert, pk);
+ 
+-    X509_NAME* name = X509_get_subject_name(cert);
++    /* OpenSSL 4 returns the certificate's own subject as const: build the
++     * name apart and copy it in as subject and issuer. */
++    X509_NAME* name = X509_NAME_new();
+     X509_NAME_add_entry_by_txt(name,"CN", MBSTRING_ASC, (unsigned char*)"NVIDIA GameStream Client", -1, -1, 0);
++    X509_set_subject_name(cert, name);
+     X509_set_issuer_name(cert, name);
++    X509_NAME_free(name);
+ 
+     if (!X509_sign(cert, pk, EVP_sha256())) {
+         goto err;

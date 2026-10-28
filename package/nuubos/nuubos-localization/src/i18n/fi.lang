@@ -1406,3 +1406,13 @@
 1405=Ohittaa heikoimmat värinät, joita jotkin pelit lähettävät jatkuvasti
 1406=Kaikki pelin pyytämät värinät
 1407=Värinä
+1408=Kuvan sijainti
+1409=Mihin peli sijoittuu, kun se ei täytä näyttöä
+1410=Ylhäällä
+1411=Keskellä
+1412=Alhaalla
+1413=Neliön muotoiset pikselit
+1414=Pelit
+1415=Tämän konsolin kortin ROM-kansio, yhteinen kaikille profiileille
+1416=Pelit SD2-kortilla
+1417=SD2-kortin ROM-kansio; se odottaa, kun korttia ei ole

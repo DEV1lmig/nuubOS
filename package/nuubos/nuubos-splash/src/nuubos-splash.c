@@ -4,7 +4,9 @@
  *
  *   nuubos-splash [--prepare] [boot|reboot|poweroff]
  *   nuubos-splash --kms boot        S00: KMS splash on every connected output
- *   nuubos-splash --hold            lifecycle-finalize: keep the last frame
+ *   nuubos-splash --hold            lifecycle-finalize fallback: keep the device
+ *   nuubos-splash --handoff MODE    lifecycle-finalize: final raster on KMS
+ *                                   once labwc is gone (kms_handoff)
  *   nuubos-splash --ppm FILE WIDTH HEIGHT MODE [PALETTE]   (host tests)
  *
  * boot: --kms draws the raster through KMS at each connected output's own
@@ -14,9 +16,8 @@
  * emulation restores its own 640x480 framebuffer on the device's last
  * close, which on HDMI showed a small splash (user report 2026-10-10).
  * Without KMS the fbdev path below is used.
- * --hold: started before labwc is killed at restart/power off; holding the
- * device keeps labwc's last frame (nuubUI's full-size final splash) on
- * screen instead of the fbdev restore. It ends with the system.
+ * --hold: only keeps the device open (no fbdev restore at labwc's close);
+ * labwc's frame itself does not survive labwc. Fallback of --handoff.
  * reboot/poweroff: --prepare draws the final raster into fbdev without
  * unblanking, for the very last moment and HDMI-less fallbacks.
  * The raster itself: nuubos-splash-render.h.
@@ -57,23 +58,28 @@ static void render_oriented(uint32_t *dst, int stride, int w, int h, int t,
 	free(buf);
 }
 
-static int kms_splash(const char *mode)
+struct kms_out {
+	uint32_t crtc;
+	uint32_t connector;
+	uint32_t fb;
+	drmModeModeInfo mode;
+};
+
+#define KMS_MAX_OUTS 4
+
+/* The raster in a dumb buffer per connected output, at that output's own
+ * mode; nothing is shown yet (no master needed). */
+static int kms_prepare(int fd, const char *mode, struct kms_out *outs)
 {
 	struct nuubos_splash_palette palette;
-	drmModeRes *res;
+	drmModeRes *res = drmModeGetResources(fd);
 	uint32_t used = 0;
-	int shown = 0;
-	int fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	int n = 0;
 
-	if (fd < 0)
-		return 1;
-	res = drmModeGetResources(fd);
-	if (!res) {
-		close(fd);
-		return 1;
-	}
+	if (!res)
+		return 0;
 	nuubos_splash_load_palette(&palette, NULL);
-	for (int i = 0; i < res->count_connectors; i++) {
+	for (int i = 0; i < res->count_connectors && n < KMS_MAX_OUTS; i++) {
 		drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
 		struct drm_mode_create_dumb cd = { 0 };
 		struct drm_mode_map_dumb md = { 0 };
@@ -100,17 +106,41 @@ static int kms_splash(const char *mode)
 					render_oriented((uint32_t *)map, (int)(cd.pitch / 4), m->hdisplay, m->vdisplay,
 							panel_transform(fd, c->connector_id), mode, &palette);
 					munmap(map, cd.size);
-					if (drmModeSetCrtc(fd, res->crtcs[crtc_index - 1], fb, 0, 0, &c->connector_id, 1, m) == 0) {
-						used |= 1u << (crtc_index - 1);
-						shown++;
-					}
+					outs[n].crtc = res->crtcs[crtc_index - 1];
+					outs[n].connector = c->connector_id;
+					outs[n].fb = fb;
+					outs[n].mode = *m;
+					used |= 1u << (crtc_index - 1);
+					n++;
 				}
 			}
 		}
 		drmModeFreeConnector(c);
 	}
 	drmModeFreeResources(res);
-	if (!shown) {
+	return n;
+}
+
+static int kms_show(int fd, struct kms_out *outs, int n)
+{
+	int shown = 0;
+
+	for (int i = 0; i < n; i++)
+		if (drmModeSetCrtc(fd, outs[i].crtc, outs[i].fb, 0, 0, &outs[i].connector, 1, &outs[i].mode) == 0)
+			shown++;
+	return shown;
+}
+
+static int kms_splash(const char *mode)
+{
+	struct kms_out outs[KMS_MAX_OUTS];
+	int n;
+	int fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+
+	if (fd < 0)
+		return 1;
+	n = kms_prepare(fd, mode, outs);
+	if (!n || !kms_show(fd, outs, n)) {
 		close(fd);
 		return 1;
 	}
@@ -121,6 +151,48 @@ static int kms_splash(const char *mode)
 		hold_device("/run/nuubos/ui-ready");
 		_exit(0);
 	}
+	return 0;
+}
+
+/* Restart/power off: labwc's buffers die with it and the kernel turns the
+ * plane off (a black lit screen through all of rcK, the fbdev splash only
+ * showing at the device's last close; measured 2026-10-28). The final
+ * raster is prepared here while labwc still owns the screen; a child takes
+ * master the moment labwc is gone, shows it on every output and keeps the
+ * device until the end. */
+static int kms_handoff(const char *mode)
+{
+	struct kms_out outs[KMS_MAX_OUTS];
+	int n;
+	int fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+
+	if (fd < 0)
+		return 1;
+	drmDropMaster(fd);
+	n = kms_prepare(fd, mode, outs);
+	if (!n) {
+		close(fd);
+		return 1;
+	}
+	if (fork() == 0) {
+		setsid();
+		/* labwc is killed right after we return: poll for master. */
+		int master = 0;
+
+		for (int i = 0; i < 5000 && !(master = drmSetMaster(fd) == 0); i++)
+			usleep(1000);
+		if (!master)
+			_exit(1); /* labwc stayed: the restart was abandoned */
+		if (kms_show(fd, outs, n)) {
+			int f = open("/run/nuubos/handoff-shown", O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+
+			if (f >= 0)
+				close(f);
+		}
+		hold_device(NULL);
+		_exit(0);
+	}
+	close(fd);
 	return 0;
 }
 
@@ -175,6 +247,8 @@ int main(int argc, char **argv)
 		}
 		return 0;
 	}
+	if (argc >= 3 && !strcmp(argv[1], "--handoff"))
+		return kms_handoff(!strcmp(argv[2], "restart") ? "reboot" : argv[2]);
 	if (argc >= 2 && !strcmp(argv[1], "--kms"))
 		return kms_splash(argc >= 3 ? argv[2] : "boot");
 

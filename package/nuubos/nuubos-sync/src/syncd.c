@@ -9,8 +9,9 @@
  * Per user, in /userdata/users/<id>/appdata/syncthing: Syncthing's own home
  * (identity, devices, folders, database) and nuubos.conf:
  *   ENABLED=0|1  APIKEY=<uuid>  INTERNET=0|1  RELAYS=0|1  FOLDERS=saves,...
- *   ID_saves=<folder id>  ID_states=  ID_screenshots=  (optional: an existing
- *   share of the user's other devices used instead of nuubOS's own folder)
+ *   ID_saves=<folder id>  ID_states=  ID_screenshots=  ID_roms=  ID_roms-sd2=
+ *   (optional: an existing share of the user's other devices used instead
+ *   of nuubOS's own folder)
  * Switching users never exposes another user's configuration.
  *
  * Syncthing is reached only through a root-only unix socket
@@ -29,12 +30,15 @@
  *     name, folder_ids(): the same person on two consoles meets in the same
  *     folder, two people never do, even through a PC or NAS they share),
  *     the console's library store "nuubos-covers" / "nuubos-metadata";
- *     saves, states and screenshots may use an existing folder id instead
- *     (ID_<kind>, user report 2026-10-21: other devices already share
- *     them); any other folder on one of these paths is removed;
- *     ignorePerms (exFAT); saves keep replaced versions in
- *     .stversions for 30 days (trash can). ROMs are never synchronized and
- *     conflicts stay as Syncthing ".sync-conflict" copies.
+ *     the console's ROM folders "nuubos-roms" (/userdata/roms) and
+ *     "nuubos-roms-sd2" (the SD2 card's roms folder, paused while the card
+ *     is not ready: never moved to SD1; user request 2026-10-28, off by
+ *     default); saves, states, screenshots and both ROM folders may use an
+ *     existing folder id instead (ID_<kind>, user report 2026-10-21: other
+ *     devices already share them); any other folder on one of these paths
+ *     is removed; ignorePerms (exFAT); saves keep replaced versions in
+ *     .stversions for 30 days (trash can). Conflicts stay as Syncthing
+ *     ".sync-conflict" copies. ROMs that arrive start a Library scan.
  *
  * Socket /run/nuubos/syncd.sock (0660), one command per line, tab separated:
  *   STATUS | SUBSCRIBE           snapshot (below); SUBSCRIBE then gets a
@@ -42,12 +46,14 @@
  *   ENABLE | DISABLE
  *   FOLDER <kind> 0|1            kind = saves | states | screenshots | library
  *                                (covers + metadata) | history (play activity)
+ *                                | roms | roms-sd2
  *   INTERNET 0|1
  *   RELAYS 0|1                   relays (used only with INTERNET 1)
  *   ADD <device> [<name>]        accept a request or add a nearby device
  *   IGNORE <device>              refuse a request (it does not come back)
  *   REMOVE <device>
- *   FOLDER_ID <kind> <id>|-      saves | states | screenshots: use that
+ *   FOLDER_ID <kind> <id>|-      saves | states | screenshots | roms |
+ *                                roms-sd2: use that
  *                                existing folder id (- = nuubOS's own)
  *   USE <folder> <kind>          take a folder another device offers as
  *                                that kind (FOLDER_ID + FOLDER on)
@@ -58,20 +64,21 @@
  * Snapshot (key=value, ends with end=1):
  *   enabled= running= ready= failed= internet= relays= device_id= device_name=
  *   folder=<kind>\t<on>\t<state>      kind: saves states screenshots library
- *                                     history; state: Syncthing's (idle, scanning,
+ *                                     history roms roms-sd2; state: Syncthing's (idle, scanning,
  *                                     syncing, sync-preparing, error...)
  *   device=<id>\t<name>\t<connected>\t<completion 0..100, -1 unknown>\t<address>
  *   pending=<id>\t<name>\t<address>   asked to connect
  *   nearby=<id>\t<address>            Syncthing seen on the local network
- *   folderid=<kind>\t<id>\t<custom 0|1>  saves, states, screenshots
+ *   folderid=<kind>\t<id>\t<custom 0|1>  saves, states, screenshots, roms,
+ *                                     roms-sd2
  *   offer=<folder>\t<label>\t<device>\t<device name>  a configured device
  *                                     shares a folder this console does not use
  *
  * Live Notification "sync.request" (name=) when a device asks to connect;
  * dismissed once it is accepted, ignored or gone.
  *
- * Events: inotify on /run/nuubos/user (user switch) and on the Syncthing
- * socket directory (ready), SIGHUP, SIGCHLD, client sockets, and a thread
+ * Events: inotify on /run/nuubos/user (user switch), on the Syncthing
+ * socket directory (ready) and on /run/nuubos/storage (SD2 in or out), SIGHUP, SIGCHLD, client sockets, and a thread
  * that long-polls Syncthing's event stream while it runs. A Syncthing that
  * dies on its own is not restarted (no restart storm): failed=1 until the
  * next user switch or ENABLE. Idle: poll() without timeout.
@@ -129,10 +136,14 @@
 #define GUI_NAME "gui.sock"
 #define GUI_SOCKET GUI_DIR "/" GUI_NAME
 #define USER_DIR RUN_ROOT "/user"
+#ifndef STORAGE_DIR
+#define STORAGE_DIR RUN_ROOT "/storage"
+#endif
+#define SD2_STATUS STORAGE_DIR "/sd2.status"
 #define ACTIVE_FILE USER_DIR "/active"
 
-#define KINDS 5
-#define FOLDERS 6
+#define KINDS 7
+#define FOLDERS 8
 #define MAX_CLIENTS 12
 #define MAX_DEVICES 32
 #define ID_MAX 72
@@ -142,8 +153,9 @@
  * covers and metadata are the console's library store, shared by its
  * profiles (one file per game: safe to synchronize). Play activity is
  * library/consoles, where libraryd keeps one file per console and adds
- * the others up (never one file written by two consoles). */
-static const char *const KIND[KINDS] = { "saves", "states", "screenshots", "library", "history" };
+ * the others up (never one file written by two consoles). ROMs are the
+ * console's too: the internal card's folder and the SD2 card's. */
+static const char *const KIND[KINDS] = { "saves", "states", "screenshots", "library", "history", "roms", "roms-sd2" };
 /* id: the console's own folders' id, or the kind part of a per-user id
  * ("nuubos-<key>-<id>"); per-user folders were "nuubos-<id>" before
  * 2026-10-16 and are removed from Syncthing under that name. */
@@ -158,13 +170,20 @@ static const struct {
 	{ 3, "nuubos-covers", "nuubOS Covers", "library/covers", false, false },
 	{ 3, "nuubos-metadata", "nuubOS Metadata", "library/metadata", false, false },
 	{ 4, "history", "nuubOS Play Activity", "library/consoles", true, false },
+	{ 5, "nuubos-roms", "nuubOS ROMs", "roms", false, false },
+	{ 6, "nuubos-roms-sd2", "nuubOS ROMs (SD2)", NULL, false, false },
 };
 
+#define KIND_LIBRARY 3
+#define KIND_ROMS 5
+#define KIND_ROMS_SD2 6
+
 /* Kinds that may use an existing folder id (ID_<kind>): plain files any
- * RetroArch writes. Covers/metadata and play activity are nuubOS's own. */
+ * RetroArch writes, and ROMs. Covers/metadata and play activity are
+ * nuubOS's own. */
 static bool custom_kind(int kind)
 {
-	return kind >= 0 && kind <= 2;
+	return (kind >= 0 && kind <= 2) || kind == KIND_ROMS || kind == KIND_ROMS_SD2;
 }
 
 #define FOLDER_ID_MAX 200
@@ -324,7 +343,7 @@ static void conf_load(const char *user, struct conf *c)
 
 static int conf_save(const char *user, const struct conf *c)
 {
-	char dir[PATH_MAX], path[PATH_MAX], tmp[PATH_MAX + 8], folders[64] = "";
+	char dir[PATH_MAX], path[PATH_MAX], tmp[PATH_MAX + 8], folders[96] = "";
 	FILE *fp;
 
 	snprintf(dir, sizeof(dir), USERDATA_USERS "/%s/appdata", user);
@@ -593,16 +612,16 @@ static void compute_ids(const char *user, const struct conf *c, char ids[FOLDERS
 	if (!n)
 		snprintf(key, sizeof(key), "%.36s", user);
 	for (int i = 0; i < FOLDERS; i++) {
-		if (FOLDER[i].per_user) {
-			if (c->custom[FOLDER[i].kind][0])
-				snprintf(ids[i], FOLDER_ID_MAX, "%s", c->custom[FOLDER[i].kind]);
-			else
-				snprintf(ids[i], FOLDER_ID_MAX, "nuubos-%s-%s", key, FOLDER[i].id);
-			snprintf(labels[i], FOLDER_ID_MAX, "%s · %s", FOLDER[i].label, name[0] ? name : key);
-		} else {
+		if (c->custom[FOLDER[i].kind][0])
+			snprintf(ids[i], FOLDER_ID_MAX, "%s", c->custom[FOLDER[i].kind]);
+		else if (FOLDER[i].per_user)
+			snprintf(ids[i], FOLDER_ID_MAX, "nuubos-%s-%s", key, FOLDER[i].id);
+		else
 			snprintf(ids[i], FOLDER_ID_MAX, "%s", FOLDER[i].id);
+		if (FOLDER[i].per_user)
+			snprintf(labels[i], FOLDER_ID_MAX, "%s · %s", FOLDER[i].label, name[0] ? name : key);
+		else
 			snprintf(labels[i], FOLDER_ID_MAX, "%s", FOLDER[i].label);
-		}
 	}
 }
 
@@ -622,10 +641,24 @@ static void folder_url(char *out, size_t size, const char *prefix, const char *i
 	curl_free(e);
 }
 
+/* The SD2 card's roms folder (storagectl's mount point; its usual place
+ * while no card is in) and whether the card can be written now. */
+static bool sd2_roms(char *dir, size_t size)
+{
+	char state[32] = "", mount[PATH_MAX] = "";
+
+	file_value(SD2_STATUS, "SD2_STATE", state, sizeof(state));
+	file_value(SD2_STATUS, "SD2_PATH", mount, sizeof(mount));
+	snprintf(dir, size, "%s/roms", mount[0] ? mount : "/media/sd2");
+	return !strcmp(state, "ready");
+}
+
 /* Where FOLDER[i] lives for the running user. */
 static void folder_dir(int i, char *dir, size_t size)
 {
-	if (FOLDER[i].per_user)
+	if (FOLDER[i].kind == KIND_ROMS_SD2)
+		sd2_roms(dir, size);
+	else if (FOLDER[i].per_user)
 		snprintf(dir, size, USERDATA_USERS "/%s/%s", child_user, FOLDER[i].path);
 	else
 		snprintf(dir, size, USERDATA_ROOT "/%s", FOLDER[i].path);
@@ -688,9 +721,16 @@ static bool apply_folders(void)
 			continue;
 		}
 		cJSON *f = cJSON_CreateObject(), *list = cJSON_AddArrayToObject(f, "devices");
+		bool usable = true;
 
 		folder_dir(i, dir, sizeof(dir));
-		mkdir_parents(dir);
+		if (FOLDER[i].kind == KIND_ROMS_SD2)
+			usable = sd2_roms(dir, sizeof(dir));
+		/* No SD2 card: the folder waits (paused) at the card's path; it
+		 * is never created on SD1's mount point. */
+		if (usable)
+			mkdir_parents(dir);
+		cJSON_AddBoolToObject(f, "paused", !usable);
 		cJSON_AddStringToObject(f, "id", folder_id[i]);
 		cJSON_AddStringToObject(f, "label", folder_label[i]);
 		cJSON_AddStringToObject(f, "path", dir);
@@ -790,8 +830,9 @@ static void record_event(const cJSON *e)
 	int k = folder_of(jstr(data, "folder"));
 
 	if (!strcmp(type, "StateChanged") && k >= 0) {
-		/* Covers or metadata pulled from another device. */
-		if (FOLDER[k].kind == 3 && !strcmp(jstr(data, "from"), "syncing") && !strcmp(jstr(data, "to"), "idle"))
+		/* Covers, metadata or ROMs pulled from another device. */
+		if ((FOLDER[k].kind == KIND_LIBRARY || FOLDER[k].kind == KIND_ROMS || FOLDER[k].kind == KIND_ROMS_SD2) &&
+		    !strcmp(jstr(data, "from"), "syncing") && !strcmp(jstr(data, "to"), "idle"))
 			library_changed = true;
 		snprintf(folder_state[k], sizeof(folder_state[k]), "%s", jstr(data, "to"));
 	} else if (!strcmp(type, "FolderCompletion") && k >= 0) {
@@ -1670,7 +1711,7 @@ int main(void)
 	struct sigaction sa;
 	pthread_t thread;
 	sigset_t block, old;
-	int in, l, gui_wd = -1, ui_wd = -1;
+	int in, l, gui_wd = -1, ui_wd = -1, storage_wd = -1;
 	FILE *fp;
 
 	if (pipe2(wake_pipe, O_CLOEXEC | O_NONBLOCK) != 0)
@@ -1705,6 +1746,9 @@ int main(void)
 	if (in < 0 || inotify_add_watch(in, USER_DIR, IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE | IN_CREATE) < 0 ||
 	    (gui_wd = inotify_add_watch(in, GUI_DIR, IN_CREATE)) < 0)
 		fprintf(stderr, "syncd: inotify unavailable\n");
+	/* SD2 in or out: the SD2 ROM folder pauses or resumes. */
+	if (in >= 0)
+		storage_wd = inotify_add_watch(in, STORAGE_DIR, IN_CLOSE_WRITE | IN_MOVED_TO);
 	/* Until nuubUI is ready (UI_READY): then the watch goes. */
 	if (in >= 0 && access(UI_READY, F_OK) != 0)
 		ui_wd = inotify_add_watch(in, RUN_ROOT, IN_CREATE | IN_MOVED_TO);
@@ -1721,7 +1765,7 @@ int main(void)
 	while (!stop_requested) {
 		struct pollfd p[3 + MAX_CLIENTS];
 		int map[3 + MAX_CLIENTS], n = 0, status;
-		bool changed = false;
+		bool changed = false, sd2_changed = false;
 		char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
 		ssize_t len;
 		pid_t pid;
@@ -1756,7 +1800,10 @@ int main(void)
 					for (char *q = buf; q < buf + len;) {
 						const struct inotify_event *ev = (const struct inotify_event *)q;
 
-						if (ev->wd == ui_wd) {
+						if (ev->wd == storage_wd) {
+							if (ev->len && !strcmp(ev->name, "sd2.status"))
+								sd2_changed = true;
+						} else if (ev->wd == ui_wd) {
 							if (ev->len && !strcmp(ev->name, "ui-ready")) {
 								inotify_rm_watch(in, ui_wd);
 								ui_wd = -1;
@@ -1786,6 +1833,11 @@ int main(void)
 		if (reload_requested) {
 			reload_requested = 0;
 			failed = false;
+			changed = true;
+		}
+		if (sd2_changed && ready && cur.folder[KIND_ROMS_SD2]) {
+			if (!apply_folders())
+				fprintf(stderr, "syncd: SD2 ROM folder not updated\n");
 			changed = true;
 		}
 		if (changed) {

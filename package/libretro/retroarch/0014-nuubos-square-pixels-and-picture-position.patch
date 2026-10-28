@@ -1,0 +1,110 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: Square Pixels crop and bezel for any Picture Position
+
+NUUBOS_RA_PIXEL_CROP=<n> (nuubos-emud, per-game Square Pixels aspect):
+smart integer scaling takes the vertical factor even when the picture
+is then at most n game pixels a side wider than the screen, cropped
+evenly by patch 0003. With n = 8 a 256-wide SNES picture is 768x672 on
+the 720x720 RG CubeXX (8 pixels cut a side) instead of a 720x630 fit.
+
+The bezel of patch 0010 puts its strip (silhouette, logo, accent line)
+in the larger of the bands above and below the picture, so a picture
+centred or at the bottom (Picture Position, video_viewport_bias_y) keeps
+its decoration; side panels only fill the rows beside the picture.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+---
+--- a/gfx/video_driver.c
++++ b/gfx/video_driver.c
+@@ -2536,6 +2536,25 @@
+    return keep;
+ }
+ 
++/* nuubOS: NUUBOS_RA_PIXEL_CROP=<n> (set by nuubos-emud for the per-game
++ * Square Pixels aspect) lets smart integer scaling take the vertical
++ * factor even when the picture is then wider than the screen by at most
++ * n of the game's pixels a side, cropped evenly (patch 0003): a 256-wide
++ * SNES picture is 768x672 at 3x on the RG CubeXX's 720x720, 24 screen
++ * columns (8 game pixels) cut a side, instead of 2x or a 720x630 fit.
++ * Returns n, 0 = off. */
++static unsigned nuubos_pixel_crop(void)
++{
++   static int crop = -1;
++   if (crop < 0)
++   {
++      const char *s = getenv("NUUBOS_RA_PIXEL_CROP");
++      int n         = s ? atoi(s) : 0;
++      crop          = (n > 0 && n < 64) ? n : 0;
++   }
++   return (unsigned)crop;
++}
++
+ /**
+  * video_viewport_get_scaled_integer:
+  * @vp            : Viewport handle
+@@ -2698,6 +2717,10 @@
+             if (height / overscale_h >= overscale_min_height)
+                max_scale_h = overscale_h;
+             max_scale = MIN(max_scale_w, max_scale_h);
++            if (     nuubos_pixel_crop() > 0 && max_scale_w < max_scale_h
++                  && content_width * max_scale_h
++                     <= width + 2 * nuubos_pixel_crop() * max_scale_h)
++               max_scale = max_scale_h;
+          }
+          else if (scaling == VIDEO_SCALE_INTEGER_SCALING_OVERSCALE)
+             max_scale = MIN((width / content_width) + !!(width % content_width),
+--- a/gfx/drivers/gl2.c
++++ b/gfx/drivers/gl2.c
+@@ -2802,10 +2802,15 @@
+    float cx     = ox + sw * 0.5f, cy = oy + sh * 0.5f;
+    float left   = ox > 0.0f ? ox : 0.0f;
+    float right  = W - ox - sw > 0.0f ? W - ox - sw : 0.0f;
++   float top    = oy > 0.0f ? oy : 0.0f;
+    float bottom = H - oy - sh > 0.0f ? H - oy - sh : 0.0f;
+    float panel  = left < right ? left : right;
+    bool sides   = panel >= 56.0f * u;
+-   bool strip   = bottom >= 26.0f * u;
++   /* nuubOS Picture Position: the strip is the larger band (the bottom
++    * one when they are equal), the accent line on its side */
++   bool above   = top > bottom;
++   float band   = above ? top : bottom;
++   bool strip   = band >= 26.0f * u;
+    float lip    = (nuubos_bezel.handheld ? 5.0f : 3.0f) * u;
+    float base[3], ink[3], one[3] = { 1.0f, 1.0f, 1.0f }, dark[3] = { 0.02f, 0.02f, 0.02f };
+    int x, y;
+@@ -2843,15 +2848,16 @@
+             col[0] *= k; col[1] *= k; col[2] *= k;
+          }
+          nb_mix(col, dark, 1.0f - nb_smooth(0.0f, lip, d));
+-         /* the Mood's accent line under the picture */
+-         under = py - (oy + sh);
+-         if (bottom >= 6.0f * u && under >= 0.0f)
++         /* the Mood's accent line under the picture (over it when the
++          * strip is above) */
++         under = above ? oy - py : py - (oy + sh);
++         if (band >= 6.0f * u && under >= 0.0f)
+          {
+             float line = 1.0f - nb_smooth(1.5f * u - aa, 1.5f * u + aa, fabsf(under - 3.0f * u));
+             float span = 1.0f - nb_smooth(sw * 0.5f - 1.0f, sw * 0.5f + 1.0f, fabsf(px - cx));
+             nb_mix(col, nuubos_bezel.accent, line * span);
+          }
+-         if (sides && py < oy + sh)
++         if (sides && py >= oy && py < oy + sh)
+          {
+             if (px < left)
+             {
+@@ -2880,11 +2886,11 @@
+                }
+             }
+          }
+-         else if (strip && py > oy + sh)
++         else if (strip && (above ? py < oy : py > oy + sh))
+          {
+-            /* bottom strip: silhouette at the left end (unless a side
++            /* the strip: silhouette at the left end (unless a side
+              * panel shows it), the logo at the right end */
+-            float y0 = oy + sh + 6.0f * u, h = bottom - 12.0f * u;
++            float y0 = (above ? 0.0f : oy + sh) + 6.0f * u, h = band - 12.0f * u;
+             float k  = fmaxf(floorf(fminf(h * 0.5f, 28.0f * u) / lh), 2.0f);
+             float bw = lw * k, bh = lh * k, rgb[3], a;
+             float lx = floorf(W - right - 10.0f * u - bw), ly = floorf(y0 + (h - bh) * 0.5f);

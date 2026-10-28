@@ -65,6 +65,7 @@
 #define STATE_ROOT "/state"
 #endif
 #define SOCKET_PATH RUN_ROOT "/libraryd.sock"
+#define DISC_SETS_DIR RUN_ROOT "/library-discs"
 #define PIDFILE RUN_ROOT "/libraryd.pid"
 #define REGISTRY_PATH SHARE_ROOT "/systems.conf"
 #define ROMS_ROOT USERDATA_ROOT "/roms"
@@ -885,8 +886,8 @@ static bool join_relative(const char *desc_rel, const char *name, char *out, siz
 	return pathf(out, size, "%s", name) && out[0] != '\0';
 }
 
-/* Entries of a .m3u (discs) or .cue (FILE tracks), relative to roms/. */
-static size_t descriptor_entries(const char *rel, char entries[][PATH_MAX], size_t max)
+/* Lines of a .m3u (discs) or .cue (FILE tracks), relative to roms/. */
+static size_t descriptor_lines(const char *rel, char entries[][PATH_MAX], size_t max)
 {
 	char path[PATH_MAX];
 	char line[1024];
@@ -938,6 +939,114 @@ static size_t descriptor_entries(const char *rel, char entries[][PATH_MAX], size
 	return n;
 }
 
+/*
+ * Per-disc playlists: some collections give every disc its own one-line
+ * .m3u ("Game (Disc 1).m3u", "Game (Disc 2).m3u", ...), which would make
+ * each disc a separate game without disc change. "(Disc 1)" (or "(CD1)")
+ * whose "(Disc 2)" sibling exists in the same folder leads a disc set: the
+ * one game, named and identified by the first disc's playlist (saves,
+ * states, covers keep matching); the others are its files.
+ */
+
+static bool regular_file(const char *path);
+
+/* Offset and length of the disc number in a playlist name, false if none
+ * ("(Disc N", "(CD N", "(CDN", any case; the last one). */
+static bool disc_number_at(const char *name, size_t *at, size_t *len)
+{
+	bool found = false;
+
+	for (const char *p = strchr(name, '('); p; p = strchr(p + 1, '(')) {
+		const char *q = p + 1;
+
+		if (!strncasecmp(q, "disc", 4))
+			q += 4;
+		else if (!strncasecmp(q, "cd", 2))
+			q += 2;
+		else
+			continue;
+		while (*q == ' ')
+			q++;
+		if (!isdigit((unsigned char)*q))
+			continue;
+		*at = (size_t)(q - name);
+		*len = strspn(q, "0123456789");
+		found = true;
+	}
+	return found;
+}
+
+/* The other playlists of the disc set rel leads, in disc order; 0 when
+ * rel leads none. */
+static size_t disc_set_members(const char *rel, char members[][PATH_MAX], size_t max)
+{
+	static __thread char one[2][PATH_MAX];
+	const char *name = rel_name(rel);
+	size_t at, len, n = 0;
+
+	if (!has_suffix(name, "m3u", 3) || !disc_number_at(name, &at, &len) ||
+	    strtol(name + at, NULL, 10) != 1 || descriptor_lines(rel, one, 2) != 1)
+		return 0;
+	for (int disc = 2; n < max; disc++) {
+		char path[PATH_MAX];
+
+		if (!pathf(members[n], PATH_MAX, "%.*s%d%s", (int)(name - rel + at), rel, disc,
+			   name + at + len) ||
+		    !rom_path(path, sizeof(path), members[n]) || !regular_file(path) ||
+		    descriptor_lines(members[n], one, 2) != 1)
+			break;
+		n++;
+	}
+	return n;
+}
+
+/* Entries of a .m3u (discs) or .cue (FILE tracks), relative to roms/; a
+ * disc set's lead also owns its other playlists and their discs. */
+static size_t descriptor_entries(const char *rel, char entries[][PATH_MAX], size_t max)
+{
+	static __thread char members[16][PATH_MAX];
+	size_t n = descriptor_lines(rel, entries, max);
+	size_t m = n ? disc_set_members(rel, members, 16) : 0;
+
+	for (size_t i = 0; i < m && n < max; i++)
+		n += descriptor_lines(members[i], entries + n, max - n);
+	for (size_t i = 0; i < m && n < max; i++)
+		memcpy(entries[n++], members[i], PATH_MAX);
+	return n;
+}
+
+/* The playlist of all the discs of the set rel leads, written for the
+ * launch as DISC_SETS_DIR/<rel's name> (same name: the emulator names saves
+ * and states after it); false when rel leads no set or on error. */
+static bool disc_set_playlist(const char *rel, char *out, size_t size)
+{
+	static char members[16][PATH_MAX];
+	static char disc[1][PATH_MAX];
+	char tmp[PATH_MAX];
+	char path[PATH_MAX];
+	size_t m = disc_set_members(rel, members, 16);
+	bool ok;
+	FILE *fp;
+
+	if (!m || !pathf(out, size, DISC_SETS_DIR "/%s", rel_name(rel)) ||
+	    !pathf(tmp, sizeof(tmp), "%s.tmp", out))
+		return false;
+	mkdir_p(DISC_SETS_DIR);
+	fp = fopen(tmp, "w");
+	if (!fp)
+		return false;
+	ok = descriptor_lines(rel, disc, 1) == 1 && rom_path(path, sizeof(path), disc[0]) &&
+	     fprintf(fp, "%s\n", path) > 0;
+	for (size_t i = 0; ok && i < m; i++)
+		ok = descriptor_lines(members[i], disc, 1) == 1 &&
+		     rom_path(path, sizeof(path), disc[0]) && fprintf(fp, "%s\n", path) > 0;
+	if (fclose(fp) != 0 || !ok || rename(tmp, out) != 0) {
+		unlink(tmp);
+		return false;
+	}
+	return true;
+}
+
 static int sniff_depth;
 
 /* Identify a loose disc or cartridge image whose extension several
@@ -961,7 +1070,7 @@ static int sniff_system(const char *rel)
 		int sys = -1;
 
 		/* .m3u -> first disc, .cue -> first track. */
-		if (sniff_depth < 2 && descriptor_entries(rel, first, 1) == 1) {
+		if (sniff_depth < 2 && descriptor_lines(rel, first, 1) == 1) {
 			sniff_depth++;
 			sys = sniff_system(first[0]);
 			sniff_depth--;
@@ -1561,9 +1670,11 @@ static void load_catalog(void)
  * Reconcile the known catalog with one scan: UNCHANGED / ADDED / CHANGED /
  * AVAILABLE_AGAIN / UNAVAILABLE. Entries are never deleted (EPIC-012).
  */
+static bool referenced_elsewhere(const char *rel, const struct game *self);
+
 static bool reconcile(struct scan_result *scan)
 {
-	size_t added = 0, back = 0, gone = 0, changed = 0, duplicates = 0;
+	size_t added = 0, back = 0, gone = 0, changed = 0, duplicates = 0, absorbed = 0;
 	long long now = wall_now();
 
 	for (size_t i = 0; i < game_count; i++)
@@ -1634,16 +1745,34 @@ static bool reconcile(struct scan_result *scan)
 			changed++;
 		}
 	}
-	for (size_t i = 0; i < game_count; i++) {
-		if (!games[i].seen && games[i].available) {
-			games[i].available = false;
+	for (size_t i = 0; i < game_count;) {
+		struct game *g = &games[i];
+		char path[PATH_MAX];
+
+		/* Its file is still there but now belongs to another game (a
+		 * disc of a set, a file a playlist lists): the entry goes
+		 * rather than staying unavailable. */
+		if (!g->seen && rom_path(path, sizeof(path), g->rel) && regular_file(path) &&
+		    referenced_elsewhere(g->rel, g)) {
+			free(g->rel);
+			free(g->title);
+			free(g->cover);
+			free(g->genre);
+			memmove(g, g + 1, (game_count - i - 1) * sizeof(*games));
+			game_count--;
+			absorbed++;
+			continue;
+		}
+		if (!g->seen && g->available) {
+			g->available = false;
 			gone++;
 		}
+		i++;
 	}
-	log_msg("scan: %zu found, %zu added, %zu changed, %zu available again, %zu unavailable, %zu duplicates",
-		scan->count, added, changed, back, gone, duplicates);
+	log_msg("scan: %zu found, %zu added, %zu changed, %zu available again, %zu unavailable, %zu absorbed, %zu duplicates",
+		scan->count, added, changed, back, gone, absorbed, duplicates);
 	scan_new += added + back;
-	return added || changed || back || gone;
+	return added || changed || back || gone || absorbed;
 }
 
 static void free_scan(struct scan_result *scan)
@@ -3037,7 +3166,8 @@ static void handle_command(struct client *c, char *line)
 		free(b.data);
 	} else if (!strcmp(line, "RESOLVE") && arg) {
 		/* Launch lookup for the Emulation Service: system and
-		 * absolute content path of an available game. */
+		 * absolute content path of an available game (and, for a
+		 * disc set, the ROM's path). */
 		long idx = valid_game_id(arg) ? find_game(arg) : -1;
 		struct strbuf b = { 0 };
 
@@ -3053,7 +3183,14 @@ static void handle_command(struct client *c, char *line)
 			reply(c, "ERR unavailable\n");
 			return;
 		}
-		sb_append(&b, "OK %s\t%s\n", systems[games[idx].sys].id, path);
+		char playlist[PATH_MAX];
+
+		/* A disc set launches from one playlist of all its discs; the
+		 * third field is the ROM's own path (its card). */
+		if (disc_set_playlist(games[idx].rel, playlist, sizeof(playlist)))
+			sb_append(&b, "OK %s\t%s\t%s\n", systems[games[idx].sys].id, playlist, path);
+		else
+			sb_append(&b, "OK %s\t%s\n", systems[games[idx].sys].id, path);
 		send_text(c, b.data, b.len);
 		free(b.data);
 	} else if (!strcmp(line, "MATCH") && arg) {

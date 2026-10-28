@@ -41,14 +41,18 @@ use std::time::Duration;
 const SOCKET: &str = "/run/nuubos/syncd.sock";
 pub const VIEW: i32 = 66;
 /* Kinds that may use an existing folder (syncd custom_kind). */
-const CUSTOM_KINDS: [(&str, usize, &str); 3] = [("saves", 673, "Saves"), ("states", 674, "Save States"), ("screenshots", 675, "Screenshots")];
+const CUSTOM_KINDS: [(&str, usize, &str); 5] = [("saves", 673, "Saves"), ("states", 674, "Save States"), ("screenshots", 675, "Screenshots"),
+    ("roms", 1414, "Games"), ("roms-sd2", 1416, "Games on SD2")];
 /* What can be synchronized: (kind, title, fallback, detail, fallback). */
-const KINDS: [(&str, usize, &str, usize, &str); 5] = [
+const KINDS: [(&str, usize, &str, usize, &str); 7] = [
     ("saves", 673, "Saves", 0, ""),
     ("states", 674, "Save States", 0, ""),
     ("screenshots", 675, "Screenshots", 0, ""),
     ("library", 1089, "Covers & Metadata", 1090, "Shared by every profile on this console"),
     ("history", 1091, "Play Activity", 1092, "Time played and Recently Played, added up across your devices"),
+    /* The console's ROM folders (user request 2026-10-28), off by default. */
+    ("roms", 1414, "Games", 1415, "The ROM folder on this console's card, shared by every profile"),
+    ("roms-sd2", 1416, "Games on SD2", 1417, "The SD2 card's ROM folder; it waits while the card is out"),
 ];
 
 fn kind_detail(ui: &HomeWindow, idx: usize, fallback: &str) -> String {

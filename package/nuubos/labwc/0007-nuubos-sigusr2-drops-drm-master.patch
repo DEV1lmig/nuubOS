@@ -1,0 +1,61 @@
+From: nuubOS Project <noreply@nuubos.invalid>
+Subject: [PATCH] nuubOS: SIGUSR2 drops DRM master, screen untouched
+
+At restart/power off nuubos-lifecycle-finalize killed labwc while its
+buffer was on the primary plane: the kernel removes a client's
+framebuffers when it exits and turns off the planes showing them, so a
+black frame came before nuubos-splash --handoff could show the final
+splash. On SIGUSR2 labwc now drops DRM master and leaves the scanout as
+it is; the splash takes master and replaces the buffer on the same plane
+in one commit, and labwc is killed after that.
+
+Upstream-Status: Inappropriate [nuubOS specific]
+
+--- a/src/server.c
++++ b/src/server.c
+@@ -2,8 +2,10 @@
+ #define _POSIX_C_SOURCE 200809L
+ #include "config.h"
+ #include <assert.h>
++#include <drm.h>
+ #include <signal.h>
+ #include <string.h>
++#include <sys/ioctl.h>
+ #include <sys/wait.h>
+ #include <wlr/backend/headless.h>
+ #include <wlr/backend/multi.h>
+@@ -144,6 +146,25 @@
+ 	return 0;
+ }
+ 
++/*
++ * nuubOS: SIGUSR2 = give up DRM master and leave the screen as it is
++ * (lifecycle-finalize, restart/power off). nuubos-splash --handoff takes
++ * master next and swaps its final splash onto the same plane in one
++ * commit; labwc is killed only after that. Killed while still showing its
++ * buffer, labwc's exit made the kernel turn the plane off first: a black
++ * flash before the splash.
++ */
++static int
++handle_sigusr2(int signal, void *data)
++{
++	int fd = wlr_backend_get_drm_fd(server.backend);
++
++	if (fd >= 0 && ioctl(fd, DRM_IOCTL_DROP_MASTER, 0) != 0) {
++		wlr_log_errno(WLR_ERROR, "nuubOS: could not drop DRM master");
++	}
++	return 0;
++}
++
+ static int
+ handle_sigchld(int signal, void *data)
+ {
+@@ -502,6 +523,8 @@
+ 		server.wl_event_loop, SIGTERM, handle_sigterm, server.wl_display);
+ 	server.sigchld_source = wl_event_loop_add_signal(
+ 		server.wl_event_loop, SIGCHLD, handle_sigchld, NULL);
++	wl_event_loop_add_signal(server.wl_event_loop, SIGUSR2,
++		handle_sigusr2, NULL);
+ 
+ 	/*
+ 	 * Prevent wayland clients that request the X11 clipboard but closing

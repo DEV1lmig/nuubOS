@@ -14,7 +14,7 @@ Pulled forward into rc.2 and implemented 2026-10-22 (user request): docs/dev/sys
 Backlog for after 1.0.0 Stable; not prioritized yet, user decision per item; four of them go into RC4 (open-items.md "RC4 plan").
 - USB device mode: MTP (copy games to the console from a PC over the USB cable, the main ask) and ADB. Today: web panel, SMB, SFTP, USB drives. Fits EPIC-024 (USB & External Accessories); needs the USB OTG port in peripheral mode (configfs gadget, e.g. umtprd) per board, and a choice between charging/host and device mode.
 - Power key: -> RC4 (user 2026-10-26), done 2026-10-27: Settings → Power "Press Power to Sleep" (quick-menu-notify.md "Power key"). On by default (user 2026-10-27): a press sleeps, a hold opens the power menu (Controls wiki page to update).
-- Theme customization beyond the Moods: own colours, and replacing "nuubOS" at the top left with the user's name in the same font. EPIC-008 (Themes) / EPIC-003 (per-user).
+- Theme customization beyond the Moods: own colours. EPIC-008 (Themes) / EPIC-003 (per-user). The user's name in place of "nuubOS" at the top left: done 2026-10-28 (user request, every top bar; ui.md "Logo").
 - Web browser: EPIC-030 Web Mode (implemented, parked).
 - Terminal: -> RC4 (user 2026-10-26), done 2026-10-27: app installed by default (user), foot + root's login shell, on-screen keyboard (system.md "Terminal application").
 - Hide RetroArch: -> RC4 (user 2026-10-26): a switch to hide the RetroArch entry of the Quick Menu, to prevent accidental changes (per user, maybe tied to child profiles). EPIC-005.
@@ -22,3 +22,4 @@ Backlog for after 1.0.0 Stable; not prioritized yet, user decision per item; fou
 - More shaders and user bezels: a choice of shaders beyond the CRT look, own bezel images per system/game; check what happens on HDMI (other resolution and aspect). EPIC-018.
 - x86 build (old Intel NUCs): out of scope until the H700 is finished (other SoCs decided only after that, user 2026-10).
 - Per-system settings (EPIC-004, RC3 plan item 3, not delivered in RC3): after 1.0.0 (user 2026-10-26).
+- Wishlist of 2026-10-28 (Spanish-speaking user, clamshell): (1) Media player keeps playing with the lid closed (today the lid sleeps the console; screen-off playback already works); (2) PortMaster ports on SD2 (= GitHub #21); (3) use the extra RAM of the RG34XX SP (2 GB) for more multitasking (keep a game or app suspended while another runs); (4) standalone (non-libretro) emulators: EPIC-014 was removed 2026-10-07 (RetroArch is the only backend), listed only as a request; (5) turn Home Music off: DONE 2026-10-28, a Home Music On/Off switch in Display & Audio and the web (audio.md); (6) Wi-Fi and Bluetooth toggles in the Quick Menu.

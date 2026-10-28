@@ -96,7 +96,7 @@ static struct {
 	bool term_sent;
 	long long deadline_ms;
 	int power_client;
-} s = { .pid = -1, .input = -1, .watch = -1, .power_client = -1 };
+} s = { .pid = -1, .input = -1, .watch = -1, .deadline_ms = -1, .power_client = -1 };
 
 static void log_msg(const char *fmt, ...)
 {

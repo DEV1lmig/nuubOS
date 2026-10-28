@@ -1406,3 +1406,13 @@
 1405=Skips the faintest vibration some games keep sending
 1406=Every vibration the game asks for
 1407=Vibration
+1408=Picture Position
+1409=Where the game sits when it does not fill the screen
+1410=Top
+1411=Center
+1412=Bottom
+1413=Square Pixels
+1414=Games
+1415=The ROM folder on this console's card, shared by every profile
+1416=Games on SD2
+1417=The SD2 card's ROM folder; it waits while the card is out

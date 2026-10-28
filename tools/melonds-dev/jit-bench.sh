@@ -2,7 +2,7 @@
 # jit-bench.sh GAME SLOT ROUNDS VARIANT...  (bench builds: /tmp/melonds-V.so)
 G=$1; SL=$2; N=$3; shift 3
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
-U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
+U=/userdata/users/$(cat /run/nuubos/user/active)/; C=$U/appdata/retroarch/retroarch-core-options.cfg
 . /tmp/opts.sh
 opt_set $C melonds_frameskip disabled
 opt_set $C melonds_accuracy fast

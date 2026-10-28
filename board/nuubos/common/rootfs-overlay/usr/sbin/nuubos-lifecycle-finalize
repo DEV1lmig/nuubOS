@@ -62,13 +62,37 @@ fi
 sync
 
 #
-# Preserve the already-qualified v0.7.8 ownership handoff:
-# bypass normal wlroots DRM teardown and leave the final KMS scanout untouched.
-#
-# Keep the DRM device open past labwc: on its last close the kernel's
-# fbdev emulation would restore the 640x480 framebuffer (small on HDMI)
-# instead of leaving nuubUI's full-size final splash on screen.
-/usr/bin/nuubos-splash --hold >>"$LOG" 2>&1 && log "drm-hold=started"
+# labwc's buffers die with it and the kernel turns the plane off: the
+# screen stayed black (backlight on) through all of rcK until the fbdev
+# splash at the very end (measured 2026-10-28). --handoff prepares the same
+# final raster on KMS now, at each output's own mode, and shows it the
+# moment labwc releases the device; it keeps the device open to the end.
+# SIGUSR2 makes labwc drop master with its frame still on screen (labwc
+# patch 0007), so the splash replaces it in one commit before labwc is
+# killed: killing it first left one black frame (a flash).
+# --hold (device open only, no fbdev restore) is the fallback.
+handoff_wait()
+{
+    I=0
+    while [ ! -e /run/nuubos/handoff-shown ] && [ "$I" -lt 40 ]; do
+        sleep 0.025
+        I=$((I + 1))
+    done
+    [ -e /run/nuubos/handoff-shown ]
+}
+
+rm -f /run/nuubos/handoff-shown
+HANDOFF=0
+if /usr/bin/nuubos-splash --handoff "$MODE" >>"$LOG" 2>&1; then
+    HANDOFF=1
+    log "drm-handoff=prepared"
+    if pidof labwc >/dev/null 2>&1; then
+        killall -USR2 labwc >>"$LOG" 2>&1 || true
+        handoff_wait && log "drm-handoff=shown-before-kill"
+    fi
+else
+    /usr/bin/nuubos-splash --hold >>"$LOG" 2>&1 && log "drm-hold=started"
+fi
 
 if pidof labwc >/dev/null 2>&1; then
     log "labwc-before=$(pidof labwc 2>/dev/null)"
@@ -88,8 +112,11 @@ fi
 
 log "labwc-release=done"
 
+if [ "$HANDOFF" = 1 ]; then
+    handoff_wait && log "drm-handoff=shown" || log "drm-handoff=not-shown"
+fi
+
 sync
-log "scanout=left-untouched"
 log "handoff=complete"
 
 exit 0

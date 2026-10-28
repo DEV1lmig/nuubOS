@@ -1,0 +1,45 @@
+From: nuubOS <dev@nuubos>
+Subject: [PATCH] _ssl: no fixed-version methods with OpenSSL 4
+
+OpenSSL 4.0 removed SSLv3_method(), TLSv1_method(), TLSv1_1_method() and
+TLSv1_2_method() without defining the OPENSSL_NO_*_METHOD macros, so
+_ssl.c declared and referenced them itself and the module failed to load
+("undefined symbol: TLSv1_method"). Define the macros on OpenSSL 4: the
+fixed PROTOCOL_TLSv1* constants then report an unsupported protocol, as
+on builds without those methods. PROTOCOL_TLS_CLIENT/SERVER are unchanged.
+---
+--- a/Modules/_ssl.c
++++ b/Modules/_ssl.c
+@@ -135,6 +135,22 @@
+ #error Unsupported OpenSSL version
+ #endif
+ 
++/* OpenSSL 4.0 removed the fixed-version methods altogether */
++#if OPENSSL_VERSION_MAJOR >= 4
++#  ifndef OPENSSL_NO_SSL3_METHOD
++#    define OPENSSL_NO_SSL3_METHOD
++#  endif
++#  ifndef OPENSSL_NO_TLS1_METHOD
++#    define OPENSSL_NO_TLS1_METHOD
++#  endif
++#  ifndef OPENSSL_NO_TLS1_1_METHOD
++#    define OPENSSL_NO_TLS1_1_METHOD
++#  endif
++#  ifndef OPENSSL_NO_TLS1_2_METHOD
++#    define OPENSSL_NO_TLS1_2_METHOD
++#  endif
++#endif
++
+ /* OpenSSL API 1.1.0+ does not include version methods */
+ #ifndef OPENSSL_NO_SSL3_METHOD
+ extern const SSL_METHOD *SSLv3_method(void);
+@@ -3127,7 +3143,8 @@
+     }
+ 
+     switch(proto_version) {
+-#if defined(SSL3_VERSION) && !defined(OPENSSL_NO_SSL3)
++#if defined(SSL3_VERSION) && !defined(OPENSSL_NO_SSL3) && \
++        !defined(OPENSSL_NO_SSL3_METHOD)
+     case PY_SSL_VERSION_SSL3:
+         PY_SSL_DEPRECATED("ssl.PROTOCOL_SSLv3 is deprecated", 2, NULL);
+         method = SSLv3_method();

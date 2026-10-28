@@ -196,6 +196,8 @@
 #define ACHIEVEMENTS_FILE "secrets/retroachievements.conf"
 #define PROFILE_FILE "profile.conf"
 
+#include "core-check.h"
+
 #define MAX_CLIENTS 16
 #define MAX_LINE 1024
 #define MAX_PLAYERS 8
@@ -243,6 +245,9 @@ enum pending_kind {
  *   slots         save state slots per game
  *   slot_rotation each save goes to the next slot, wrapping to 0
  *   bezels, crt   picture presentation (RetroArch patch 0010, crt.glsl)
+ *   position      top, center or bottom: where a picture lower than the
+ *                 screen sits (GitHub #13, user decision 2026-10-28:
+ *                 center by default)
  *   overlay       performance overlay over games, overlay_items its fields
  *   retroarch_menu the Quick Menu's RetroArch row in a game (hidden by
  *                 default, user decision 2026-10-27)
@@ -304,6 +309,7 @@ struct emu_settings {
 	bool slot_rotation;
 	bool bezels;
 	bool crt;
+	char position[8];
 	bool overlay;
 	char overlay_items[96];
 	bool retroarch_menu;
@@ -405,6 +411,8 @@ struct session {
 	char core_options[PATH_MAX];
 	/* NUUBOS_RA_BEZEL for RetroArch (patch 0010), "" = no bezel. */
 	char bezel_env[1024];
+	/* Per-game Square Pixels: NUUBOS_RA_PIXEL_CROP (patch 0014). */
+	bool pixel_crop;
 	int nds_layout;
 	bool stylus;
 	char stylus_control[8];
@@ -1424,7 +1432,8 @@ static int core_file_filter(const struct dirent *e)
 /* Cores the user downloaded for the system beyond cores.conf (Get More
  * Emulators, or RetroArch's own Online Updater): a core in
  * /userdata/retroarch/cores whose core-info names one of the system's
- * libretro databases, appended to out ("a,b") in name order. */
+ * libretro databases and that nuubOS can run (core-check.h), appended to
+ * out ("a,b") in name order. */
 static void downloaded_cores(const char *system, char *out, size_t size)
 {
 	struct dirent **names = NULL;
@@ -1438,12 +1447,15 @@ static void downloaded_cores(const char *system, char *out, size_t size)
 	for (int i = 0; i < n; i++) {
 		char core[NAME_MAX + 1];
 		char bundled[PATH_MAX];
+		char path[PATH_MAX];
 
 		copy_text(core, sizeof(core), names[i]->d_name);
 		core[strlen(core) - 12] = '\0';
 		snprintf(bundled, sizeof(bundled), BUNDLED_CORES "/%s_libretro.so", core);
+		snprintf(path, sizeof(path), DOWNLOADED_CORES "/%s", names[i]->d_name);
 		if (!list_has(out, core) && !file_exists(bundled) &&
-		    core_for_databases(core, dbs) && strlen(out) + strlen(core) + 2 < size) {
+		    core_for_databases(core, dbs) && core_runs(core, path) &&
+		    strlen(out) + strlen(core) + 2 < size) {
 			if (out[0])
 				strcat(out, ",");
 			strcat(out, core);
@@ -1503,7 +1515,7 @@ static bool resolve_core(const char *system, char *core, size_t core_size,
 			     name = strtok_r(NULL, ",", &save)) {
 				snprintf(path, path_size, "%s/%s_libretro.so",
 					 roots[r], name);
-				if (file_exists(path)) {
+				if (file_exists(path) && (r == 0 || core_runs(name, path))) {
 					copy_text(core, core_size, name);
 					found = true;
 				}
@@ -1648,7 +1660,7 @@ static int save_overrides(const char *user, const char *game, const struct game_
 static bool valid_aspect(const char *v)
 {
 	return !strcmp(v, "core") || !strcmp(v, "4:3") || !strcmp(v, "16:9") ||
-	       !strcmp(v, "full") || !strcmp(v, "integer");
+	       !strcmp(v, "full") || !strcmp(v, "integer") || !strcmp(v, "square");
 }
 
 static bool valid_filter(const char *v)
@@ -1685,7 +1697,7 @@ static void available_cores(const char *system, char *out, size_t size)
 
 			for (size_t r = 0; r < 2 && !ok; r++) {
 				snprintf(path, sizeof(path), "%s/%s_libretro.so", roots[r], name);
-				ok = file_exists(path);
+				ok = file_exists(path) && (r == 0 || core_runs(name, path));
 			}
 			if (ok && strlen(out) + strlen(name) + 2 < size) {
 				if (out[0])
@@ -1757,6 +1769,7 @@ static void default_settings(struct emu_settings *e)
 	e->slot_rotation = true;
 	e->bezels = true; /* user decision 2026-10-15 */
 	e->crt = true;
+	copy_text(e->position, sizeof(e->position), "center");
 	copy_text(e->overlay_items, sizeof(e->overlay_items), DEFAULT_OVERLAY_ITEMS);
 	for (int i = 0; i < HK_COUNT; i++)
 		copy_text(e->hotkey[i], sizeof(e->hotkey[i]), hotkey_defaults[i]);
@@ -1793,6 +1806,12 @@ static bool settings_set(struct emu_settings *e, const char *key, const char *v)
 		if (*end || n < 1 || n > MAX_SLOTS)
 			return false;
 		e->slots = (int)n;
+		return true;
+	}
+	if (!strcmp(key, "position")) {
+		if (strcmp(v, "top") && strcmp(v, "center") && strcmp(v, "bottom"))
+			return false;
+		copy_text(e->position, sizeof(e->position), v);
 		return true;
 	}
 	if (!strcmp(key, "overlay_items")) {
@@ -1847,9 +1866,9 @@ static size_t format_settings(const struct emu_settings *e, char *out, size_t si
 	size_t len;
 	int n = snprintf(out, size,
 			 "boot_screens=%d\nslots=%d\nslot_rotation=%d\nbezels=%d\ncrt=%d\n"
-			 "overlay=%d\noverlay_items=%s\nretroarch_menu=%d\n",
+			 "position=%s\noverlay=%d\noverlay_items=%s\nretroarch_menu=%d\n",
 			 e->boot_screens, e->slots, e->slot_rotation, e->bezels, e->crt,
-			 e->overlay, e->overlay_items, e->retroarch_menu);
+			 e->position, e->overlay, e->overlay_items, e->retroarch_menu);
 
 	len = n < 0 ? 0 : (size_t)n < size ? (size_t)n : size - 1;
 	for (int i = 0; i < HK_COUNT && len < size; i++) {
@@ -2380,8 +2399,14 @@ static int write_session_shader(const char *shader)
  * that would leave more than 12 % of the screen unused (GBA or PSP on
  * 640x480) is scaled to fit with its aspect instead (stock smart mode),
  * through sharp bilinear so no pixel is uneven. The picture is centred
- * horizontally and at the top of the screen (RetroArch patch 0003); the
- * per-game "integer" aspect is the same picture without bezels. A bezel
+ * horizontally and, when lower than the screen, at the user's Picture
+ * Position (top, center or bottom; RetroArch patch 0003 still crops an
+ * overscaled picture evenly); the per-game "integer" aspect is the same
+ * picture without bezels. "square" is integer scaling with square pixels
+ * (8:7 for a 256-pixel-wide NES/SNES picture, GitHub #15): RetroArch
+ * patch 0014 lets it take the next vertical factor when that crops at
+ * most 8 of the game's pixels a side (SNES 3x on 720x720 = 768x672, 720
+ * wide). A bezel
  * leaves the picture as it is: RetroArch (patch 0010) draws it into the
  * rest of the screen from NUUBOS_RA_BEZEL (session.bezel_env); the CRT
  * look applies to TV systems (display.conf) unless
@@ -2403,12 +2428,18 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 	bool bezel = false;
 	bool integer = true;
 	int index = 22; /* the core's aspect */
+	const char *bias_y = !strcmp(session.settings.position, "top") ? "0.000000"
+			   : !strcmp(session.settings.position, "bottom") ? "1.000000"
+			   : "0.500000";
 
 	for (int i = 0; keys[i]; i++)
 		remember_key(keys[i]);
 	system_screen(session.system, screen, sizeof(screen));
 	crt = session.settings.crt && !strcmp(screen, "crt") && !o->filter[0];
-	if (o->aspect[0] && strcmp(o->aspect, "integer")) {
+	session.pixel_crop = !strcmp(o->aspect, "square");
+	if (session.pixel_crop) {
+		index = 21; /* square pixels */
+	} else if (o->aspect[0] && strcmp(o->aspect, "integer")) {
 		index = !strcmp(o->aspect, "4:3") ? 0
 		      : !strcmp(o->aspect, "16:9") ? 1
 		      : !strcmp(o->aspect, "full") ? 24
@@ -2425,11 +2456,11 @@ static const char *write_presentation(FILE *fp, const struct game_overrides *o)
 		"video_scale_integer_scaling = \"2\"\n"
 		"video_scale_integer_axis = \"0\"\n"
 		"video_viewport_bias_x = \"0.500000\"\n"
-		"video_viewport_bias_y = \"0.000000\"\n"
+		"video_viewport_bias_y = \"%s\"\n"
 		"video_viewport_bias_portrait_x = \"0.500000\"\n"
-		"video_viewport_bias_portrait_y = \"0.000000\"\n"
+		"video_viewport_bias_portrait_y = \"%s\"\n"
 		"video_smooth = \"%s\"\n",
-		index, integer ? "true" : "false",
+		index, integer ? "true" : "false", bias_y, bias_y,
 		!strcmp(o->filter, "smooth") ? "true" : "false");
 
 	shader[0] = '\0';
@@ -3546,6 +3577,8 @@ static void exec_retroarch(char **argv, const char *base, const char *ra_dir,
 	}
 	if (session.bezel_env[0])
 		setenv("NUUBOS_RA_BEZEL", session.bezel_env, 1);
+	if (session.pixel_crop)
+		setenv("NUUBOS_RA_PIXEL_CROP", "8", 1);
 	/* Saturn: YabaSanshiro uploads its texture atlas by regions; Mesa
 	 * patch 0008 makes such textures linear (no staging copy and
 	 * software tiling per upload). Virtua Fighter 2 fight 27.3-27.8
@@ -3582,7 +3615,7 @@ static void exec_retroarch(char **argv, const char *base, const char *ra_dir,
 
 static const char *launch(const char *game, const char *mode, const char *net)
 {
-	char answer[PATH_MAX + 128];
+	char answer[2 * PATH_MAX + 128];
 	char command[64];
 	char core_path[PATH_MAX];
 	char base[160];
@@ -3591,6 +3624,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	char screenshots[PATH_MAX];
 	char path[PATH_MAX];
 	char *tab;
+	char *rom;
 	int in_pipe[2];
 	int out_pipe[2];
 	pid_t pid;
@@ -3651,10 +3685,14 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	if (strncmp(answer, "OK ", 3) != 0 || !(tab = strchr(answer + 3, '\t')))
 		return "library";
 	*tab = '\0';
+	/* A disc set: the playlist of all its discs, then the ROM itself. */
+	rom = strchr(tab + 1, '\t');
+	if (rom)
+		*rom++ = '\0';
 	copy_text(session.game, sizeof(session.game), game);
 	copy_text(session.system, sizeof(session.system), answer + 3);
 	copy_text(session.content, sizeof(session.content), tab + 1);
-	copy_text(session.rom, sizeof(session.rom), tab + 1);
+	copy_text(session.rom, sizeof(session.rom), rom ? rom : tab + 1);
 	if (!file_exists(session.content))
 		return "unavailable";
 	if (!resolve_core(session.system, session.core, sizeof(session.core),

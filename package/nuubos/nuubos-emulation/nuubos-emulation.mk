@@ -35,6 +35,8 @@ define NUUBOS_EMULATION_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0644 $(@D)/cheats-update.job $(TARGET_DIR)/usr/share/nuubos/jobs/cheats-update.job
 	$(INSTALL) -D -m 0644 $(@D)/libretro.conf \
 		$(TARGET_DIR)/usr/share/nuubos/emulation/libretro.conf
+	$(INSTALL) -D -m 0644 $(@D)/unsupported-cores.conf \
+		$(TARGET_DIR)/usr/share/nuubos/emulation/unsupported-cores.conf
 	$(INSTALL) -D -m 0644 $(@D)/app/netplay.app \
 		$(TARGET_DIR)/usr/share/nuubos/applications/netplay.app
 	$(INSTALL) -D -m 0644 $(@D)/app/netplay.png \

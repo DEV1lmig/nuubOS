@@ -215,6 +215,10 @@ select.input { appearance: none; }
 .toast .tt { font-weight: 600; font-size: 14.5px; }
 .toast .td { font-size: 12.5px; color: var(--text-dim); }
 .toast progress { width: 100%; margin-top: 6px; }
+.toast .tb { flex: 1; min-width: 0; }
+.toast .tt, .toast .td { overflow-wrap: anywhere; }
+.toast .tact { display: flex; justify-content: flex-end; margin-top: 8px; }
+.btn.small { height: 34px; padding: 0 16px; border-radius: 17px; font-size: 13.5px; }
 progress { appearance: none; -webkit-appearance: none; height: 6px; border: 0; border-radius: 3px; background: var(--sc-highest); overflow: hidden; }
 progress::-webkit-progress-bar { background: var(--sc-highest); }
 progress::-webkit-progress-value { background: var(--primary); border-radius: 3px; }

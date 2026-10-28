@@ -10,11 +10,13 @@
  *                     the console: "core=<id>\t<name>\t<core-info display
  *                     name>" lines, "end=1"; a
  *                     core is for a system when its libretro core-info
- *                     names one of the system's databases (libretro.conf).
- *                     The buildbot index is cached a day.
+ *                     names one of the system's databases (libretro.conf),
+ *                     minus unsupported-cores.conf. The buildbot index is
+ *                     cached a day.
  *   install CORE      downloads CORE into /userdata/retroarch/cores
  *                     (job core-install); nuubos-emud then offers it for
- *                     the system.
+ *                     the system. A core nuubOS cannot run (listed, or
+ *                     needing a library it lacks) fails "invalid".
  *   cheats status     "cheats=0|1", "updated=<epoch>", "end=1".
  *   cheats update     downloads the collection (~37 MB) into
  *                     /userdata/cheats/libretro/cheats.zip with index.txt,
@@ -66,6 +68,8 @@
 #define CHEATS_URL "https://buildbot.libretro.com/assets/frontend/cheats.zip"
 #endif
 #define LIBRETRO_CONF SHARE_DIR "/libretro.conf"
+
+#include "core-check.h"
 #define DOWNLOADED_CORES USERDATA "/retroarch/cores"
 #define CACHE_DIR USERDATA "/cache/retroarch"
 #define CORE_INDEX CACHE_DIR "/core-index.txt"
@@ -383,7 +387,8 @@ static int cmd_cores(const char *system)
 		if (len <= 16 || strcmp(file + len - 16, "_libretro.so.zip"))
 			continue;
 		file[len - 16] = '\0';
-		if (!valid_core(file) || core_installed(file) || !core_for_databases(file, dbs))
+		if (!valid_core(file) || core_installed(file) || core_unsupported(file) ||
+		    !core_for_databases(file, dbs))
 			continue;
 		core_info_value(file, "display_name", name, sizeof(name));
 		for (char *p = name; *p; p++)
@@ -416,7 +421,7 @@ static int cmd_install(const char *core)
 	char dest[PATH_MAX];
 	const char *error;
 
-	if (!valid_core(core))
+	if (!valid_core(core) || core_unsupported(core))
 		return fail("invalid");
 	if (core_installed(core)) {
 		printf(as_job ? "@result installed\n" : "OK installed\n");
@@ -445,7 +450,10 @@ static int cmd_install(const char *core)
 	unlink(zip);
 	snprintf(so, sizeof(so), "%s/%s_libretro.so", dir, core);
 	snprintf(dest, sizeof(dest), DOWNLOADED_CORES "/%s_libretro.so", core);
-	if (!file_exists(so) || chmod(so, 0755) != 0 || rename(so, dest) != 0) {
+	/* A build that needs libraries nuubOS lacks would only close the game
+	 * at once (GitHub #22). */
+	if (!file_exists(so) || !core_libraries_present(so) || chmod(so, 0755) != 0 ||
+	    rename(so, dest) != 0) {
 		remove_tree(dir);
 		return fail("invalid");
 	}

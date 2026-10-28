@@ -5,7 +5,7 @@
 T=$1; shift
 for w in 1 2 3 4 5; do nuubos-emuctl status | grep -q "^state=idle" && break; sleep 2; done
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
-U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
+U=/userdata/users/$(cat /run/nuubos/user/active)/; C=$U/appdata/retroarch/retroarch-core-options.cfg
 S=$U/appdata/nuubos-emulation/settings.conf
 cp $S /tmp/fs-settings.conf; . /tmp/opts.sh
 OV=$(grep "^overlay=" $S | cut -d= -f2); OI=$(grep "^overlay_items=" $S | cut -d= -f2)

@@ -191,6 +191,7 @@ def subscribe():
 def last(): return snaps[-1] if snaps else ''
 
 set_user(U1)
+os.makedirs(run + '/storage', exist_ok=True)
 d = subprocess.Popen([t + '/syncd'], stderr=open(t + '/syncd.log', 'w'))
 try:
     check('socket up', wait(lambda: os.path.exists(run + '/syncd.sock')))
@@ -244,6 +245,28 @@ try:
           and wait(lambda: 'folder=history\t1' in last() and 'folder=library\t1\t' in last()))
     check('library off removes both folders', ctl('folder', 'library', 'off').startswith('OK')
           and 'nuubos-covers' not in fstate()['folders'] and 'nuubos-metadata' not in fstate()['folders'])
+    # ROM folders (user request 2026-10-28): the console's, off by default.
+    check('roms on: the internal card\'s roms folder', ctl('folder', 'roms', 'on').startswith('OK')
+          and fstate()['folders'].get('nuubos-roms', {}).get('path') == t + '/ud/roms'
+          and fstate()['folders']['nuubos-roms'].get('paused') is False and 'roms' in conf())
+    check('roms-sd2 on without a card: paused at the card path, nothing created',
+          ctl('folder', 'roms-sd2', 'on').startswith('OK')
+          and fstate()['folders'].get('nuubos-roms-sd2', {}).get('paused') is True
+          and fstate()['folders']['nuubos-roms-sd2'].get('path') == '/media/sd2/roms')
+    os.makedirs(t + '/sd2', exist_ok=True)
+    with open(run + '/storage/.sd2.tmp', 'w') as f:
+        f.write('SD2_STATE=ready\nSD2_PATH=%s\n' % (t + '/sd2'))
+    os.rename(run + '/storage/.sd2.tmp', run + '/storage/sd2.status')
+    check('SD2 ready: the folder resumes on the card',
+          wait(lambda: fstate()['folders'].get('nuubos-roms-sd2', {}).get('paused') is False
+               and fstate()['folders']['nuubos-roms-sd2'].get('path') == t + '/sd2/roms')
+          and os.path.isdir(t + '/sd2/roms'))
+    check('roms on an existing share', ctl('folder-id', 'roms', 'my-rom-library').startswith('OK')
+          and 'ID_roms=my-rom-library' in conf()
+          and fstate()['folders'].get('my-rom-library', {}).get('path') == t + '/ud/roms'
+          and 'nuubos-roms' not in fstate()['folders'])
+    check('roms off', ctl('folder', 'roms', 'off').startswith('OK') and ctl('folder', 'roms-sd2', 'off').startswith('OK')
+          and 'my-rom-library' not in fstate()['folders'] and 'nuubos-roms-sd2' not in fstate()['folders'])
     check('internet on: discovery, no relays', ctl('internet', 'on').startswith('OK')
           and fstate()['options']['globalAnnounceEnabled'] is True and fstate()['options']['relaysEnabled'] is False
           and wait(lambda: 'internet=1' in last() and 'relays=0' in last()))

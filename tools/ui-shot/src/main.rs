@@ -614,7 +614,9 @@ fn main() {
             ui.set_settings_view(6);
         })),
         ("display_audio", Box::new(|ui| { ui.set_settings_selected_index(4); ui.set_settings_view(18); ui.set_display_audio_index(2); ui.set_display_audio_scroll_offset(0); })),
-        ("display_audio_sounds", Box::new(|ui| { ui.set_display_color_temperature_available(true); ui.set_display_audio_index(9); ui.set_display_audio_scroll_offset(5); })),
+        /* Home Music off (user request 2026-10-28): the toggle focused, the volume dimmed. */
+        ("display_audio_music_off", Box::new(|ui| { ui.set_home_music_enabled(false); ui.set_display_audio_index(4); })),
+        ("display_audio_sounds", Box::new(|ui| { ui.set_home_music_enabled(true); ui.set_display_color_temperature_available(true); ui.set_display_audio_index(10); ui.set_display_audio_scroll_offset(6); })),
         ("display_audio_cast", Box::new(|ui| {
             ui.set_settings_open(true); ui.set_settings_selected_index(4); ui.set_settings_view(18);
             ui.set_display_color_temperature_available(false);
@@ -1592,8 +1594,9 @@ fn main() {
         ui.set_sync_guide_title(s(ui, 1049).into()); ui.set_sync_guide_body(format!("{} {}", s(ui, 1050), s(ui, 1093)).into());
         ui.set_sync_guide_items(gen(&[(&s(ui, 673), "", "", false, 1), (&s(ui, 674), "", "", false, 0),
             (&s(ui, 675), "", "", false, 0), (&s(ui, 1089), "", &s(ui, 1090), false, 0),
-            (&s(ui, 1091), "", &s(ui, 1092), false, 1), (&s(ui, 391), "", "", false, -1)]));
-        ui.set_sync_guide_index(5); ui.set_sync_guide_step(1);
+            (&s(ui, 1091), "", &s(ui, 1092), false, 1), (&s(ui, 1414), "", &s(ui, 1415), false, 0),
+            (&s(ui, 1416), "", &s(ui, 1417), false, 0), (&s(ui, 391), "", "", false, -1)]));
+        ui.set_sync_guide_index(7); ui.set_sync_guide_step(1);
     })));
     scenes.push(("sync_guide_console", Box::new(|ui| {
         let path = [s(ui, 3), s(ui, 702), s(ui, 669), s(ui, 1028), s(ui, 1043)].join(" → ");

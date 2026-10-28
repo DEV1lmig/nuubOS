@@ -2,7 +2,7 @@
 # hang-catch.sh VARIANT TRIES: launch/quit until RetroArch hangs on quit, dump stacks
 V=$1; N=$2
 nuubos-emuctl status | grep -q "^state=idle" || { echo BUSY; exit 1; }
-U=$(ls -d /userdata/users/*/ | head -1); C=$U/appdata/retroarch/retroarch-core-options.cfg
+U=/userdata/users/$(cat /run/nuubos/user/active)/; C=$U/appdata/retroarch/retroarch-core-options.cfg
 rm -rf /tmp/hs; mkdir /tmp/hs; . /tmp/opts.sh
 opt_set $C melonds_accuracy fast
 mount --bind /tmp/melonds-$V.so /usr/lib/libretro/melonds_nuubos_libretro.so

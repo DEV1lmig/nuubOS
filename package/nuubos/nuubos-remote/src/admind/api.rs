@@ -300,7 +300,7 @@ fn job(kind: &str, args: &[&str]) -> R {
 }
 
 fn emu_key(k: &str) -> Result<String, String> {
-    let fixed = ["boot_screens", "slots", "slot_rotation", "bezels", "crt", "overlay", "overlay_items", "retroarch_menu"];
+    let fixed = ["boot_screens", "slots", "slot_rotation", "bezels", "crt", "position", "overlay", "overlay_items", "retroarch_menu"];
     if fixed.contains(&k) || (k.starts_with("hotkey_") && token(k).is_ok()) {
         Ok(k.to_owned())
     } else {
@@ -347,6 +347,7 @@ pub fn action(b: &Value) -> R {
         "audio.system" => { sock_ok("audiod", &format!("SYSTEM VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
         "audio.apps" => { sock_ok("audiod", &format!("APPLICATIONS VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
         "audio.music" => { sock_ok("audiod", &format!("MUSIC VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
+        "audio.musicon" => { sock_ok("audiod", &format!("MUSIC ENABLED SET {}", flag(&a("v"))?))?; done("audio") }
         "audio.nav" => { sock_ok("audiod", &format!("SYSTEM NAVIGATION SET {}", flag(&a("v"))?))?; done("audio") }
         "audio.notify" => { sock_ok("audiod", &format!("SYSTEM NOTIFY SET {}", flag(&a("v"))?))?; done("audio") }
         "audio.power" => { sock_ok("audiod", &format!("SYSTEM POWER SET {}", flag(&a("v"))?))?; done("audio") }
@@ -405,7 +406,7 @@ pub fn action(b: &Value) -> R {
         /* Syncthing (per user). */
         "sync.enable" => { sock_ok("syncd", if flag(&a("v"))? == "1" { "ENABLE" } else { "DISABLE" })?; done("sync") }
         "sync.folder" => {
-            let kind = one_of(&a("kind"), &["saves", "states", "screenshots", "library", "history"])?;
+            let kind = one_of(&a("kind"), &["saves", "states", "screenshots", "library", "history", "roms", "roms-sd2"])?;
             sock_ok("syncd", &format!("FOLDER\t{kind}\t{}", flag(&a("v"))?))?;
             done("sync")
         }
@@ -425,16 +426,17 @@ pub fn action(b: &Value) -> R {
             done("sync")
         }
         /* An existing folder of the user's other devices for saves, states
-         * or screenshots ("" = nuubOS's own); USE takes an offered one. */
+         * screenshots or a ROM folder ("" = nuubOS's own); USE takes an
+         * offered one. */
         "sync.folder_id" => {
-            let kind = one_of(&a("kind"), &["saves", "states", "screenshots"])?;
+            let kind = one_of(&a("kind"), &["saves", "states", "screenshots", "roms", "roms-sd2"])?;
             let id = plain(a("id").trim(), 199)?;
             let id = if id.is_empty() { "-".to_owned() } else { id };
             svc::reply_ok(&sock_timeout("syncd", &format!("FOLDER_ID\t{kind}\t{id}"), Duration::from_secs(30))?)?;
             done("sync")
         }
         "sync.use" => {
-            let kind = one_of(&a("kind"), &["saves", "states", "screenshots"])?;
+            let kind = one_of(&a("kind"), &["saves", "states", "screenshots", "roms", "roms-sd2"])?;
             let folder = plain(&a("folder"), 199)?;
             svc::reply_ok(&sock_timeout("syncd", &format!("USE\t{folder}\t{kind}"), Duration::from_secs(30))?)?;
             done("sync")
