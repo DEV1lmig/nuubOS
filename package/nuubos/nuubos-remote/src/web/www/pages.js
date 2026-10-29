@@ -1316,6 +1316,7 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
   const src = SOURCES[ss.provider] || SOURCES.screenscraper;
   const scanning = lib.scanning === '1';
   const positions = { top: C(1410, 'Top'), center: C(1411, 'Center'), bottom: C(1412, 'Bottom') };
+  const regions = { auto: C(122, 'Automatic'), us: C(1421, 'USA'), eu: C(1422, 'Europe'), jp: C(1423, 'Japan'), wor: C(1424, 'World') };
   const nodes = [section(C(703, 'GAMING'), 'user'), group(
     row({ key: 'ra', title: C(584, 'RetroAchievements'), value: ra.user || C(566, 'Not signed in'), chevron: true, on: () => go('gaming/ra') }),
     row({ key: 'boot', title: C(767, 'Console Boot Screens'), detail: C(768, "Shows the console's start-up logo when its BIOS is available"), toggle: on01(emu.boot_screens), set: (v) => set('boot_screens', v ? '1' : '0') }),
@@ -1341,6 +1342,10 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
       toggle: on01(lib.show_unavailable), set: (v) => act('lib.unavailable', { v }, { topics: ['library'] }) }),
     row({ key: 'src', title: C(792, 'Metadata Source'), value: src[0], detail: C(src[1], SOURCE_DETAILS[src[1]]), chevron: true,
       on: () => pickAndAct(C(792, 'Metadata Source'), Object.entries(SOURCES).map(([value, s]) => ({ value, label: s[0], detail: C(s[1], SOURCE_DETAILS[s[1]]) })), ss.provider, 'scraper.provider') }),
+    /* Cover Region (GitHub #10); TheGamesDB has one cover a game. */
+    ss.provider !== 'thegamesdb' ? row({ key: 'region', title: C(1419, 'Cover Region'), value: regions[ss.region] || regions.auto, chevron: true,
+      detail: C(1420, 'Box art from this region when there is one. Fill Missing Data changes the covers already downloaded.'),
+      on: () => pickAndAct(C(1419, 'Cover Region'), Object.entries(regions).map(([value, label]) => ({ value, label })), ss.region || 'auto', 'scraper.region') }) : null,
     ss.provider === 'screenscraper' || !ss.provider ? (ss.user
       ? row({ key: 'ssout', title: C(565, 'ScreenScraper Account'), value: ss.user, detail: C(567, 'Sign Out'), arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('scraper.signout') })
       : row({ key: 'ssin', title: C(565, 'ScreenScraper Account'), value: C(566, 'Not signed in'), detail: C(803, 'Optional: more requests per day'), on: async () => {
@@ -1380,6 +1385,10 @@ async function raPage() {
           if (v && !(await form(C(907, 'Turn On Hardcore Mode?'), [], { text: C(908, 'Achievements are earned as on the original console, with no help. While Hardcore Mode is on, save states and fast-forward are off: every game starts from the beginning and only the game\'s own saves are kept. RetroArch also blocks cheats, rewind and slow motion. You can turn it off at any time.'), ok: C(909, 'Turn On') }))) return;
           await act('ra.set', { key: 'hardcore', v });
         } }),
+        /* Offline Achievements (RAOfflineProxy): casual sessions only. */
+        row({ key: 'off', title: C(1445, 'Offline Achievements'),
+          detail: on01(ra.hardcore) ? C(1447, 'Casual only: off in Hardcore Mode') : C(1446, 'Sent when you are back online'),
+          toggle: ra.offline !== '0' && !on01(ra.hardcore), disabled: on01(ra.hardcore), set: (v) => act('ra.set', { key: 'offline', v }) }),
         row({ key: 'out', title: C(567, 'Sign Out'), arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('ra.logout') })]
       : row({ key: 'in', title: C(587, 'Sign In'), detail: C(591, 'Your password is used once and never stored'), on: async () => {
         const v = await form(C(584, 'RetroAchievements'), [{ name: 'name', label: C(285, 'Username') }, { name: 'password', label: C(172, 'Password'), type: 'password' }], { text: C(591, 'Your password is used once and never stored'), ok: C(587, 'Sign In') });
@@ -1439,6 +1448,9 @@ page('display', 'settings', () => C(7, 'Display & Audio'), async () => {
     } }),
     vol === 'unsupported' ? row({ key: 'vol', title: C(134, 'Volume'), value: a.selected === 'hdmi' ? C(223, 'TV / Receiver') : C(205, 'Unavailable'), detail: C(273, 'Volume controlled by TV / receiver'), disabled: true })
       : row({ key: 'vol', title: C(134, 'Volume'), slider: { value: Number(vol) || 0, set: (v) => act('audio.volume', { v }, { quiet: true }) } }),
+    /* Volume Button Step (GitHub #6): percent per Vol+/Vol- press. */
+    row({ key: 'vstep', title: C(1418, 'Volume Button Step'), value: (a['volume.step'] || '1') + '%', chevron: true,
+      on: () => pickAndAct(C(1418, 'Volume Button Step'), ['1', '2', '5', '10'].map((v) => ({ value: v, label: v + '%' })), a['volume.step'] || '1', 'audio.step') }),
     row({ key: 'apps', title: C(135, 'Applications'), slider: { value: Number(a['volume.applications']) || 0, set: (v) => act('audio.apps', { v }, { quiet: true }) } }),
     /* Home Music On/Off (user request 2026-10-28), then its volume. */
     row({ key: 'musicon', title: C(139, 'Home Music'), toggle: a['home_music.enabled'] !== '0', set: (v) => act('audio.musicon', { v }) }),

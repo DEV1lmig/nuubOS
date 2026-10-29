@@ -6,7 +6,8 @@
 # multi-line description, cover, screenshot), search name -> --query, fill
 # mode keeps existing data and adds the missing, update (force), quota stop,
 # not found, libretro exact and title match with region preference,
-# reject/clear, no scratch or partial files left.
+# Cover Region (Skyscraper region, cache refresh and fill of covers of
+# another region, libretro region first), reject/clear, no scratch or partial files left.
 # Run: python3 package/nuubos/nuubos-scraper/tests/scraper.py
 import http.server, os, socket, stat, subprocess, sys, tempfile, threading, time
 from urllib.parse import quote, unquote
@@ -213,6 +214,23 @@ try:
     out = job('game', ids['Mario'], 'force')
     check('update (force) refreshes', '@result scraped' in out and 'title=Super Mario World' in meta('Mario'))
 
+    # Cover Region (GitHub #10).
+    check('region set keeps the source', sc('region', 'set', 'eu').startswith('OK')
+          and 'region=eu' in sc('provider', 'status') and 'provider=screenscraper' in sc('provider', 'status'))
+    check('invalid region refused', sc('region', 'set', 'xx') == '' and 'region=eu' in sc('provider', 'status'))
+    os.remove(run + '/scraper/calls.log')
+    out = job('game', ids['Mario'], 'fill')
+    check('cover of another region: fill asks the source again', '@result scraped' in out
+          and "'--cache', 'refresh'" in calls() and 'cover_region=eu' in meta('Mario')
+          and 'title=Super Mario World' in meta('Mario'))
+    check('region in the Skyscraper config', 'region="eu"' in open(cfg).read())
+    check('cover of the chosen region: complete', 'complete' in job('game', ids['Mario'], 'fill'))
+    sc('region', 'set', 'auto')
+    os.remove(run + '/scraper/calls.log')
+    check('auto never asks again', 'complete' in job('game', ids['Mario'], 'fill'))
+    job('game', ids['Mario'], 'force')
+    check('auto: no region, no refresh', 'region=' not in open(cfg).read() and "'refresh'" not in calls())
+
     out = job('game', ids['Quota'])
     check('quota stops (job protocol)', '@error quota' in out)
 
@@ -227,6 +245,11 @@ try:
     out = job('game', ids['Metroid'])
     check('libretro title match prefers a release (USA) over beta', 'Japan%2C%20USA' in meta('Metroid'))
     check('libretro not found', '@error not-found' in job('game', ids['Zelda']))
+    sc('region', 'set', 'eu')
+    job('game', ids['Metroid'], 'force')
+    check('libretro: the chosen region first', 'Super%20Metroid%20%28Europe%29' in meta('Metroid')
+          and 'cover_region=eu' in meta('Metroid'))
+    sc('region', 'set', 'auto')
     out = job('bulk', 'missing')
     check('bulk missing runs', '@result' in out)
 

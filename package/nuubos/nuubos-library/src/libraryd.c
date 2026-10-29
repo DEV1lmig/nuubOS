@@ -1097,13 +1097,61 @@ static int sniff_system(const char *rel)
 
 /*
  * PortMaster ports (EPIC-058): the scripts directly in roms/ports of the
- * console's own card, the only folder nuubos-portsd's sandbox sees. The
- * folder of a port beside its script holds the port's data (archives,
- * images, its own runtimes), never games, so the scan does not enter it.
+ * console's own card, or of the SD2 card when the user chose it on the
+ * PortMaster page (GitHub #21, portsd's /state/ports/location.conf): the
+ * only folder nuubos-portsd's sandbox sees. The folder of a port beside its
+ * script holds the port's data (archives, images, its own runtimes), never
+ * games, so the scan does not enter it.
  */
 #define PORTS_SYSTEM "ports"
 static bool regular_file(const char *path);
-#define PORTS_ROOT ROMS_ROOT "/ports"
+#define PORTS_LOCATION_FILE STATE_ROOT "/ports/location.conf"
+/* The ports folder (portsd asks for it in STATUS), "" while it is on an
+ * SD2 card that is out, and its catalog folder ("ports" or "sd2:<name>").
+ * Written by the main thread only while no scan runs, as sd2_roms. */
+static char ports_root[PATH_MAX];
+static char ports_rel[PATH_MAX] = "ports";
+static bool ports_sd2;
+/* The SD2 card's ports folder whatever the setting ("" without the card):
+ * where the PortMaster page's switch moves them. */
+static char sd2_ports[PATH_MAX];
+
+static void refresh_ports_root(void)
+{
+	char line[64], name[NAME_MAX + 1] = "ports";
+	FILE *fp = fopen(PORTS_LOCATION_FILE, "r");
+
+	ports_sd2 = false;
+	sd2_ports[0] = '\0';
+	if (fp) {
+		while (fgets(line, sizeof(line), fp))
+			if (!strncmp(line, "LOCATION=sd2", 12))
+				ports_sd2 = true;
+		fclose(fp);
+	}
+	ports_root[0] = '\0';
+	if (sd2_roms[0]) {
+		/* Its own spelling on the card (ports, PORTS, Ports). */
+		DIR *dir = opendir(sd2_roms);
+		struct dirent *de;
+
+		while (dir && (de = readdir(dir)) != NULL)
+			if (!strcasecmp(de->d_name, "ports")) {
+				copy_text(name, sizeof(name), de->d_name);
+				break;
+			}
+		if (dir)
+			closedir(dir);
+		pathf(sd2_ports, sizeof(sd2_ports), "%s/%s", sd2_roms, name);
+	}
+	if (!ports_sd2) {
+		copy_text(ports_root, sizeof(ports_root), ROMS_ROOT "/ports");
+		copy_text(ports_rel, sizeof(ports_rel), "ports");
+		return;
+	}
+	copy_text(ports_root, sizeof(ports_root), sd2_ports);
+	pathf(ports_rel, sizeof(ports_rel), SD2_PREFIX "%s", name);
+}
 
 static bool is_ports(int sys)
 {
@@ -1186,7 +1234,7 @@ static struct port_info *load_port_infos(size_t *count)
 {
 	struct port_info *list = NULL;
 	size_t cap = 0;
-	DIR *dir = opendir(PORTS_ROOT);
+	DIR *dir = ports_root[0] ? opendir(ports_root) : NULL;
 	struct dirent *de;
 
 	*count = 0;
@@ -1201,9 +1249,8 @@ static struct port_info *load_port_infos(size_t *count)
 
 		if (de->d_name[0] == '.')
 			continue;
-		if (!strcmp(de->d_name, "gamelist.xml"))
-			snprintf(path, sizeof(path), PORTS_ROOT "/gamelist.xml");
-		else if (!pathf(path, sizeof(path), PORTS_ROOT "/%s/gameinfo.xml", de->d_name))
+		if (!pathf(path, sizeof(path), !strcmp(de->d_name, "gamelist.xml") ? "%s/gamelist.xml" : "%s/%s/gameinfo.xml",
+			   ports_root, de->d_name))
 			continue;
 		if (!(fp = fopen(path, "r")))
 			continue;
@@ -1225,7 +1272,7 @@ static struct port_info *load_port_infos(size_t *count)
 				if (image && !strncmp(image, "./", 2) && !strstr(image, "..") && tsv_safe(image)) {
 					char full[PATH_MAX];
 
-					if (pathf(full, sizeof(full), PORTS_ROOT "/%s", image + 2) && regular_file(full))
+					if (pathf(full, sizeof(full), "%s/%s", ports_root, image + 2) && regular_file(full))
 						info.image = xstrdup(full);
 				}
 				free(image);
@@ -1403,7 +1450,7 @@ static void walk(struct scan_ctx *ctx, const char *sub, int depth, int folder_sy
 			ref_add(&ctx->unclassified, rel);
 			continue;
 		}
-		if (is_ports(sys) && strcasecmp(sub, systems[sys].dir))
+		if (is_ports(sys) && strcasecmp(sub, ports_rel))
 			continue; /* a script anywhere else is not a port */
 		if (ctx->out->count == ctx->out->cap) {
 			ctx->out->cap = ctx->out->cap ? ctx->out->cap * 2 : 256;
@@ -1794,6 +1841,7 @@ static void start_scan(void)
 		return;
 	}
 	refresh_sd2_root();
+	refresh_ports_root();
 	if (pthread_create(&scan_thread, NULL, scan_main, NULL) != 0) {
 		log_msg("scan thread failed: %s", strerror(errno));
 		return;
@@ -2521,6 +2569,9 @@ static void build_status(struct strbuf *b)
 	/* Where new games go (Web administration uploads): the games card
 	 * while it can be written, else USERDATA. */
 	sb_append(b, "games_root=%s\n", sd2_writable ? sd2_roms : ROMS_ROOT);
+	/* The ports folder nuubos-portsd runs (GitHub #21): "" while the SD2
+	 * card it is on is out. */
+	sb_append(b, "ports_location=%s\nports_root=%s\n", ports_sd2 ? "sd2" : "console", ports_root);
 	if (active_user[0]) {
 		append_recent(b, "recent", RECENT_LIMIT);
 		/* Favorites of an older nuubOS wait for the UI to name the
@@ -3164,6 +3215,20 @@ static void handle_command(struct client *c, char *line)
 		else
 			reply(c, "ERR scope\n");
 		free(b.data);
+	} else if (!strcmp(line, "PORTS_ROOT")) {
+		/* nuubos-portsd, before a session or a PortMaster job (GitHub
+		 * #21): the ports folder now ("" while its SD2 card is out) and
+		 * the SD2 card's ports folder ("" without the card). Not re-read
+		 * during a scan (the scan thread reads it). */
+		struct strbuf b = { 0 };
+
+		if (!scanning) {
+			refresh_sd2_root();
+			refresh_ports_root();
+		}
+		sb_append(&b, "OK %s\t%s\t%s\n", ports_sd2 ? "sd2" : "console", ports_root, sd2_ports);
+		send_text(c, b.data, b.len);
+		free(b.data);
 	} else if (!strcmp(line, "RESOLVE") && arg) {
 		/* Launch lookup for the Emulation Service: system and
 		 * absolute content path of an available game (and, for a
@@ -3583,6 +3648,7 @@ int main(void)
 	if (ui_wd >= 0) {
 		/* Games on the games card launch before the scan too. */
 		refresh_sd2_root();
+		refresh_ports_root();
 		boot_scan_pending = true;
 		boot_scan_deadline_ms = monotonic_ms() + BOOT_SCAN_WAIT_MS;
 	} else {

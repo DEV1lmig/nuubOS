@@ -347,6 +347,7 @@ pub fn action(b: &Value) -> R {
         "audio.system" => { sock_ok("audiod", &format!("SYSTEM VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
         "audio.apps" => { sock_ok("audiod", &format!("APPLICATIONS VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
         "audio.music" => { sock_ok("audiod", &format!("MUSIC VOLUME SET {}", int(&a("v"), 0, 100)?))?; done("audio") }
+        "audio.step" => { sock_ok("audiod", &format!("VOLUME STEP SET {}", one_of(&a("v"), &["1", "2", "5", "10"])?))?; done("audio") }
         "audio.musicon" => { sock_ok("audiod", &format!("MUSIC ENABLED SET {}", flag(&a("v"))?))?; done("audio") }
         "audio.nav" => { sock_ok("audiod", &format!("SYSTEM NAVIGATION SET {}", flag(&a("v"))?))?; done("audio") }
         "audio.notify" => { sock_ok("audiod", &format!("SYSTEM NOTIFY SET {}", flag(&a("v"))?))?; done("audio") }
@@ -516,8 +517,9 @@ pub fn action(b: &Value) -> R {
             done("ra")
         }
         "ra.logout" => { tool_ok("nuubos-achievementsctl", &["logout", &user()?])?; done("ra") }
-        "ra.set" => { tool_ok("nuubos-achievementsctl", &["set", &user()?, &one_of(&a("key"), &["enabled", "hardcore"])?, flag(&a("v"))?])?; done("ra") }
+        "ra.set" => { tool_ok("nuubos-achievementsctl", &["set", &user()?, &one_of(&a("key"), &["enabled", "hardcore", "offline"])?, flag(&a("v"))?])?; done("ra") }
         "scraper.provider" => { tool_ok("nuubos-scraper", &["provider", "set", &one_of(&a("v"), &["screenscraper", "thegamesdb", "libretro"])?])?; done("scraper") }
+        "scraper.region" => { tool_ok("nuubos-scraper", &["region", "set", &one_of(&a("v"), &["auto", "us", "eu", "jp", "wor"])?])?; done("scraper") }
         "scraper.account" => {
             tool(&svc::bin("nuubos-scraper"), &["account", "set", &plain(a("name").trim(), 64)?], Some(&plain(&a("password"), 256)?))?;
             done("scraper")

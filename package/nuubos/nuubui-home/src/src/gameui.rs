@@ -146,12 +146,16 @@ struct State {
     ra_user: String,
     ra_enabled: bool,
     ra_hardcore: bool,
+    /* Offline Achievements (RAOfflineProxy, GitHub #18): casual only. */
+    ra_offline: bool,
     ra_name_pending: String,
     ss_user: String,
     ss_available: bool,
     /* Metadata source (nuubos-scraper provider) and the end of the user's
      * TheGamesDB key. */
     ss_provider: String,
+    /* Cover Region (GitHub #10): auto | us | eu | jp | wor. */
+    ss_region: String,
     ss_apikey: String,
     ss_name_pending: String,
     /* A bulk scrape job is running. */
@@ -605,6 +609,11 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
                 rows.push(("ra-enabled".into(), toggle(tr(ui, 112, "Enabled"), st.ra_enabled, String::new()), true));
                 rows.push(("ra-hardcore".into(), toggle(tr(ui, 585, "Hardcore Mode"), st.ra_hardcore,
                     tr(ui, 586, "No save states or fast-forward; achievements count double")), true));
+                let mut offline = toggle(tr(ui, 1445, "Offline Achievements"), st.ra_offline && !st.ra_hardcore,
+                    if st.ra_hardcore { tr(ui, 1447, "Casual only: off in Hardcore Mode") }
+                    else { tr(ui, 1446, "Sent when you are back online") });
+                offline.enabled = !st.ra_hardcore;
+                rows.push(("ra-offline".into(), offline, !st.ra_hardcore));
                 rows.push(("ra-signout".into(), row(tr(ui, 567, "Sign Out"), String::new(),
                     armed_detail(&st.armed, "ra-signout", tr(ui, 191, "Press again to confirm"), String::new())), true));
             }
@@ -902,7 +911,8 @@ fn details_move(ui: &HomeWindow, action: &str) {
 pub(crate) fn render(ui: &HomeWindow) {
     let view = ui.get_settings_view();
     /* Before Files: Backup Content (59) sits inside its range. */
-    if view == crate::storageui::STORAGE_VIEW || view == crate::storageui::CONTENT_VIEW {
+    if view == crate::storageui::STORAGE_VIEW || view == crate::storageui::CONTENT_VIEW
+        || view == crate::storageui::DATA_VIEW {
         crate::storageui::render(ui);
         return;
     }
@@ -1042,6 +1052,13 @@ pub(crate) fn show(ui: &HomeWindow, view: i32) {
     ui.set_gen_notice("".into());
     navigate_settings_view(ui, view);
     render(ui);
+}
+
+/* Focus the row with this key (back on the row that opened a page). */
+pub(crate) fn focus(ui: &HomeWindow, key: &str) {
+    if let Some(i) = STATE.with(|st| st.borrow().keys.iter().position(|k| k == key)) {
+        ui.set_gen_index(i as i32);
+    }
 }
 
 pub(crate) fn focused_key(ui: &HomeWindow) -> String {
@@ -1439,6 +1456,8 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         }
         "game-source" => tool_then(ui, "/usr/bin/nuubos-scraper", vec!["provider".into(), "set".into(), value],
             None, |ui, _| refresh_gaming(ui)),
+        "game-region" => tool_then(ui, "/usr/bin/nuubos-scraper", vec!["region".into(), "set".into(), value],
+            None, |ui, _| refresh_gaming(ui)),
         c if c.starts_with("emu-hotkey:") => emu_set(ui, &format!("hotkey_{}", &c[11..]), value),
         "game-tag" => {
             let (id, on) = STATE.with(|st| {
@@ -1661,6 +1680,19 @@ fn source_detail(ui: &HomeWindow, id: &str) -> String {
     }
 }
 
+/* Cover Regions (nuubos-scraper region ids). */
+const REGIONS: [&str; 5] = ["auto", "us", "eu", "jp", "wor"];
+
+fn region_label(ui: &HomeWindow, id: &str) -> String {
+    match id {
+        "us" => tr(ui, 1421, "USA"),
+        "eu" => tr(ui, 1422, "Europe"),
+        "jp" => tr(ui, 1423, "Japan"),
+        "wor" => tr(ui, 1424, "World"),
+        _ => tr(ui, 122, "Automatic"),
+    }
+}
+
 fn position_label(ui: &HomeWindow, v: &str) -> String {
     match v {
         "top" => tr(ui, 1410, "Top"),
@@ -1706,6 +1738,12 @@ fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     let mut source = nav(tr(ui, 792, "Metadata Source"), source_name(&st.ss_provider).to_owned());
     source.detail = source_detail(ui, &st.ss_provider).into();
     rows.push(("ss-source".into(), source, true));
+    /* TheGamesDB has one cover a game. */
+    if st.ss_provider != "thegamesdb" {
+        let mut region = nav(tr(ui, 1419, "Cover Region"), region_label(ui, &st.ss_region));
+        region.detail = tr(ui, 1420, "Box art from this region when there is one. Fill Missing Data changes the covers already downloaded.").into();
+        rows.push(("ss-region".into(), region, true));
+    }
     match st.ss_provider.as_str() {
         "screenscraper" => if st.ss_user.is_empty() {
             rows.push(("ss-signin".into(), row(tr(ui, 565, "ScreenScraper Account"), tr(ui, 566, "Not signed in"),
@@ -1830,9 +1868,11 @@ pub fn refresh_gaming(ui: &HomeWindow) {
                 st.ra_user = kv(&ra, "user").to_owned();
                 st.ra_enabled = kv(&ra, "enabled") == "1";
                 st.ra_hardcore = kv(&ra, "hardcore") == "1";
+                st.ra_offline = kv(&ra, "offline") != "0";
                 st.ss_user = kv(&ss, "user").to_owned();
                 st.ss_available = kv(&ss, "available") == "1";
                 st.ss_provider = kv(&ss, "provider").to_owned();
+                st.ss_region = kv(&ss, "region").to_owned();
                 st.ss_apikey = kv(&ss, "apikey").to_owned();
             });
             render_gaming(&ui);
@@ -1922,6 +1962,11 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
                     let current = STATE.with(|st| st.borrow().ss_provider.clone());
                     let options = SOURCES.iter().map(|id| (id.to_string(), source_name(id).to_owned())).collect();
                     open_settings_choice(ui, "game-source", &tr(ui, 792, "Metadata Source"), options, &current);
+                }
+                "ss-region" => {
+                    let current = STATE.with(|st| st.borrow().ss_region.clone());
+                    let options = REGIONS.iter().map(|id| (id.to_string(), region_label(ui, id))).collect();
+                    open_settings_choice(ui, "game-region", &tr(ui, 1419, "Cover Region"), options, &current);
                 }
                 "tgdb-key" => {
                     open_system_keyboard(ui, &tr(ui, 796, "TheGamesDB API Key"), KEYBOARD_TGDB_KEY, GAMING_VIEW, "text", "");
@@ -2118,6 +2163,7 @@ fn refresh_achievements(ui: &HomeWindow) {
                 st.ra_user = kv(&out, "user").to_owned();
                 st.ra_enabled = kv(&out, "enabled") == "1";
                 st.ra_hardcore = kv(&out, "hardcore") == "1";
+                st.ra_offline = kv(&out, "offline") != "0";
                 st.busy = false;
             });
             render(&ui);
@@ -2480,6 +2526,10 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
             }
             set_achievements(ui, field, on);
         }
+        (54, "ra-offline") => {
+            let on = STATE.with(|st| !st.borrow().ra_offline);
+            set_achievements(ui, "offline", on);
+        }
         (54, "ra-signout") => {
             if arm_or(ui, "ra-signout") {
                 tool_then(ui, "/usr/bin/nuubos-achievementsctl", vec!["logout".into(), active_user()],
@@ -2563,7 +2613,8 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
 
 /* Input on Settings pages 52-62 (from handle_settings_action). */
 pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
-    if view == crate::storageui::STORAGE_VIEW || view == crate::storageui::CONTENT_VIEW {
+    if view == crate::storageui::STORAGE_VIEW || view == crate::storageui::CONTENT_VIEW
+        || view == crate::storageui::DATA_VIEW {
         crate::storageui::handle_page(ui, view, action);
         return;
     }

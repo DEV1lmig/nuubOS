@@ -19,6 +19,7 @@
  *   reject GAME              discard a match; bulk scraping skips the game
  *   clear GAME               remove scraped metadata and media of a game
  *   provider status | provider set screenscraper|thegamesdb|libretro
+ *   region set auto|us|eu|jp|wor   preferred cover region (GitHub #10)
  *   account status | account set NAME (password on stdin) | account clear
  *   apikey set (key on stdin) | apikey clear      TheGamesDB private key
  *
@@ -124,6 +125,9 @@ enum outcome { SCRAPED, REVIEW, NOT_FOUND, SKIPPED, FAILED, STOP };
 static volatile sig_atomic_t cancelled;
 /* bulk lang: ask the source again instead of Skyscraper's cache. */
 static bool refresh_cache;
+/* The batch has covers of another Cover Region: Skyscraper's cache holds
+ * the cover chosen for the old one, so the source is asked again. */
+static bool region_refresh;
 /* bulk missing:SECONDS: games tried after this time are skipped. */
 static long long skip_tried_after;
 static bool as_job;
@@ -162,6 +166,8 @@ struct metadata {
 	char players[32];
 	char rating[16];
 	char cover_url[1024];
+	/* Cover Region setting the cover was fetched with ("" = auto). */
+	char cover_region[8];
 	/* Language of description/genre (ScreenScraper/TheGamesDB runs). */
 	char lang[8];
 	/* "key@xx=value" lines of other languages, kept as they are. */
@@ -695,10 +701,27 @@ static bool system_supported(int provider, const char *id)
 	return provider == PROV_LIBRETRO ? s->libretro[0] != NULL : s->sky != NULL;
 }
 
-/* Region preference of libretro dumps: the file name's region tag first,
- * then world, USA, Europe, Japan. */
+/* Cover Region (GitHub #10): Auto follows the file name's region tag, then
+ * world, USA, Europe, Japan; a region chosen here comes first for every
+ * game. Skyscraper/ScreenScraper short names. */
+static const char *const region_ids[] = { "auto", "us", "eu", "jp", "wor", NULL };
+
+static void cover_region(char *out, size_t size)
+{
+	char value[16];
+
+	copy_text(out, size, "auto");
+	if (conf_value(SETTINGS_FILE, "REGION", value, sizeof(value)))
+		for (int i = 0; region_ids[i]; i++)
+			if (!strcmp(value, region_ids[i]))
+				copy_text(out, size, value);
+}
+
+/* Region preference of libretro dumps: the chosen Cover Region, else the
+ * file name's region tag, first; then world, USA, Europe, Japan. */
 static void region_order(const char *name, const char *out[8])
 {
+	static char chosen[8];
 	static const struct { const char *tag; const char *region; } tags[] = {
 		{ "(Europe", "eu" }, { "(E)", "eu" }, { "Europe)", "eu" },
 		{ "(USA", "us" }, { "(U)", "us" }, { "USA)", "us" },
@@ -708,6 +731,9 @@ static void region_order(const char *name, const char *out[8])
 	static const char *const base[] = { "wor", "us", "eu", "jp", NULL };
 	int n = 0;
 
+	cover_region(chosen, sizeof(chosen));
+	if (strcmp(chosen, "auto"))
+		out[n++] = chosen;
 	for (size_t i = 0; i < sizeof(tags) / sizeof(tags[0]) && !n; i++)
 		if (strstr(name, tags[i].tag))
 			out[n++] = tags[i].region;
@@ -1003,7 +1029,7 @@ static bool cover_exists(const struct game_info *g)
 #define META_FIELDS(X) \
 	X(provider) X(provider_id) X(match) X(search) X(title) X(description) \
 	X(release) X(developer) X(publisher) X(genre) X(players) X(rating) \
-	X(cover_url) X(lang)
+	X(cover_url) X(cover_region) X(lang)
 
 /* Localized fields kept per language. */
 static bool localized_key(const char *key, size_t len)
@@ -1125,10 +1151,22 @@ static void merge_fields(struct metadata *dst, const struct metadata *src)
 #undef MERGE
 }
 
+/* The cover was fetched for another Cover Region than the chosen one
+ * (Auto never asks for a new cover). TheGamesDB has one cover a game. */
+static bool region_stale(const struct metadata *m, int provider)
+{
+	char region[8];
+
+	if (provider == PROV_THEGAMESDB)
+		return false;
+	cover_region(region, sizeof(region));
+	return strcmp(region, "auto") && strcmp(region, m->cover_region[0] ? m->cover_region : "auto");
+}
+
 /* Data the active source can still add to this game. */
 static bool missing_data(const struct game_info *g, const struct metadata *m, int provider)
 {
-	if (!cover_exists(g))
+	if (!cover_exists(g) || region_stale(m, provider))
 		return true;
 	if (provider == PROV_LIBRETRO)
 		return false;
@@ -1205,7 +1243,7 @@ static void ini_quote(const char *in, char *out, size_t size)
 static int sky_prepare(void)
 {
 	struct account a;
-	char key[128], lang[8], q[300];
+	char key[128], lang[8], q[300], region[8];
 	char text[2048];
 	size_t o;
 
@@ -1214,6 +1252,7 @@ static int sky_prepare(void)
 	load_account(&a);
 	load_key(key, sizeof(key));
 	user_language(lang, sizeof(lang));
+	cover_region(region, sizeof(region));
 	o = (size_t)snprintf(text, sizeof(text),
 		"[main]\n"
 		"cacheFolder=\"" CACHE_ROOT "/skyscraper\"\n"
@@ -1231,6 +1270,9 @@ static int sky_prepare(void)
 		 * e.g. "(1993)" vs 1994 in ScreenScraper). */
 		"ignoreYearInFilename=\"true\"\n"
 		"lang=\"%s\"\n", lang);
+	/* A chosen Cover Region replaces the file name's region tag. */
+	if (strcmp(region, "auto"))
+		o += (size_t)snprintf(text + o, sizeof(text) - o, "region=\"%s\"\n", region);
 	if (a.user[0]) {
 		char creds[200];
 
@@ -1575,7 +1617,7 @@ static enum outcome sky_lookup(int provider, const struct system_map *s, struct 
 	argv[argc++] = "unattend,noscreenshots,nowheels,nomarquees,notextures";
 	/* Another language: Skyscraper's cache holds the text of the last
 	 * one, so the source is asked again. */
-	if (refresh_cache) {
+	if (refresh_cache || region_refresh) {
 		argv[argc++] = "--cache";
 		argv[argc++] = "refresh";
 	}
@@ -1919,16 +1961,27 @@ static bool wanted(const struct game_info *g, enum mode mode, int provider, stru
 static enum outcome apply(const struct game_info *g, enum mode mode, struct metadata *old, struct metadata *fresh)
 {
 	struct metadata m;
-	char path[PATH_MAX];
+	char path[PATH_MAX], region[8];
+	bool stale = region_stale(old, active_provider());
 
+	cover_region(region, sizeof(region));
+	if (!strcmp(region, "auto"))
+		region[0] = '\0';
 	copy_text(fresh->search, sizeof(fresh->search), old->search);
 	if (mode == MODE_FILL && old->match[0]) {
-		/* Only what is missing; everything already there stays. */
+		/* Only what is missing; everything already there stays, except a
+		 * cover of another Cover Region. */
+		bool had_cover = cover_exists(g);
+
 		m = *old;
 		merge_fields(&m, fresh);
 		copy_text(m.cover_file, sizeof(m.cover_file), fresh->cover_file);
 		copy_text(m.cover_url, sizeof(m.cover_url), fresh->cover_url);
-		install_media(g, &m, false);
+		install_media(g, &m, stale);
+		/* Tried for this region even when the source has no other
+		 * cover: Fill Missing Data does not ask again. */
+		if (stale || !had_cover)
+			copy_text(m.cover_region, sizeof(m.cover_region), region);
 		/* References of the source that answered: Accept stays right. */
 		if (!old->cover_url[0])
 			m.cover_url[0] = '\0';
@@ -1938,8 +1991,11 @@ static enum outcome apply(const struct game_info *g, enum mode mode, struct meta
 		m = *fresh;
 		if (mode == MODE_FORCE)
 			merge_fields(&m, old);
-		if (!strcmp(m.match, "auto"))
-			install_media(g, &m, mode == MODE_FORCE);
+		if (!strcmp(m.match, "auto")) {
+			install_media(g, &m, mode == MODE_FORCE || stale);
+			copy_text(m.cover_region, sizeof(m.cover_region), region);
+		} else
+			copy_text(m.cover_region, sizeof(m.cover_region), old->cover_region);
 	}
 	/* Languages already fetched stay (a cache: switching back costs no
 	 * request); the previous plain text becomes its own language. */
@@ -1972,6 +2028,7 @@ static void scrape_batch(int provider, const struct game_info *games, size_t cou
 	const char *query = NULL;
 	bool mixed = false;
 
+	region_refresh = false;
 	for (size_t i = 0; i < count; i++) {
 		enum outcome o;
 
@@ -2007,6 +2064,8 @@ static void scrape_batch(int provider, const struct game_info *games, size_t cou
 		snprintf(items[n].file, sizeof(items[n].file), "%s", games[i].file);
 		if (olds[n].search[0])
 			query = olds[n].search;
+		if (cover_exists(&games[i]) && region_stale(&olds[n], provider))
+			region_refresh = true;
 		n++;
 	}
 	if (provider == PROV_LIBRETRO || n == 0)
@@ -2400,7 +2459,10 @@ static void print_status(void)
 	load_account(&a);
 	load_key(key, sizeof(key));
 	klen = strlen(key);
-	printf("provider=%s\navailable=%d\n", provider_ids[provider], provider_ready(provider) ? 1 : 0);
+	char region[8];
+
+	cover_region(region, sizeof(region));
+	printf("provider=%s\navailable=%d\nregion=%s\n", provider_ids[provider], provider_ready(provider) ? 1 : 0, region);
 	for (int i = 0; i < PROV_COUNT; i++)
 		printf("%s=%s\n", provider_ids[i], provider_ready(i) ? "available" : "unavailable");
 	/* Only the end of the key, to recognise it. */
@@ -2486,21 +2548,39 @@ static int cmd_apikey(int argc, char **argv)
 	return 0;
 }
 
+/* scraper.conf holds the source and the Cover Region. */
+static int save_settings(int provider, const char *region)
+{
+	char text[96];
+
+	snprintf(text, sizeof(text), "PROVIDER=%s\nREGION=%s\n", provider_ids[provider], region);
+	if (ensure_state_dir() != 0 || write_file(SETTINGS_FILE, text, false) != 0) {
+		puts("ERR storage");
+		return 1;
+	}
+	puts("OK");
+	return 0;
+}
+
+static int cmd_region(int argc, char **argv)
+{
+	if (argc == 4 && !strcmp(argv[2], "set"))
+		for (int i = 0; region_ids[i]; i++)
+			if (!strcmp(argv[3], region_ids[i]))
+				return save_settings(active_provider(), region_ids[i]);
+	fprintf(stderr, "Usage: nuubos-scraper region set auto|us|eu|jp|wor\n");
+	return 2;
+}
+
 static int cmd_provider(int argc, char **argv)
 {
-	char text[64];
+	char region[8];
 
+	cover_region(region, sizeof(region));
 	if (argc == 4 && !strcmp(argv[2], "set"))
 		for (int i = 0; i < PROV_COUNT; i++)
-			if (!strcmp(argv[3], provider_ids[i])) {
-				snprintf(text, sizeof(text), "PROVIDER=%s\n", provider_ids[i]);
-				if (ensure_state_dir() != 0 || write_file(SETTINGS_FILE, text, false) != 0) {
-					puts("ERR storage");
-					return 1;
-				}
-				puts("OK");
-				return 0;
-			}
+			if (!strcmp(argv[3], provider_ids[i]))
+				return save_settings(i, region);
 	if (argc == 3 && !strcmp(argv[2], "status")) {
 		print_status();
 		return 0;
@@ -2535,6 +2615,8 @@ int main(int argc, char **argv)
 		rc = cmd_reject_or_clear(argv[2], true);
 	else if (argc == 3 && !strcmp(argv[1], "clear"))
 		rc = cmd_reject_or_clear(argv[2], false);
+	else if (argc >= 3 && !strcmp(argv[1], "region"))
+		rc = cmd_region(argc, argv);
 	else if (argc >= 3 && !strcmp(argv[1], "account"))
 		rc = cmd_account(argc, argv);
 	else if (argc >= 3 && !strcmp(argv[1], "apikey"))
@@ -2543,7 +2625,7 @@ int main(int argc, char **argv)
 		rc = cmd_provider(argc, argv);
 	else
 		fprintf(stderr, "Usage: nuubos-scraper game GAME [force|fill] | bulk all|missing|system:ID | "
-				"search GAME | accept|reject|clear GAME | provider status|set NAME | "
+				"search GAME | accept|reject|clear GAME | provider status|set NAME | region set REGION | "
 				"account status|clear|set NAME | apikey set|clear\n");
 	curl_global_cleanup();
 	return rc;

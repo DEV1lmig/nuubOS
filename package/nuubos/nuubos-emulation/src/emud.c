@@ -92,6 +92,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/inotify.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -297,6 +298,10 @@ static const struct {
 	{ "Top Only", "single" },
 };
 #define NDS_LAYOUTS (int)(sizeof(nds_layouts) / sizeof(nds_layouts[0]))
+/* Picture in Picture: the small screen's corner (GitHub #5, core option
+ * melonds_nuubos_pip_corner, patch 0023); the first is the default. */
+static const char *const nds_corners[] = { "bottom-right", "bottom-left", "top-right", "top-left" };
+#define NDS_CORNERS (int)(sizeof(nds_corners) / sizeof(nds_corners[0]))
 
 static const char *const overlay_fields[] = {
 	"fps", "cpu", "gpu", "ram", "temp", "power", "battery", "clock", NULL,
@@ -418,6 +423,7 @@ struct session {
 	/* Per-game Square Pixels: NUUBOS_RA_PIXEL_CROP (patch 0014). */
 	bool pixel_crop;
 	int nds_layout;
+	int nds_corner;
 	bool stylus;
 	char stylus_control[8];
 	/* Disc control (multi-disc games, RetroArch patch 0013): the disc
@@ -465,12 +471,17 @@ struct game_overrides {
 	 * its next launch (user request 2026-10-18). */
 	char nds_layout[16];
 	char stylus[8];
+	/* Picture in Picture corner (nds_corners), "" = bottom right. */
+	char nds_corner[16];
 	/* Nintendo 64: the accessory in the controllers' slot, rumble (the
 	 * default, empty) or memory (Controller Pak saves). One slot, as on the
 	 * console (user request 2026-10-21: "scelta per gioco"). */
 	char n64_pak[8];
 	/* 3D render resolution: "" (Auto), "1x" or "2x". */
 	char resolution[8];
+	/* Frame-rate aware CPU limit: the step the game needed, its next
+	 * launch starts there (no stutter at every launch while it climbs). */
+	char cpu_level[4];
 };
 
 /* Cores whose 3D render resolution Game Settings chooses (user decision
@@ -569,6 +580,18 @@ static void trim(char *text)
 	while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r' ||
 			   isspace((unsigned char)text[len - 1])))
 		text[--len] = '\0';
+}
+
+/* fclose() after the data reached the card. /userdata is exFAT: a file
+ * renamed over the old one before its data was written comes back empty
+ * after a crash or a power loss (the emulation settings, 2026-10-29). */
+static int close_synced(FILE *fp)
+{
+	int rc = fflush(fp) != 0 || fsync(fileno(fp)) != 0 ? -1 : 0;
+
+	if (fclose(fp) != 0)
+		rc = -1;
+	return rc;
 }
 
 static int write_all(int fd, const char *data, size_t len)
@@ -724,7 +747,7 @@ static bool update_core_option(const char *path, const char *key,
 		}
 	}
 	fclose(in);
-	if (fclose(out) != 0 || (changed && rename(tmp, path) != 0)) {
+	if (close_synced(out) != 0 || (changed && rename(tmp, path) != 0)) {
 		unlink(tmp);
 		return false;
 	}
@@ -826,7 +849,7 @@ static void write_core_option(const char *path, const char *key, const char *val
 	if (!done)
 		fprintf(out, "%s = \"%s\"\n", key, value);
 	fclose(in);
-	if (fclose(out) != 0 || rename(tmp, path) != 0)
+	if (close_synced(out) != 0 || rename(tmp, path) != 0)
 		unlink(tmp);
 }
 
@@ -1059,6 +1082,7 @@ static size_t build_status(char *out, size_t size)
 			 "netplay_peers=%d\n"
 			 "netplay_peer=%s\n"
 			 "nds_layout=%d\n"
+			 "nds_corner=%d\n"
 			 "stylus=%s\n"
 			 "disc=%d\n"
 			 "discs=%d\n"
@@ -1088,6 +1112,7 @@ static size_t build_status(char *out, size_t size)
 			 /* melonDS-nuubOS only (Quick Menu rows), else -1/off. */
 			 session.state != SESSION_IDLE && !strcmp(session.core, MELONDS_NUUBOS)
 			 ? session.nds_layout : -1,
+			 session.nds_corner,
 			 session.state != SESSION_IDLE && session.stylus ? session.stylus_control : "off",
 			 session.disc, session.discs,
 			 /* The game is closing: quit asked (its automatic save may
@@ -1275,6 +1300,32 @@ static bool read_active_user(char *out, size_t size)
 	return out[0] != '\0';
 }
 
+/* Data on SD2 (nuubos-storagectl, GitHub #24): BIOS files, saves or states
+ * on the SD2 card while it is away (or moving): a game would start without
+ * them and write nowhere, so it waits for the card. */
+static bool data_away(void)
+{
+	FILE *fp = fopen("/run/nuubos/storage/data.status", "r");
+	char line[256], on[160] = "", state[32] = "";
+
+	if (!fp)
+		return false;
+	while (fgets(line, sizeof(line), fp)) {
+		trim(line);
+		if (!strncmp(line, "DATA_ON=", 8))
+			copy_text(on, sizeof(on), line + 8);
+		else if (!strncmp(line, "DATA_STATE=", 11))
+			copy_text(state, sizeof(state), line + 11);
+	}
+	fclose(fp);
+	if (strcmp(state, "offline") && strcmp(state, "moving"))
+		return false;
+	for (char *tok = strtok(on, ","); tok; tok = strtok(NULL, ","))
+		if (!strcmp(tok, "bios") || !strcmp(tok, "saves") || !strcmp(tok, "states"))
+			return true;
+	return false;
+}
+
 /* Systems whose frames keep the H700 GPU or CPU near its limit: they keep
  * the default swap order (see NUUBOS_SWAP_WAIT_AFTER at the launch). */
 static bool heavy_system(const char *system)
@@ -1296,15 +1347,21 @@ static bool heavy_system(const char *system)
  * keep their full frame rate at 1032 (CubeXX 2026-10-28). A game starts
  * capped at the lowest step and goes up a step in the first second with
  * RetroArch's audio buffer running low (the emulation falls behind real
- * time: the same signal the cores' auto frameskip uses); it never goes back
- * down in a session (a needless step costs a little power, a late one a
- * visible stutter). Launch, state loads, resume from pause and
+ * time: the same signal the cores' auto frameskip uses) or with fewer
+ * frames than the core's nominal rate (cores that drop frames to keep real
+ * time, e.g. parallel-n64 at 480 MHz: 30 of 50 fps with the audio intact);
+ * it never goes back down in a session (a needless step costs a little
+ * power, a late one a visible stutter), and the game's next launch starts at
+ * the step it reached (games/<game>.conf cpu_level; Reset in Game Settings
+ * forgets it). Launch, state loads, resume from pause and
  * fast-forward run uncapped. power.sh applies the file as one more upper
  * limit next to the profile and the screen-off cap. */
 #define GAME_CPU_FILE RUN_ROOT "/game-cpu-max"
 #define GAME_CPU_LEVELS 3
-/* Frames with the audio buffer below 25 % in a one-second check. */
+/* Frames with the audio buffer below 33 % in a one-second check. */
 #define GAME_CPU_LOW_FRAMES 3
+/* Frames presented below this share of the core's nominal rate. */
+#define GAME_CPU_MIN_FPS_RATIO 0.9
 #define GAME_CPU_START_GRACE_MS 10000
 #define GAME_CPU_GRACE_MS 3000
 
@@ -1363,6 +1420,30 @@ static void game_cpu_apply(int khz)
 	}
 }
 
+/* BIOS files left in the root of the bios folder (as other systems keep
+ * them) copied where the core looks (GitHub #26, nuubos-biosctl place). */
+static void place_bios(const char *system)
+{
+	int status;
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR | O_CLOEXEC);
+
+		if (null >= 0) {
+			dup2(null, STDIN_FILENO);
+			dup2(null, STDOUT_FILENO);
+			dup2(null, STDERR_FILENO);
+		}
+		execl("/usr/bin/nuubos-biosctl", "nuubos-biosctl", "place", system, (char *)NULL);
+		_exit(127);
+	}
+	/* Waited for here, before RetroArch starts (the main loop's reaper
+	 * never sees this child first). */
+	while (pid > 0 && waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+}
+
 static void game_cpu_grace(long long ms)
 {
 	long long until = monotonic_ms() + ms;
@@ -1381,24 +1462,42 @@ static void game_cpu_update(void)
 	game_cpu_apply(khz);
 }
 
+static void load_overrides(const char *user, const char *game, struct game_overrides *o);
+static int save_overrides(const char *user, const char *game, const struct game_overrides *o);
+
+/* The step the game reached, for its next launch. */
+static void game_cpu_remember(void)
+{
+	struct game_overrides o;
+
+	if (!session.game[0])
+		return;
+	load_overrides(session.user, session.game, &o);
+	snprintf(o.cpu_level, sizeof(o.cpu_level), "%d", session.cpu_level);
+	if (save_overrides(session.user, session.game, &o) != 0)
+		log_msg("emud: saving the CPU step of %s failed", session.game);
+}
+
 /* A game below the top step is asked for its frame rate once a second. */
 static bool game_cpu_watching(void)
 {
 	return !session.menu && session.cpu_level < GAME_CPU_LEVELS - 1;
 }
 
-/* One GET_FPS reply a second: frames that ran with the audio buffer low. */
-static void game_cpu_check(unsigned low)
+/* One GET_FPS reply a second: frames presented, frames that ran with the
+ * audio buffer low, the core's nominal frame rate. */
+static void game_cpu_check(double fps, unsigned low, double nominal)
 {
 	if (session.state != SESSION_RUNNING || session.menu || session.paused ||
 	    session.fast_forward || session.cpu_level >= GAME_CPU_LEVELS - 1 ||
 	    monotonic_ms() < session.cpu_grace_ms)
 		return;
-	if (low < GAME_CPU_LOW_FRAMES)
+	if (low < GAME_CPU_LOW_FRAMES && !(nominal > 0 && fps < nominal * GAME_CPU_MIN_FPS_RATIO))
 		return;
 	session.cpu_level++;
-	log_msg("emud: %s behind (%u low audio frames), CPU limit %d kHz", session.system,
-		low, game_cpu_caps[session.cpu_level]);
+	game_cpu_remember();
+	log_msg("emud: %s behind (%.1f of %.2f fps, %u low audio frames), CPU limit %d kHz",
+		session.system, fps, nominal, low, game_cpu_caps[session.cpu_level]);
 	game_cpu_grace(GAME_CPU_GRACE_MS);
 	game_cpu_update();
 }
@@ -1714,10 +1813,14 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 			copy_text(o->nds_layout, sizeof(o->nds_layout), eq);
 		else if (!strcmp(line, "stylus"))
 			copy_text(o->stylus, sizeof(o->stylus), eq);
+		else if (!strcmp(line, "nds_corner"))
+			copy_text(o->nds_corner, sizeof(o->nds_corner), eq);
 		else if (!strcmp(line, "n64_pak"))
 			copy_text(o->n64_pak, sizeof(o->n64_pak), eq);
 		else if (!strcmp(line, "resolution"))
 			copy_text(o->resolution, sizeof(o->resolution), eq);
+		else if (!strcmp(line, "cpu_level"))
+			copy_text(o->cpu_level, sizeof(o->cpu_level), eq);
 	}
 	fclose(fp);
 }
@@ -1733,8 +1836,8 @@ static int save_overrides(const char *user, const char *game, const struct game_
 	overrides_path(user, game, path, sizeof(path));
 	/* Nothing overridden: no file, the game inherits everything. */
 	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
-	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] &&
-	    !o->n64_pak[0] && !o->resolution[0])
+	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] && !o->nds_corner[0] &&
+	    !o->n64_pak[0] && !o->resolution[0] && !o->cpu_level[0])
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
 	if (mkdir_p(dir) != 0)
@@ -1759,13 +1862,17 @@ static int save_overrides(const char *user, const char *game, const struct game_
 		fprintf(fp, "nds_layout=%s\n", o->nds_layout);
 	if (o->stylus[0])
 		fprintf(fp, "stylus=%s\n", o->stylus);
+	if (o->nds_corner[0])
+		fprintf(fp, "nds_corner=%s\n", o->nds_corner);
 	if (o->n64_pak[0])
 		fprintf(fp, "n64_pak=%s\n", o->n64_pak);
 	if (o->resolution[0])
 		fprintf(fp, "resolution=%s\n", o->resolution);
+	if (o->cpu_level[0])
+		fprintf(fp, "cpu_level=%s\n", o->cpu_level);
 	if (ferror(fp))
 		rc = -1;
-	if (fclose(fp) != 0)
+	if (close_synced(fp) != 0)
 		rc = -1;
 	if (rc == 0 && rename(tmp, path) != 0)
 		rc = -1;
@@ -2017,7 +2124,7 @@ static int save_settings(const char *user, const struct emu_settings *e)
 		return -1;
 	if (fwrite(text, 1, len, fp) != len)
 		rc = -1;
-	if (fclose(fp) != 0)
+	if (close_synced(fp) != 0)
 		rc = -1;
 	if (rc == 0 && rename(tmp, path) != 0)
 		rc = -1;
@@ -2341,7 +2448,7 @@ static void apply_boot_options(const char *path, bool boot)
 			fprintf(out, "%s = \"%s\"\n", boot_options[i].key,
 				boot_option_on(i, boot) ? boot_options[i].on : boot_options[i].off);
 	fclose(in);
-	if (fclose(out) != 0 || rename(tmp, path) != 0)
+	if (close_synced(out) != 0 || rename(tmp, path) != 0)
 		unlink(tmp);
 }
 
@@ -2352,6 +2459,9 @@ static void apply_boot_options(const char *path, bool boot)
 struct achievements {
 	bool enabled;
 	bool hardcore;
+	bool offline;
+	/* RAOfflineProxy is up for this session: RetroArch talks to it. */
+	bool proxy;
 	char username[64];
 	char token[128];
 };
@@ -2368,6 +2478,7 @@ static void load_achievements(const char *user, struct achievements *a)
 	FILE *fp;
 
 	memset(a, 0, sizeof(*a));
+	a->offline = true;
 	snprintf(path, sizeof(path), STATE_USERS "/%s/" ACHIEVEMENTS_FILE, user);
 	fp = fopen(path, "r");
 	if (!fp)
@@ -2387,11 +2498,210 @@ static void load_achievements(const char *user, struct achievements *a)
 			a->enabled = !strcmp(eq, "1");
 		else if (!strcmp(line, "HARDCORE"))
 			a->hardcore = !strcmp(eq, "1");
+		else if (!strcmp(line, "OFFLINE"))
+			a->offline = !strcmp(eq, "1");
 	}
 	fclose(fp);
 	if (!a->username[0] || !a->token[0] || !cfg_value_safe(a->username) ||
 	    !cfg_value_safe(a->token))
 		a->enabled = false;
+}
+
+/* ------------------------------------------------------------------ */
+/* Offline achievements (RAOfflineProxy, GitHub #18)                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * RAOfflineProxy (GPL-3.0, its own process) sits between RetroArch and
+ * retroachievements.org for casual sessions of a user with Offline
+ * Achievements on (default): online it forwards and caches each game's
+ * data, offline it serves the cache and queues the unlocks, which it sends
+ * (backdated) once the server answers again. Hardcore never goes through
+ * it. Started at the first such launch and left running so the queue can
+ * drain after the game; restarted for another user or new credentials,
+ * stopped when not wanted. Its data (cache, queue, login) is the user's,
+ * in STATE: /state/users/<id>/secrets/raofflineproxy. RetroArch's
+ * credentials are in the session config only, so the proxy gets its own
+ * root-only copy in /run.
+ */
+#define RAPROXY_PORT 47380
+#define RAPROXY_RUN "/run/nuubos/raproxy"
+#define RAPROXY_CFG RAPROXY_RUN "/retroarch.cfg"
+
+static pid_t raproxy_pid = -1;
+static char raproxy_user[64];
+
+static void raproxy_kill(pid_t pid)
+{
+	kill(pid, SIGTERM);
+	for (int i = 0; i < 40 && waitpid(pid, NULL, WNOHANG) == 0; i++)
+		usleep(50000);
+	if (waitpid(pid, NULL, WNOHANG) == 0) {
+		kill(pid, SIGKILL);
+		waitpid(pid, NULL, 0);
+	}
+}
+
+static void raproxy_stop(void)
+{
+	if (raproxy_pid > 0) {
+		raproxy_kill(raproxy_pid);
+		log_msg("emud: offline achievements proxy stopped");
+	}
+	raproxy_pid = -1;
+	raproxy_user[0] = '\0';
+	unlink(RAPROXY_RUN "/pid");
+}
+
+/* One left by an earlier nuubos-emud (restarted): its pid file. */
+static void raproxy_stop_stale(void)
+{
+	char path[64], cmd[256] = "";
+	FILE *fp = fopen(RAPROXY_RUN "/pid", "r");
+	long pid = 0;
+	size_t n;
+
+	if (!fp)
+		return;
+	if (fscanf(fp, "%ld", &pid) != 1)
+		pid = 0;
+	fclose(fp);
+	unlink(RAPROXY_RUN "/pid");
+	snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid);
+	if (pid <= 1 || !(fp = fopen(path, "r")))
+		return;
+	n = fread(cmd, 1, sizeof(cmd) - 1, fp);
+	fclose(fp);
+	for (size_t i = 0; i < n; i++)
+		if (!cmd[i])
+			cmd[i] = ' ';
+	cmd[n] = '\0';
+	if (strstr(cmd, "raofflineproxy"))
+		kill((pid_t)pid, SIGTERM);
+}
+
+static bool raproxy_listening(void)
+{
+	struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(RAPROXY_PORT) };
+	int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	bool ok;
+
+	if (fd < 0)
+		return false;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	ok = connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0;
+	close(fd);
+	return ok;
+}
+
+/* The credentials file the proxy reads (root only); *changed when it was
+ * different (a new login). */
+static bool raproxy_write_cfg(const struct achievements *a, bool *changed)
+{
+	char text[512], old[512] = "";
+	FILE *fp;
+	size_t n;
+
+	snprintf(text, sizeof(text),
+		 "cheevos_enable = \"true\"\ncheevos_username = \"%s\"\ncheevos_token = \"%s\"\n"
+		 "cheevos_hardcore_mode_enable = \"false\"\n", a->username, a->token);
+	if ((fp = fopen(RAPROXY_CFG, "r"))) {
+		n = fread(old, 1, sizeof(old) - 1, fp);
+		old[n] = '\0';
+		fclose(fp);
+	}
+	*changed = strcmp(old, text) != 0;
+	if (!*changed)
+		return true;
+	if (mkdir(RAPROXY_RUN, 0700) != 0 && errno != EEXIST)
+		return false;
+	umask(077);
+	fp = fopen(RAPROXY_CFG ".tmp", "w");
+	umask(022);
+	if (!fp)
+		return false;
+	fputs(text, fp);
+	return fclose(fp) == 0 && rename(RAPROXY_CFG ".tmp", RAPROXY_CFG) == 0;
+}
+
+/* Up for this user's casual session, or stopped when not wanted. True when
+ * RetroArch should talk to it. */
+static bool raproxy_ensure(const char *user, const struct achievements *a)
+{
+	char dir[PATH_MAX], path[PATH_MAX];
+	bool changed = false;
+	FILE *fp;
+	pid_t pid;
+
+	if (raproxy_pid < 0)
+		raproxy_stop_stale();
+	if (!a->enabled || a->hardcore || !a->offline || access("/usr/bin/python3", X_OK) != 0) {
+		raproxy_stop();
+		unlink(RAPROXY_CFG);
+		return false;
+	}
+	if (raproxy_pid > 0 && (strcmp(raproxy_user, user) || waitpid(raproxy_pid, NULL, WNOHANG) != 0))
+		raproxy_stop();
+	if (!raproxy_write_cfg(a, &changed)) {
+		raproxy_stop();
+		return false;
+	}
+	if (raproxy_pid > 0 && !changed && raproxy_listening())
+		return true;
+	raproxy_stop();
+	snprintf(dir, sizeof(dir), STATE_USERS "/%s/secrets/raofflineproxy", user);
+	if (mkdir_p(dir) != 0)
+		return false;
+	chmod(dir, 0700);
+	/* Its own settings: this port, these credentials, never usage reports
+	 * (the uploads are also taken out of the nuubOS build). */
+	snprintf(path, sizeof(path), "%s/config.json", dir);
+	if ((fp = fopen(path, "w"))) {
+		fprintf(fp, "{\"proxy_host\": \"127.0.0.1\", \"proxy_port\": %d, \"retroarch_cfg\": \"%s\", "
+			    "\"usage_report_url\": \"\", \"usage_stats_consent\": false}\n", RAPROXY_PORT, RAPROXY_CFG);
+		fclose(fp);
+	}
+	pid = fork();
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR);
+
+		setsid();
+		if (null >= 0) {
+			dup2(null, 0);
+			dup2(null, 1);
+			dup2(null, 2);
+		}
+		/* Never in the way of the game. */
+		setpriority(PRIO_PROCESS, 0, 10);
+		setenv("RAOFFLINEPROXY_CONFIG_DIR", dir, 1);
+		setenv("RAOFFLINEPROXY_RETROARCH_CFG", RAPROXY_CFG, 1);
+		setenv("HOME", dir, 1);
+		execl("/usr/bin/python3", "python3", "-m", "raofflineproxy.main", "run-service", (char *)NULL);
+		_exit(127);
+	}
+	if (pid < 0)
+		return false;
+	raproxy_pid = pid;
+	copy_text(raproxy_user, sizeof(raproxy_user), user);
+	if ((fp = fopen(RAPROXY_RUN "/pid", "w"))) {
+		fprintf(fp, "%d\n", (int)pid);
+		fclose(fp);
+	}
+	/* Python starts in about a second on the H700. */
+	for (int i = 0; i < 100; i++) {
+		if (raproxy_listening()) {
+			log_msg("emud: offline achievements proxy up for %s", user);
+			return true;
+		}
+		if (waitpid(pid, NULL, WNOHANG) != 0) {
+			raproxy_pid = -1;
+			break;
+		}
+		usleep(50000);
+	}
+	log_msg("emud: offline achievements proxy did not start, direct connection");
+	raproxy_stop();
+	return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2484,7 +2794,7 @@ static void restore_user_keys(void)
 		}
 	}
 	fclose(in);
-	if (fclose(out) == 0 && rename(tmp, session.ra_cfg) == 0)
+	if (close_synced(out) == 0 && rename(tmp, session.ra_cfg) == 0)
 		log_msg("emud: restored %d user RetroArch keys", session.restore_count);
 	else
 		unlink(tmp);
@@ -2625,6 +2935,7 @@ static void write_session_overrides(FILE *fp, const struct achievements *a)
 	remember_key("cheevos_token");
 	remember_key("cheevos_password");
 	remember_key("cheevos_hardcore_mode_enable");
+	remember_key("cheevos_custom_host");
 	if (a->enabled) {
 		fprintf(fp,
 			"cheevos_enable = \"true\"\n"
@@ -2633,6 +2944,11 @@ static void write_session_overrides(FILE *fp, const struct achievements *a)
 			"cheevos_password = \"\"\n"
 			"cheevos_hardcore_mode_enable = \"%s\"\n",
 			a->username, a->token, a->hardcore ? "true" : "false");
+		/* Offline achievements: through the local proxy (casual only). */
+		if (a->proxy && !a->hardcore)
+			fprintf(fp, "cheevos_custom_host = \"127.0.0.1:%d\"\n", RAPROXY_PORT);
+		else
+			fprintf(fp, "cheevos_custom_host = \"\"\n");
 	} else {
 		fprintf(fp, "cheevos_enable = \"false\"\n"
 			    "cheevos_token = \"\"\n"
@@ -2947,17 +3263,18 @@ static void handle_ra_reply(char *line)
 		return;
 	}
 	if (!strncmp(line, "GET_FPS ", 8)) {
-		/* "GET_FPS <fps> <frames with the audio buffer low>" (RetroArch
-		 * patches 0003 and 0015). The snapshot changes only for the
-		 * overlay: no Quick Menu wakeup a second otherwise. */
-		double fps = 0;
+		/* "GET_FPS <fps> <frames with the audio buffer low> <nominal
+		 * fps>" (RetroArch patches 0003 and 0015). The snapshot changes
+		 * only for the overlay: no Quick Menu wakeup a second otherwise. */
+		double fps = 0, nominal = 0;
 		unsigned low = 0;
 
-		if (sscanf(line + 8, "%lf %u", &fps, &low) >= 1 && session.settings.overlay) {
+		if (sscanf(line + 8, "%lf %u %lf", &fps, &low, &nominal) >= 1 &&
+		    session.settings.overlay) {
 			session.fps = fps;
 			notify_subscribers();
 		}
-		game_cpu_check(low);
+		game_cpu_check(fps, low, nominal);
 		return;
 	}
 	if (sscanf(line, "SET_PAUSED %d", &slot) == 1) {
@@ -3806,6 +4123,8 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		return "game";
 	if (!read_active_user(session.user, sizeof(session.user)))
 		return "no-user";
+	if (data_away())
+		return "data";
 	load_settings(session.user, &session.settings);
 
 	snprintf(command, sizeof(command), "RESOLVE\t%s", game);
@@ -3834,6 +4153,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	session.hardcore = achievements.enabled && achievements.hardcore;
 	if (session.hardcore && !strncmp(mode, "slot:", 5))
 		return "hardcore";
+	achievements.proxy = raproxy_ensure(session.user, &achievements);
 	/* Joining: the host's emulator, whatever the game's choice. */
 	if (net_core[0]) {
 		char cores[512];
@@ -3882,6 +4202,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	    mkdir_p(BIOS_DIR) != 0)
 		return "storage";
 	wait_system_seed(session.core);
+	place_bios(session.system);
 	snprintf(path, sizeof(path), "%s/retroarch.cfg", ra_dir);
 	if (seed_file(DEFAULT_RA_CFG, path) != 0)
 		return "storage";
@@ -3912,6 +4233,11 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		}
 		write_core_option(path, "melonds_nuubos_stylus",
 				  session.stylus ? session.stylus_control : "off");
+		session.nds_corner = 0;
+		for (int i = 0; i < NDS_CORNERS; i++)
+			if (!strcmp(overrides.nds_corner, nds_corners[i]))
+				session.nds_corner = i;
+		write_core_option(path, "melonds_nuubos_pip_corner", nds_corners[session.nds_corner]);
 		if (read_core_option(path, "melonds_screen_layout", value, sizeof(value)))
 			for (int i = 0; i < NDS_LAYOUTS; i++)
 				if (!strcmp(value, nds_layouts[i].value))
@@ -4084,6 +4410,9 @@ static const char *launch(const char *game, const char *mode, const char *net)
 	session.overlay_tick_ms = monotonic_ms() + OVERLAY_TICK_MS;
 	session.fast_forward = false;
 	session.cpu_level = full_clock_system(session.system) ? GAME_CPU_LEVELS - 1 : 0;
+	if (atoi(overrides.cpu_level) > session.cpu_level)
+		session.cpu_level = atoi(overrides.cpu_level) < GAME_CPU_LEVELS ?
+				    atoi(overrides.cpu_level) : GAME_CPU_LEVELS - 1;
 	game_cpu_grace(GAME_CPU_START_GRACE_MS);
 	session.started_ms = monotonic_ms();
 	copy_text(session.net_launch, sizeof(session.net_launch), net_address[0] ? "connect" : net);
@@ -4442,6 +4771,11 @@ static void reap_children(void)
 			child_exited(status);
 		else if (pid == seed_pid)
 			seed_pid = -1;
+		else if (pid == raproxy_pid) {
+			log_msg("emud: offline achievements proxy exited");
+			raproxy_pid = -1;
+			raproxy_user[0] = '\0';
+		}
 	}
 }
 
@@ -4600,6 +4934,7 @@ static void save_nds_choice(void)
 	load_overrides(session.user, session.game, &o);
 	copy_text(o.nds_layout, sizeof(o.nds_layout), nds_layouts[session.nds_layout].name);
 	copy_text(o.stylus, sizeof(o.stylus), session.stylus ? session.stylus_control : "off");
+	copy_text(o.nds_corner, sizeof(o.nds_corner), session.nds_corner ? nds_corners[session.nds_corner] : "");
 	if (save_overrides(session.user, session.game, &o) != 0)
 		log_msg("emud: saving the NDS layout of %s failed", session.game);
 }
@@ -4613,6 +4948,17 @@ static void set_nds_layout(int layout)
 	ra_command("SET_CORE_OPTION melonds_screen_layout %s",
 		   nds_layouts[layout].value);
 	notify_screens(layout);
+	notify_subscribers();
+}
+
+/* Picture in Picture corner, live (Quick Menu, GitHub #5). */
+static void set_nds_corner(int corner)
+{
+	if (corner < 0 || corner >= NDS_CORNERS)
+		return;
+	session.nds_corner = corner;
+	save_nds_choice();
+	ra_command("SET_CORE_OPTION melonds_nuubos_pip_corner %s", nds_corners[corner]);
 	notify_subscribers();
 }
 
@@ -5515,6 +5861,17 @@ static void handle_command(struct client *c, char *line)
 			return;
 		}
 		set_nds_layout(atoi(arg));
+		reply(c, "OK\n");
+	} else if (!strcmp(line, "NDS_CORNER") && arg) {
+		/* NDS_CORNER <index of nds_corners> (Quick Menu, Picture in
+		 * Picture only). */
+		if (!running(c))
+			return;
+		if (strcmp(session.core, MELONDS_NUUBOS) != 0) {
+			reply(c, "ERR core\n");
+			return;
+		}
+		set_nds_corner(atoi(arg));
 		reply(c, "OK\n");
 	} else if (!strcmp(line, "HOTKEY") && arg) {
 		/* A game hotkey by name, as inputd sends it (tests, remote). */
