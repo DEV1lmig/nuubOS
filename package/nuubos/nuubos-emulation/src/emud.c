@@ -543,6 +543,8 @@ struct game_overrides {
 	char n64_pak[8];
 	/* 3D render resolution: "" (Auto), "1x" or "2x". */
 	char resolution[8];
+	/* Frameskip: "" (the user's core option), "off", "auto" or "max". */
+	char frameskip[8];
 	/* Frame-rate aware CPU limit: the step the game needed, its next
 	 * launch starts there (no stutter at every launch while it climbs). */
 	char cpu_level[4];
@@ -616,6 +618,47 @@ static const struct resolution_option *resolution_option(const char *core)
 			return &resolution_options[i];
 	return NULL;
 }
+
+/* Cores whose frameskip Game Settings chooses (user decision 2026-10-29,
+ * GitHub #23): Off, Auto (a frame skipped only while the emulation falls
+ * behind, at most one in a row) or Max (the same, up to three in a row).
+ * Up to two options per core, their values for off/auto/max, and the value
+ * a key RetroArch has not written yet holds (the core's default). */
+enum { FRAMESKIP_OFF, FRAMESKIP_AUTO, FRAMESKIP_MAX, FRAMESKIP_MODES };
+static const char *const frameskip_modes[FRAMESKIP_MODES] = { "off", "auto", "max" };
+
+static const struct frameskip_option {
+	const char *core;
+	const char *key[2];
+	const char *value[2][FRAMESKIP_MODES];
+	const char *initial[2];
+} frameskip_options[] = {
+	{ MELONDS_NUUBOS, { "melonds_frameskip", NULL },
+	  { { "disabled", "auto", "auto_max" } }, { "disabled" } },
+	{ "flycast", { "reicast_frame_skipping", NULL },
+	  { { "disabled", "auto", "auto_max" } }, { "disabled" } },
+	{ "ppsspp", { "ppsspp_auto_frameskip", "ppsspp_frameskip" },
+	  { { "disabled", "enabled", "enabled" }, { "disabled", "1", "3" } }, { "disabled", "disabled" } },
+	{ "pcsx_rearmed", { "pcsx_rearmed_frameskip_type", "pcsx_rearmed_frameskip_interval" },
+	  { { "disabled", "auto", "auto" }, { NULL, "1", "3" } }, { "disabled", "3" } },
+};
+
+static const struct frameskip_option *frameskip_option(const char *core)
+{
+	for (size_t i = 0; i < sizeof(frameskip_options) / sizeof(frameskip_options[0]); i++)
+		if (!strncmp(core, frameskip_options[i].core, strlen(frameskip_options[i].core)))
+			return &frameskip_options[i];
+	return NULL;
+}
+
+static int frameskip_mode(const char *name)
+{
+	for (int m = 0; m < FRAMESKIP_MODES; m++)
+		if (!strcmp(name, frameskip_modes[m]))
+			return m;
+	return -1;
+}
+
 
 
 static volatile sig_atomic_t stop_requested;
@@ -943,6 +986,26 @@ static void write_core_option(const char *path, const char *key, const char *val
 	fclose(in);
 	if (close_synced(out) != 0 || rename(tmp, path) != 0)
 		unlink(tmp);
+}
+
+/* The mode the user's core options give: off, auto, max or custom. */
+static const char *frameskip_default(const struct frameskip_option *fs, const char *options)
+{
+	char value[2][64];
+
+	for (int k = 0; k < 2 && fs->key[k]; k++)
+		if (!read_core_option(options, fs->key[k], value[k], sizeof(value[k])))
+			copy_text(value[k], sizeof(value[k]), fs->initial[k]);
+	for (int m = 0; m < FRAMESKIP_MODES; m++) {
+		bool match = true;
+
+		for (int k = 0; k < 2 && fs->key[k]; k++)
+			if (fs->value[k][m] && strcmp(value[k], fs->value[k][m]))
+				match = false;
+		if (match)
+			return frameskip_modes[m];
+	}
+	return "custom";
 }
 
 /* Sets a core option for this session only: the user's value comes back
@@ -1909,6 +1972,8 @@ static void load_overrides_at(const char *path, struct game_overrides *o)
 			copy_text(o->n64_pak, sizeof(o->n64_pak), eq);
 		else if (!strcmp(line, "resolution"))
 			copy_text(o->resolution, sizeof(o->resolution), eq);
+		else if (!strcmp(line, "frameskip"))
+			copy_text(o->frameskip, sizeof(o->frameskip), eq);
 		else if (!strcmp(line, "cpu_level"))
 			copy_text(o->cpu_level, sizeof(o->cpu_level), eq);
 		else if (!strncmp(line, "remap_", 6) && remap_index(line + 6) >= 0)
@@ -1943,12 +2008,13 @@ static void load_system_overrides(const char *user, const char *system, struct g
 static bool system_keys_set(const struct game_overrides *o)
 {
 	return o->core[0] || o->aspect[0] || o->filter[0] || o->accuracy[0] || o->n64_pak[0] || o->resolution[0] ||
-	       remap_set(o);
+	       o->frameskip[0] || remap_set(o);
 }
 
 static void clear_system_keys(struct game_overrides *o)
 {
 	o->core[0] = o->aspect[0] = o->filter[0] = o->accuracy[0] = o->n64_pak[0] = o->resolution[0] = '\0';
+	o->frameskip[0] = '\0';
 	memset(o->remap, 0, sizeof(o->remap));
 }
 
@@ -1967,6 +2033,8 @@ static void inherit_system(struct game_overrides *o, const struct game_overrides
 		copy_text(o->n64_pak, sizeof(o->n64_pak), sys->n64_pak);
 	if (!o->resolution[0])
 		copy_text(o->resolution, sizeof(o->resolution), sys->resolution);
+	if (!o->frameskip[0])
+		copy_text(o->frameskip, sizeof(o->frameskip), sys->frameskip);
 	for (int i = 0; i < REMAP_COUNT; i++)
 		if (!o->remap[i][0])
 			copy_text(o->remap[i], sizeof(o->remap[i]), sys->remap[i]);
@@ -1981,7 +2049,7 @@ static int save_overrides_at(const char *dir, const char *path, const struct gam
 	/* Nothing overridden: no file, everything is inherited. */
 	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
 	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] && !o->nds_corner[0] &&
-	    !o->n64_pak[0] && !o->resolution[0] && !o->cpu_level[0] && !remap_set(o))
+	    !o->n64_pak[0] && !o->resolution[0] && !o->frameskip[0] && !o->cpu_level[0] && !remap_set(o))
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 	if (mkdir_p(dir) != 0)
 		return -1;
@@ -2011,6 +2079,8 @@ static int save_overrides_at(const char *dir, const char *path, const struct gam
 		fprintf(fp, "n64_pak=%s\n", o->n64_pak);
 	if (o->resolution[0])
 		fprintf(fp, "resolution=%s\n", o->resolution);
+	if (o->frameskip[0])
+		fprintf(fp, "frameskip=%s\n", o->frameskip);
 	if (o->cpu_level[0])
 		fprintf(fp, "cpu_level=%s\n", o->cpu_level);
 	for (int i = 0; i < REMAP_COUNT; i++)
@@ -4486,6 +4556,21 @@ static const char *launch(const char *game, const char *mode, const char *net)
 			session_core_option(res->key, !strcmp(choice, "2x") ? res->x2 : res->x1);
 		}
 	}
+	{
+		/* Frameskip for this session: the game's (or its system's)
+		 * choice; none = the user's core options. */
+		const struct frameskip_option *fs = frameskip_option(session.core);
+		int mode = frameskip_mode(overrides.frameskip);
+		char value[64];
+
+		for (int k = 0; fs && mode >= 0 && k < 2 && fs->key[k]; k++) {
+			if (!fs->value[k][mode])
+				continue;
+			if (!read_core_option(path, fs->key[k], value, sizeof(value)))
+				write_core_option(path, fs->key[k], fs->initial[k]);
+			session_core_option(fs->key[k], fs->value[k][mode]);
+		}
+	}
 
 	snprintf(path, sizeof(path), "%s/config/global.glslp", ra_dir);
 	(void)seed_file(DEFAULT_SHADER_PRESET, path);
@@ -5379,6 +5464,7 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 		char res_value[64];
 		const char *res_default = "";
 		const struct resolution_option *res;
+		const struct frameskip_option *fs;
 		const char *effective;
 		struct emu_settings settings;
 		char screen[16];
@@ -5419,6 +5505,7 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 				      !strcmp(res_value, res->x2) ? "2x" : "custom";
 		else if (res)
 			res_default = "1x";
+		fs = frameskip_option(effective);
 		remap_list(&o, remap, sizeof(remap));
 		remap_list(&sys, system_remap, sizeof(system_remap));
 		len = snprintf(out, sizeof(out),
@@ -5427,8 +5514,9 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 			       "accuracy_supported=%d\naccuracy=%s\naccuracy_default=%s\n"
 			       "pak_supported=%d\npak=%s\n"
 			       "resolution_supported=%d\nresolution=%s\nresolution_default=%s\n"
+			       "frameskip_supported=%d\nframeskip=%s\nframeskip_default=%s\n"
 			       "system_core=%s\nsystem_aspect=%s\nsystem_filter=%s\nsystem_accuracy=%s\n"
-			       "system_pak=%s\nsystem_resolution=%s\ngames=%d\n"
+			       "system_pak=%s\nsystem_resolution=%s\nsystem_frameskip=%s\ngames=%d\n"
 			       "pad=%s\nremap=%s\nsystem_remap=%s\nend=1\n",
 			       effective, def_core, o.core, cores, o.aspect, o.filter,
 			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp",
@@ -5436,8 +5524,9 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 			       o.accuracy, accuracy_default,
 			       !strcmp(system, "n64"), o.n64_pak,
 			       res != NULL, o.resolution, res_default,
+			       fs != NULL, o.frameskip, fs ? frameskip_default(fs, def_path) : "",
 			       sys.core[0] && list_has(cores, sys.core) ? sys.core : "", sys.aspect, sys.filter,
-			       sys.accuracy, sys.n64_pak, sys.resolution,
+			       sys.accuracy, sys.n64_pak, sys.resolution, sys.frameskip,
 			       scope_system ? system_games(user, system, false) : 0,
 			       system_pad(system), remap, system_remap);
 		if (len > 0 && write_all(c->fd, out, (size_t)len) != 0)
@@ -5471,6 +5560,8 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 	else if (!strcmp(key, "resolution") &&
 		 (!value[0] || !strcmp(value, "1x") || !strcmp(value, "2x")))
 		copy_text(o.resolution, sizeof(o.resolution), value);
+	else if (!strcmp(key, "frameskip") && (!value[0] || frameskip_mode(value) >= 0))
+		copy_text(o.frameskip, sizeof(o.frameskip), value);
 	/* Controls: "remap" clears them all (Reset Controls); remap_<control>
 	 * takes another control, "none" or "" (inherited). */
 	else if (!strcmp(key, "remap") && !value[0])

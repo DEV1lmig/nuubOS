@@ -59,7 +59,7 @@ fn settings_key(s: &str) -> Result<String, String> {
     if s.strip_prefix("remap_").is_some_and(|c| CONTROLS.contains(&c)) {
         return Ok(s.to_owned());
     }
-    one_of(s, &["core", "aspect", "filter", "accuracy", "pak", "resolution", "remap"])
+    one_of(s, &["core", "aspect", "filter", "accuracy", "pak", "resolution", "frameskip", "remap"])
 }
 
 fn flag(s: &str) -> Result<&'static str, String> {

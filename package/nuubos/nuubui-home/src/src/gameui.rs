@@ -109,6 +109,11 @@ struct Details {
     resolution_supported: bool,
     resolution: String,
     resolution_default: String,
+    /* Frameskip: "" = the user's core option, "off", "auto", "max"; the
+     * default is one of those or "custom". */
+    frameskip_supported: bool,
+    frameskip: String,
+    frameskip_default: String,
     /* System Settings (GitHub #12): the system's own values a game
      * inherits ("" = none), and for a system the games with their own. */
     system_core: String,
@@ -117,6 +122,7 @@ struct Details {
     system_accuracy: String,
     system_pak: String,
     system_resolution: String,
+    system_frameskip: String,
     games: i32,
     /* Controls (user request 2026-10-29): the system's pad buttons
      * (control, label: "" = the control's name, "#n" = string n) and the
@@ -361,12 +367,16 @@ fn parse_game_settings(reply: &str, d: &mut Details) {
             "resolution_supported" => d.resolution_supported = value == "1",
             "resolution" => d.resolution = value.into(),
             "resolution_default" => d.resolution_default = value.into(),
+            "frameskip_supported" => d.frameskip_supported = value == "1",
+            "frameskip" => d.frameskip = value.into(),
+            "frameskip_default" => d.frameskip_default = value.into(),
             "system_core" => d.system_core = value.into(),
             "system_aspect" => d.system_aspect = value.into(),
             "system_filter" => d.system_filter = value.into(),
             "system_accuracy" => d.system_accuracy = value.into(),
             "system_pak" => d.system_pak = value.into(),
             "system_resolution" => d.system_resolution = value.into(),
+            "system_frameskip" => d.system_frameskip = value.into(),
             "games" => d.games = value.parse().unwrap_or(0),
             "pad" => d.pad = pairs_list(value),
             "remap" => d.remap = pairs_list(value),
@@ -621,6 +631,13 @@ fn settings_rows(ui: &HomeWindow, st: &State, d: &Details, system: bool, rows: &
         }
         .into();
         rows.push(("resolution".into(), r, true));
+    }
+    if d.frameskip_supported {
+        let value = if !d.frameskip.is_empty() { frameskip_label(ui, &d.frameskip) }
+            else { inherited_label(ui, &d.system_frameskip, frameskip_label(ui, &d.system_frameskip), frameskip_label(ui, &d.frameskip_default)) };
+        let mut r = nav(tr(ui, 1464, "Frameskip"), value);
+        r.detail = tr(ui, 1466, "Auto skips frames only when the game slows down").into();
+        rows.push(("frameskip".into(), r, true));
     }
     /* Emulated games only (ports and applications have no game pad). */
     if !d.cores.is_empty() {
@@ -1601,6 +1618,25 @@ fn open_resolution_choice(ui: &HomeWindow) {
     open_settings_choice(ui, "game-resolution", &tr(ui, 454, "Resolution"), options, &d.resolution);
 }
 
+fn frameskip_label(ui: &HomeWindow, v: &str) -> String {
+    match v {
+        "auto" => tr(ui, 52, "Auto"),
+        "max" => tr(ui, 1465, "Auto (up to 3)"),
+        "custom" => tr(ui, 315, "Custom"),
+        _ => tr(ui, 54, "Off"),
+    }
+}
+
+fn open_frameskip_choice(ui: &HomeWindow) {
+    let d = scope_details(ui);
+    let mut options = vec![(String::new(), inherited_label(ui, &d.system_frameskip,
+        frameskip_label(ui, &d.system_frameskip), frameskip_label(ui, &d.frameskip_default)))];
+    for v in ["off", "auto", "max"] {
+        options.push((v.to_owned(), frameskip_label(ui, v)));
+    }
+    open_settings_choice(ui, "game-frameskip", &tr(ui, 1464, "Frameskip"), options, &d.frameskip);
+}
+
 /* Nintendo 64: Rumble Pak (the default, stored empty) or Controller Pak. */
 fn open_pak_choice(ui: &HomeWindow) {
     let d = scope_details(ui);
@@ -1723,6 +1759,7 @@ fn settings_confirm(ui: &HomeWindow, key: &str) -> bool {
         "accuracy" => open_accuracy_choice(ui),
         "pak" => open_pak_choice(ui),
         "resolution" => open_resolution_choice(ui),
+        "frameskip" => open_frameskip_choice(ui),
         "controls" => show_controls(ui, true),
         k if k.starts_with("ctl:") => open_remap_choice(ui, &k[4..]),
         "ctl-reset" => {
@@ -1761,6 +1798,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-accuracy" => game_set(ui, "accuracy", value),
         "game-pak" => game_set(ui, "pak", value),
         "game-resolution" => game_set(ui, "resolution", value),
+        "game-frameskip" => game_set(ui, "frameskip", value),
         c if c.starts_with("game-remap:") => game_set(ui, &format!("remap_{}", &c[11..]), value),
         "emu-slots" => emu_set(ui, "slots", value),
         "emu-position" => emu_set(ui, "position", value),

@@ -1462,3 +1462,6 @@
 1461=Triangle
 1462=Square
 1463=Custom
+1464=Frameskip
+1465=Auto (up to 3)
+1466=Auto skips frames only when the game slows down

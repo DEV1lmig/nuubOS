@@ -534,6 +534,7 @@ async function settingsPage(id, system, controls) {
   const accuracies = { fast: C(1315, 'Fast'), accurate: C(1316, 'Accurate') };
   const paks = { rumble: C(1340, 'Rumble Pak'), memory: C(1341, 'Controller Pak') };
   const resolutions = { auto: C(52, 'Auto'), '1x': C(1379, '1x'), '2x': C(1380, '2x'), custom: C(315, 'Custom') };
+  const frameskips = { off: C(54, 'Off'), auto: C(52, 'Auto'), max: C(1465, 'Auto (up to 3)'), custom: C(315, 'Custom') };
   const cores = (s.cores || '').split(/[ ,]/).filter(Boolean);
   const topic = sys ? 'system_settings' : 'game_settings';
   const set = (key, value) => (sys ? act('system.set', { system, key, value }, { topics: [topic] })
@@ -544,6 +545,7 @@ async function settingsPage(id, system, controls) {
   const filterInh = inh(s.system_filter, filters[s.system_filter], filters[s.filter_default] || '');
   const accInh = inh(s.system_accuracy, accuracies[s.system_accuracy], accuracies[s.accuracy_default] || accuracies.fast);
   const resInh = inh(s.system_resolution, resolutions[s.system_resolution], resolutions[s.resolution_default] || resolutions['1x']);
+  const skipInh = inh(s.system_frameskip, frameskips[s.system_frameskip], frameskips[s.frameskip_default] || frameskips.off);
   const pakOptions = s.system_pak
     ? [{ value: '', label: C(1448, 'System ({0})', paks[s.system_pak]) }, { value: 'rumble', label: paks.rumble }, { value: 'memory', label: paks.memory }]
     : [{ value: '', label: paks.rumble }, { value: 'memory', label: paks.memory }];
@@ -599,6 +601,9 @@ async function settingsPage(id, system, controls) {
         detail: s.resolution_default === 'auto' ? C(1381, 'Auto: 1x on the console, 2x on a TV') : C(1382, '2x is sharper but can slow the game down'),
         value: s.resolution ? resolutions[s.resolution] : resInh, chevron: true,
         on: () => pick('resolution', C(454, 'Resolution'), [{ value: '', label: resInh }, { value: '1x', label: resolutions['1x'] }, { value: '2x', label: resolutions['2x'] }], s.resolution) }) : null,
+      s.frameskip_supported === '1' ? row({ key: 'frameskip', title: C(1464, 'Frameskip'), detail: C(1466, 'Auto skips frames only when the game slows down'),
+        value: s.frameskip ? frameskips[s.frameskip] : skipInh, chevron: true,
+        on: () => pick('frameskip', C(1464, 'Frameskip'), [{ value: '', label: skipInh }, { value: 'off', label: frameskips.off }, { value: 'auto', label: frameskips.auto }, { value: 'max', label: frameskips.max }], s.frameskip || '') }) : null,
       cores.length ? row({ key: 'controls', title: C(1456, 'Controls'), detail: C(1457, 'Choose what each button does in the game'),
         value: controlsValue, chevron: true, on: () => go(here + '/controls') }) : null,
       sys && +s.games > 0 ? row({ key: 'games', title: C(1450, 'Apply to All Games'), detail: C(1449, '{0} games use their own settings', s.games),

@@ -281,6 +281,32 @@ try:
     cmd('emud.sock', 'GAME_RESET\t' + psx)
     open(t + '/hdmi-enabled', 'w').write('disabled\n')
 
+    # Frameskip (GitHub #23): Off / Auto / Max per game and per system,
+    # written for the session only; the user's core options come back.
+    def psx_frameskip():
+        ok = cmd('emud.sock', 'LAUNCH\t' + psx).startswith('OK')
+        ok = ok and wait(lambda: 'state=running' in cmd('emud.sock', 'STATUS'))
+        opts = dict(l.split(' = ', 1) for l in open(copts).read().splitlines() if ' = ' in l)
+        cmd('emud.sock', 'QUIT')
+        ok = ok and wait(lambda: 'state=idle' in cmd('emud.sock', 'STATUS'))
+        return ok and (opts.get('pcsx_rearmed_frameskip_type'), opts.get('pcsx_rearmed_frameskip_interval'))
+    check('frameskip not for snes', 'frameskip_supported=0\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
+    check('frameskip psx default off', 'frameskip_supported=1\nframeskip=\nframeskip_default=off\n'
+          in cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx))
+    check('reject bad frameskip', cmd('emud.sock', 'GAME_SET\t%s\tpsx\tframeskip\t5' % psx).startswith('ERR'))
+    check('no frameskip choice keeps the user options', psx_frameskip() == (None, None))
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tframeskip\tmax' % psx)
+    check('frameskip max in the session', psx_frameskip() == ('"auto"', '"3"'))
+    check('frameskip user options restored', 'pcsx_rearmed_frameskip_type = "disabled"' in open(copts).read()
+          and 'frameskip_default=off\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx))
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tframeskip\tauto' % psx)
+    check('frameskip auto in the session', psx_frameskip() == ('"auto"', '"1"'))
+    cmd('emud.sock', 'GAME_RESET\t' + psx)
+    cmd('emud.sock', 'SYSTEM_SET\tpsx\tframeskip\tmax')
+    check('frameskip follows the system', 'system_frameskip=max\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx)
+          and psx_frameskip() == ('"auto"', '"3"'))
+    cmd('emud.sock', 'SYSTEM_RESET\tpsx')
+
     # System Settings (GitHub #12): a game's unset key follows its system.
     sysdir = '%s/users/%s/appdata/nuubos-emulation/systems' % (ud, user)
     ss = cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx')
