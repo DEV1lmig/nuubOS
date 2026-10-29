@@ -109,6 +109,15 @@ struct Details {
     resolution_supported: bool,
     resolution: String,
     resolution_default: String,
+    /* System Settings (GitHub #12): the system's own values a game
+     * inherits ("" = none), and for a system the games with their own. */
+    system_core: String,
+    system_aspect: String,
+    system_filter: String,
+    system_accuracy: String,
+    system_pak: String,
+    system_resolution: String,
+    games: i32,
     /* nuubos-biosctl: missing required firmware for the system. */
     bios_missing: bool,
 }
@@ -140,6 +149,15 @@ struct BiosFile {
 #[derive(Default)]
 struct State {
     details: Details,
+    /* System Settings (GitHub #12): the system's page, on its own (77,
+     * from Settings → Gaming → System Settings, 76) or inside the Details
+     * shell from a game's settings (51 with sys_scope). */
+    sys: Details,
+    sys_scope: bool,
+    /* Page 76: (id, name, effective emulator) of the systems with games. */
+    systems: Vec<(String, String, String)>,
+    /* The row page 76 lands on once loaded (back from a system). */
+    systems_focus: String,
     bios: Vec<BiosSystem>,
     bios_files: Vec<BiosFile>,
     bios_system: String,
@@ -335,6 +353,13 @@ fn parse_game_settings(reply: &str, d: &mut Details) {
             "resolution_supported" => d.resolution_supported = value == "1",
             "resolution" => d.resolution = value.into(),
             "resolution_default" => d.resolution_default = value.into(),
+            "system_core" => d.system_core = value.into(),
+            "system_aspect" => d.system_aspect = value.into(),
+            "system_filter" => d.system_filter = value.into(),
+            "system_accuracy" => d.system_accuracy = value.into(),
+            "system_pak" => d.system_pak = value.into(),
+            "system_resolution" => d.system_resolution = value.into(),
+            "games" => d.games = value.parse().unwrap_or(0),
             _ => {}
         }
     }
@@ -502,6 +527,101 @@ fn default_label(ui: &HomeWindow, inherited: &str) -> String {
     tr_arg(ui, 528, "Default ({0})", inherited)
 }
 
+/* What an unset key gives: the system's value when it has one, else the
+ * default. */
+fn inherited_label(ui: &HomeWindow, system_value: &str, system_label: String, default: String) -> String {
+    if system_value.is_empty() { default_label(ui, &default) } else { tr_arg(ui, 1448, "System ({0})", &system_label) }
+}
+
+pub const SYSTEMS_VIEW: i32 = 76;
+pub const SYSTEM_VIEW: i32 = 77;
+
+/* The page shows a system's settings, not a game's. */
+fn system_scope(ui: &HomeWindow) -> bool {
+    let view = ui.get_settings_view();
+    view == SYSTEM_VIEW || (view == 51 && STATE.with(|st| st.borrow().sys_scope))
+}
+
+/* The details the Game/System Settings rows and dropdowns work on. */
+fn scope_details(ui: &HomeWindow) -> Details {
+    let system = system_scope(ui);
+    STATE.with(|st| { let st = st.borrow(); if system { st.sys.clone() } else { st.details.clone() } })
+}
+
+/* Rows of Game Settings (a game) or System Settings (system). */
+fn settings_rows(ui: &HomeWindow, st: &State, d: &Details, system: bool, rows: &mut Vec<(String, GenRow, bool)>) {
+    if !system && !d.cores.is_empty() {
+        let mut all = nav(tr_arg(ui, 1452, "{0} Settings", &d.system_name), String::new());
+        all.detail = tr(ui, 1453, "Settings shared by every game of this system").into();
+        rows.push(("sys-open".into(), all, true));
+    }
+    let core = if !d.core_override.is_empty() { d.core_override.clone() }
+        else { inherited_label(ui, &d.system_core, d.system_core.clone(), d.core_default.clone()) };
+    rows.push(("core".into(), nav(tr(ui, 525, "Emulator"), core), d.cores.len() > 1));
+    /* Other libretro emulators for the system, from the buildbot. */
+    if !system {
+        if st.core_job.is_empty() {
+            let value = if st.cores_loading { tr(ui, 1272, "Looking for emulators…") } else { String::new() };
+            rows.push(("core-get".into(), nav(tr(ui, 1253, "Get More Emulators"), value), !st.cores_loading));
+        } else {
+            rows.push(("core-get".into(), progress_row(tr(ui, 1254, "Downloading emulator"), st.core_progress), false));
+        }
+    }
+    let aspect = if !d.aspect.is_empty() { aspect_label(ui, &d.aspect) }
+        else { inherited_label(ui, &d.system_aspect, aspect_label(ui, &d.system_aspect), tr(ui, 531, "Integer Scaling")) };
+    rows.push(("aspect".into(), nav(tr(ui, 526, "Aspect Ratio"), aspect), true));
+    let filter = if !d.filter.is_empty() { filter_label(ui, &d.filter) }
+        else { inherited_label(ui, &d.system_filter, filter_label(ui, &d.system_filter), filter_label(ui, &d.filter_default)) };
+    rows.push(("filter".into(), nav(tr(ui, 527, "Video Filter"), filter), true));
+    if d.accuracy_supported {
+        let accuracy = if !d.accuracy.is_empty() { accuracy_label(ui, &d.accuracy) }
+            else { inherited_label(ui, &d.system_accuracy, accuracy_label(ui, &d.system_accuracy), accuracy_label(ui, &d.accuracy_default)) };
+        let mut r = nav(tr(ui, 1314, "Emulation Accuracy"), accuracy);
+        /* Flycast (translucent sorting, default Accurate) or melonDS-nuubOS. */
+        r.detail = if matches!(d.system.as_str(), "dreamcast" | "naomi" | "atomiswave") {
+            tr(ui, 1383, "Fast can draw smoke and glass wrong")
+        } else {
+            tr(ui, 1317, "Choose Accurate if the game misbehaves")
+        }
+        .into();
+        rows.push(("accuracy".into(), r, true));
+    }
+    if d.pak_supported {
+        let value = if !d.pak.is_empty() { pak_label(ui, &d.pak) }
+            else if !d.system_pak.is_empty() { tr_arg(ui, 1448, "System ({0})", &pak_label(ui, &d.system_pak)) }
+            else { pak_label(ui, "") };
+        let mut r = nav(tr(ui, 1339, "Controller Accessory"), value);
+        r.detail = tr(ui, 1342, "One fits at a time: choose Controller Pak if the game saves on it").into();
+        rows.push(("pak".into(), r, true));
+    }
+    if d.resolution_supported {
+        let value = if !d.resolution.is_empty() { resolution_label(ui, &d.resolution) }
+            else { inherited_label(ui, &d.system_resolution, resolution_label(ui, &d.system_resolution), resolution_label(ui, &d.resolution_default)) };
+        let mut r = nav(tr(ui, 454, "Resolution"), value);
+        r.detail = if d.resolution_default == "auto" {
+            tr(ui, 1381, "Auto: 1x on the console, 2x on a TV")
+        } else {
+            tr(ui, 1382, "2x is sharper but can slow the game down")
+        }
+        .into();
+        rows.push(("resolution".into(), r, true));
+    }
+    if system {
+        if d.games > 0 {
+            rows.push(("sys-games".into(), row(tr(ui, 1450, "Apply to All Games"), String::new(),
+                armed_detail(&st.armed, "sys-games", tr(ui, 191, "Press again to confirm"),
+                    tr_arg(ui, 1449, "{0} games use their own settings", &d.games.to_string()))), true));
+        }
+        rows.push(("sys-reset".into(), row(tr(ui, 1451, "Reset System Settings"), String::new(),
+            armed_detail(&st.armed, "sys-reset", tr(ui, 598, "Press again to reset"),
+                tr(ui, 536, "Changes apply the next time the game starts"))), true));
+    } else {
+        rows.push(("reset".into(), row(tr(ui, 535, "Reset Game Settings"), String::new(),
+            armed_detail(&st.armed, "reset", tr(ui, 598, "Press again to reset"),
+                tr(ui, 536, "Changes apply the next time the game starts"))), true));
+    }
+}
+
 /* ---------------------------------------------------------------- */
 /* Pages                                                            */
 /* ---------------------------------------------------------------- */
@@ -515,59 +635,18 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
     let mut rows: Vec<(String, GenRow, bool)> = Vec::new();
     let d = &st.details;
     match view {
-        51 => {
-            let core = if d.core_override.is_empty() { default_label(ui, &d.core_default) } else { d.core_override.clone() };
-            rows.push(("core".into(), nav(tr(ui, 525, "Emulator"), core), d.cores.len() > 1));
-            /* Other libretro emulators for the system, from the buildbot. */
-            if st.core_job.is_empty() {
-                let value = if st.cores_loading { tr(ui, 1272, "Looking for emulators…") } else { String::new() };
-                rows.push(("core-get".into(), nav(tr(ui, 1253, "Get More Emulators"), value), !st.cores_loading));
-            } else {
-                rows.push(("core-get".into(), progress_row(tr(ui, 1254, "Downloading emulator"), st.core_progress), false));
+        51 if st.sys_scope => settings_rows(ui, st, &st.sys, true, &mut rows),
+        51 => settings_rows(ui, st, d, false, &mut rows),
+        SYSTEM_VIEW => settings_rows(ui, st, &st.sys, true, &mut rows),
+        SYSTEMS_VIEW => {
+            if st.systems.is_empty() {
+                let mut r = row(tr(ui, 398, "No games yet"), String::new(), String::new());
+                r.enabled = false;
+                rows.push(("info".into(), r, false));
             }
-            let aspect = if d.aspect.is_empty() { default_label(ui, &tr(ui, 531, "Integer Scaling")) } else { aspect_label(ui, &d.aspect) };
-            rows.push(("aspect".into(), nav(tr(ui, 526, "Aspect Ratio"), aspect), true));
-            let filter = if d.filter.is_empty() { default_label(ui, &filter_label(ui, &d.filter_default)) } else { filter_label(ui, &d.filter) };
-            rows.push(("filter".into(), nav(tr(ui, 527, "Video Filter"), filter), true));
-            if d.accuracy_supported {
-                let accuracy = if d.accuracy.is_empty() {
-                    default_label(ui, &accuracy_label(ui, &d.accuracy_default))
-                } else {
-                    accuracy_label(ui, &d.accuracy)
-                };
-                let mut r = nav(tr(ui, 1314, "Emulation Accuracy"), accuracy);
-                /* Flycast (translucent sorting, default Accurate) or melonDS-nuubOS. */
-                r.detail = if matches!(d.system.as_str(), "dreamcast" | "naomi" | "atomiswave") {
-                    tr(ui, 1383, "Fast can draw smoke and glass wrong")
-                } else {
-                    tr(ui, 1317, "Choose Accurate if the game misbehaves")
-                }
-                .into();
-                rows.push(("accuracy".into(), r, true));
+            for (id, name, core) in &st.systems {
+                rows.push((format!("sys:{id}"), nav(name.clone(), core.clone()), true));
             }
-            if d.pak_supported {
-                let mut r = nav(tr(ui, 1339, "Controller Accessory"), pak_label(ui, &d.pak));
-                r.detail = tr(ui, 1342, "One fits at a time: choose Controller Pak if the game saves on it").into();
-                rows.push(("pak".into(), r, true));
-            }
-            if d.resolution_supported {
-                let value = if d.resolution.is_empty() {
-                    default_label(ui, &resolution_label(ui, &d.resolution_default))
-                } else {
-                    resolution_label(ui, &d.resolution)
-                };
-                let mut r = nav(tr(ui, 454, "Resolution"), value);
-                r.detail = if d.resolution_default == "auto" {
-                    tr(ui, 1381, "Auto: 1x on the console, 2x on a TV")
-                } else {
-                    tr(ui, 1382, "2x is sharper but can slow the game down")
-                }
-                .into();
-                rows.push(("resolution".into(), r, true));
-            }
-            rows.push(("reset".into(), row(tr(ui, 535, "Reset Game Settings"), String::new(),
-                armed_detail(&st.armed, "reset", tr(ui, 598, "Press again to reset"),
-                    tr(ui, 536, "Changes apply the next time the game starts"))), true));
         }
         52 => {
             /* YOUR SYSTEMS (at least one game in the library) first, then
@@ -952,13 +1031,17 @@ pub(crate) fn render(ui: &HomeWindow) {
         crate::tsui::render(ui);
         return;
     }
-    if !(50..=56).contains(&view) && view != 63 {
+    if !(50..=56).contains(&view) && view != 63 && view != SYSTEMS_VIEW && view != SYSTEM_VIEW {
         return;
     }
     let rows = STATE.with(|st| build_rows(ui, &st.borrow(), view));
     let section = match view {
         50 => STATE.with(|st| st.borrow().details.system_name.clone()),
+        51 if STATE.with(|st| st.borrow().sys_scope) =>
+            STATE.with(|st| tr_arg(ui, 1452, "{0} Settings", &st.borrow().sys.system_name)),
         51 => tr(ui, 524, "Game Settings"),
+        SYSTEMS_VIEW => tr(ui, 1454, "System Settings"),
+        SYSTEM_VIEW => STATE.with(|st| st.borrow().sys.system_name.clone()),
         52 => {
             /* First row of OTHER SYSTEMS; none when all are the user's. */
             let mine = crate::library::system_ids();
@@ -1255,6 +1338,8 @@ pub fn start_sheet_action(ui: &HomeWindow, action: &str) {
 }
 
 pub fn leave_details(ui: &HomeWindow) {
+    STATE.with(|st| st.borrow_mut().sys_scope = false);
+    ui.set_settings_system_scope(false);
     ACTIVE.store(false, Ordering::SeqCst);
     navigate_settings_view(ui, 0);
     ui.set_settings_selected_index(0);
@@ -1354,15 +1439,16 @@ fn open_tags(ui: &HomeWindow) {
 }
 
 fn open_core_choice(ui: &HomeWindow) {
-    let d = STATE.with(|st| st.borrow().details.clone());
-    let mut options = vec![(String::new(), default_label(ui, &d.core_default))];
+    let d = scope_details(ui);
+    let mut options = vec![(String::new(), inherited_label(ui, &d.system_core, d.system_core.clone(), d.core_default.clone()))];
     options.extend(d.cores.iter().map(|c| (c.clone(), c.clone())));
     open_settings_choice(ui, "game-core", &tr(ui, 525, "Emulator"), options, &d.core_override);
 }
 
 fn open_aspect_choice(ui: &HomeWindow) {
-    let d = STATE.with(|st| st.borrow().details.clone());
-    let mut options = vec![(String::new(), default_label(ui, &tr(ui, 531, "Integer Scaling")))];
+    let d = scope_details(ui);
+    let mut options = vec![(String::new(),
+        inherited_label(ui, &d.system_aspect, aspect_label(ui, &d.system_aspect), tr(ui, 531, "Integer Scaling")))];
     for v in ["core", "4:3", "16:9", "full", "integer", "square"] {
         options.push((v.to_owned(), aspect_label(ui, v)));
     }
@@ -1387,8 +1473,9 @@ fn resolution_label(ui: &HomeWindow, v: &str) -> String {
 }
 
 fn open_resolution_choice(ui: &HomeWindow) {
-    let d = STATE.with(|st| st.borrow().details.clone());
-    let mut options = vec![(String::new(), default_label(ui, &resolution_label(ui, &d.resolution_default)))];
+    let d = scope_details(ui);
+    let mut options = vec![(String::new(), inherited_label(ui, &d.system_resolution,
+        resolution_label(ui, &d.system_resolution), resolution_label(ui, &d.resolution_default)))];
     for v in ["1x", "2x"] {
         options.push((v.to_owned(), resolution_label(ui, v)));
     }
@@ -1397,14 +1484,21 @@ fn open_resolution_choice(ui: &HomeWindow) {
 
 /* Nintendo 64: Rumble Pak (the default, stored empty) or Controller Pak. */
 fn open_pak_choice(ui: &HomeWindow) {
-    let d = STATE.with(|st| st.borrow().details.clone());
-    let options = vec![(String::new(), pak_label(ui, "")), ("memory".to_owned(), pak_label(ui, "memory"))];
+    let d = scope_details(ui);
+    /* Under a system set to Controller Pak a game can still choose Rumble. */
+    let options = if d.system_pak.is_empty() {
+        vec![(String::new(), pak_label(ui, "")), ("memory".to_owned(), pak_label(ui, "memory"))]
+    } else {
+        vec![(String::new(), tr_arg(ui, 1448, "System ({0})", &pak_label(ui, &d.system_pak))),
+             ("rumble".to_owned(), pak_label(ui, "")), ("memory".to_owned(), pak_label(ui, "memory"))]
+    };
     open_settings_choice(ui, "game-pak", &tr(ui, 1339, "Controller Accessory"), options, &d.pak);
 }
 
 fn open_accuracy_choice(ui: &HomeWindow) {
-    let d = STATE.with(|st| st.borrow().details.clone());
-    let mut options = vec![(String::new(), default_label(ui, &accuracy_label(ui, &d.accuracy_default)))];
+    let d = scope_details(ui);
+    let mut options = vec![(String::new(), inherited_label(ui, &d.system_accuracy,
+        accuracy_label(ui, &d.system_accuracy), accuracy_label(ui, &d.accuracy_default)))];
     for v in ["fast", "accurate"] {
         options.push((v.to_owned(), accuracy_label(ui, v)));
     }
@@ -1412,8 +1506,9 @@ fn open_accuracy_choice(ui: &HomeWindow) {
 }
 
 fn open_filter_choice(ui: &HomeWindow) {
-    let d = STATE.with(|st| st.borrow().details.clone());
-    let mut options = vec![(String::new(), default_label(ui, &filter_label(ui, &d.filter_default)))];
+    let d = scope_details(ui);
+    let mut options = vec![(String::new(), inherited_label(ui, &d.system_filter,
+        filter_label(ui, &d.system_filter), filter_label(ui, &d.filter_default)))];
     for v in ["sharp", "smooth", "pixel"] {
         options.push((v.to_owned(), filter_label(ui, v)));
     }
@@ -1421,6 +1516,11 @@ fn open_filter_choice(ui: &HomeWindow) {
 }
 
 fn game_set(ui: &HomeWindow, key: &str, value: String) {
+    if system_scope(ui) {
+        let system = STATE.with(|st| st.borrow().sys.system.clone());
+        system_command(ui, format!("SYSTEM_SET\t{system}\t{key}\t{value}"));
+        return;
+    }
     let (id, system) = STATE.with(|st| {
         let st = st.borrow();
         (st.details.id.clone(), st.details.system.clone())
@@ -1435,6 +1535,94 @@ fn game_set(ui: &HomeWindow, key: &str, value: String) {
             }
         });
     });
+}
+
+/* System Settings: the system's values (and its games with their own). */
+fn load_system(ui: &HomeWindow, system: String, name: String) {
+    let weak = ui.as_weak();
+    thread::spawn(move || {
+        let mut d = Details { system: system.clone(), system_name: name, ..Default::default() };
+        parse_game_settings(&emulation(&format!("SYSTEM_SETTINGS\t{system}"), true), &mut d);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            STATE.with(|st| st.borrow_mut().sys = d);
+            render(&ui);
+        });
+    });
+}
+
+fn system_command(ui: &HomeWindow, line: String) {
+    let (system, name) = STATE.with(|st| { let st = st.borrow(); (st.sys.system.clone(), st.sys.system_name.clone()) });
+    let weak = ui.as_weak();
+    thread::spawn(move || {
+        let _ = emulation(&line, false);
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                load_system(&ui, system, name);
+            }
+        });
+    });
+}
+
+/* Settings → Gaming → System Settings: the systems with games and the
+ * emulator each one uses. */
+pub fn open_systems(ui: &HomeWindow) {
+    set_back(ui, GAMING_VIEW);
+    STATE.with(|st| st.borrow_mut().systems.clear());
+    show(ui, SYSTEMS_VIEW);
+    let names = crate::library::system_names();
+    let weak = ui.as_weak();
+    thread::spawn(move || {
+        let mut list = Vec::new();
+        for (id, name) in names {
+            let mut d = Details::default();
+            parse_game_settings(&emulation(&format!("SYSTEM_SETTINGS\t{id}"), true), &mut d);
+            /* Ports and applications have no emulator to set. */
+            if !d.cores.is_empty() {
+                list.push((id, name, d.core));
+            }
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            STATE.with(|st| st.borrow_mut().systems = list);
+            render(&ui);
+            let target = STATE.with(|st| std::mem::take(&mut st.borrow_mut().systems_focus));
+            if !target.is_empty() {
+                focus(&ui, &target);
+                render(&ui);
+            }
+        });
+    });
+}
+
+/* Confirm on a Game/System Settings row; false when the key is not one. */
+fn settings_confirm(ui: &HomeWindow, key: &str) -> bool {
+    match key {
+        "core" => open_core_choice(ui),
+        "aspect" => open_aspect_choice(ui),
+        "filter" => open_filter_choice(ui),
+        "accuracy" => open_accuracy_choice(ui),
+        "pak" => open_pak_choice(ui),
+        "resolution" => open_resolution_choice(ui),
+        "sys-games" => {
+            if arm_or(ui, "sys-games") {
+                let system = STATE.with(|st| st.borrow().sys.system.clone());
+                system_command(ui, format!("SYSTEM_RESET_GAMES\t{system}"));
+            } else {
+                render(ui);
+            }
+        }
+        "sys-reset" => {
+            if arm_or(ui, "sys-reset") {
+                let system = STATE.with(|st| st.borrow().sys.system.clone());
+                system_command(ui, format!("SYSTEM_RESET\t{system}"));
+            } else {
+                render(ui);
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 /* A choice made in a dropdown opened by this module. */
@@ -1514,7 +1702,11 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
         }
         "collections" => open_collections(ui),
         "tags" => open_tags(ui),
-        "settings" => show(ui, 51),
+        "settings" => {
+            STATE.with(|st| st.borrow_mut().sys_scope = false);
+            ui.set_settings_system_scope(false);
+            show(ui, 51);
+        }
         "bios" => {
             STATE.with(|st| st.borrow_mut().bios_system = d.system.clone());
             leave_details(ui);
@@ -1578,15 +1770,22 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
                 });
             });
         }
-        "core" => open_core_choice(ui),
+        "sys-open" => {
+            /* The game's system, inside the shell; Back returns here. */
+            STATE.with(|st| {
+                let mut st = st.borrow_mut();
+                st.sys_scope = true;
+                st.armed.clear();
+            });
+            ui.set_settings_system_scope(true);
+            ui.set_gen_index(0);
+            ui.set_gen_scroll(0);
+            load_system(ui, d.system.clone(), d.system_name.clone());
+        }
+        k if settings_confirm(ui, k) => {}
         "core-get" if !STATE.with(|st| st.borrow().cores_loading) && STATE.with(|st| st.borrow().core_job.is_empty()) => {
             open_core_offer(ui)
         }
-        "aspect" => open_aspect_choice(ui),
-        "filter" => open_filter_choice(ui),
-        "accuracy" => open_accuracy_choice(ui),
-        "pak" => open_pak_choice(ui),
-        "resolution" => open_resolution_choice(ui),
         "reset" => {
             if arm_or(ui, "reset") {
                 let line = format!("GAME_RESET\t{}", d.id);
@@ -1628,7 +1827,17 @@ pub fn handle_details_action(ui: &HomeWindow, action: &str, settings_active: &Ar
         "menu_up" | "menu_down" | "menu_left" | "menu_right" if page => details_move(ui, action),
         "menu_up" | "menu_down" => move_selection(ui, action),
         "menu_back" => {
-            if ui.get_settings_view() == 51 {
+            if ui.get_settings_view() == 51 && STATE.with(|st| st.borrow().sys_scope) {
+                /* Back from the system to the game, its values reloaded. */
+                STATE.with(|st| st.borrow_mut().sys_scope = false);
+                ui.set_settings_system_scope(false);
+                reload(ui);
+                show(ui, 51);
+                if let Some(i) = STATE.with(|st| st.borrow().keys.iter().position(|k| k == "sys-open")) {
+                    ui.set_gen_index(i as i32);
+                    render(ui);
+                }
+            } else if ui.get_settings_view() == 51 {
                 show(ui, 50);
                 /* Back on the action that opened Game Settings. */
                 if let Some(i) = STATE.with(|st| st.borrow().keys.iter().position(|k| k == "settings")) {
@@ -1725,6 +1934,10 @@ fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     /* The Quick Menu's GAME → RetroArch row (hidden by default). */
     rows.push(("retroarch_menu".into(), toggle(tr(ui, 1391, "RetroArch in the Quick Menu"), on("retroarch_menu"),
         tr(ui, 1392, "Opens RetroArch's own menu during a game")), true));
+    /* Per system (GitHub #12): emulator and picture for all its games. */
+    let mut systems = nav(tr(ui, 1454, "System Settings"), String::new());
+    systems.detail = tr(ui, 1455, "Emulator and picture for all the games of a system").into();
+    rows.push(("systems".into(), systems, true));
     /* LIBRARY (DEVICE): the library scan, the metadata source, its optional
      * account or key, then the two scraping runs. */
     let scanning = ui.get_library_scanning();
@@ -1901,6 +2114,7 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
                 "sync" => open_sync(ui),
                 "sync-add" => crate::syncui::open_guide(ui),
                 "bios" => open_bios(ui),
+                "systems" => open_systems(ui),
                 "cheats" if !STATE.with(|st| st.borrow().cheats_job) => update_cheats(ui),
                 "boot_screens" | "slot_rotation" | "bezels" | "crt" | "retroarch_menu" => {
                     let on = STATE.with(|st| emu_get(&st.borrow(), &key) == "1");
@@ -2507,6 +2721,17 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
             STATE.with(|st| st.borrow_mut().bios_system = k[4..].to_owned());
             show(ui, 53);
         }
+        (SYSTEMS_VIEW, k) if k.starts_with("sys:") => {
+            let id = k[4..].to_owned();
+            let name = STATE.with(|st| st.borrow().systems.iter().find(|s| s.0 == id).map(|s| s.1.clone()))
+                .unwrap_or_default();
+            STATE.with(|st| st.borrow_mut().sys = Details { system: id.clone(), system_name: name.clone(), ..Default::default() });
+            show(ui, SYSTEM_VIEW);
+            load_system(ui, id, name);
+        }
+        (SYSTEM_VIEW, k) => {
+            settings_confirm(ui, k);
+        }
         (54, "ra-signin") => {
             open_system_keyboard(ui, &tr(ui, 285, "Username"), KEYBOARD_RA_NAME, 54, "text", "");
         }
@@ -2628,6 +2853,12 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
             STATE.with(|st| st.borrow_mut().bios_system.clear());
             match view {
                 53 => show(ui, 52),
+                SYSTEM_VIEW => {
+                    /* Back on the system's row, its emulator refreshed. */
+                    let id = STATE.with(|st| st.borrow().sys.system.clone());
+                    open_systems(ui);
+                    STATE.with(|st| st.borrow_mut().systems_focus = format!("sys:{id}"));
+                }
                 _ => {
                     let back = STATE.with(|st| st.borrow().back);
                     navigate_settings_view(ui, if back > 0 { back } else { 19 });

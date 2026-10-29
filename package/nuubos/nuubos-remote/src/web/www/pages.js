@@ -371,7 +371,7 @@ async function searchResults(q) {
 page('library', 'manage', () => T('library'), async (path) => {
   const [what, arg] = path;
   if (what === 'game') return gamePage(arg, path[2]);
-  if (what === 'gamesettings') return gameSettingsPage(arg, path[2]);
+  if (what === 'gamesettings') return settingsPage(arg, path[2]);
   if (what === 'system') return systemPage(arg);
   if (what === 'collection') return collectionPage(arg);
   const lib = await get('library');
@@ -521,39 +521,75 @@ async function gamePage(id, from) {
   return { title: C(522, 'Game Details'), back: backTo, nodes, topics: ['library'], backdrop: cover ? img(cover, 96) : null };
 }
 
-async function gameSettingsPage(id, system) {
-  const s = await get('game_settings', { id, system }, true);
+/* Game Settings (id) or System Settings (id = null, GitHub #12): a key a
+ * game leaves unset follows its system, a system's the default. */
+async function settingsPage(id, system) {
+  const sys = !id;
+  const [s, lib] = await Promise.all([sys ? get('system_settings', { system }, true) : get('game_settings', { id, system }, true), get('library')]);
+  const sysName = (rows(lib.system).find((x) => x[0] === system) || [])[1] || system;
   const def = (v) => C(528, 'Default ({0})', v);
+  const inh = (sv, label, fallback) => (sv ? C(1448, 'System ({0})', label) : def(fallback));
   const aspects = { core: C(529, 'As the game'), '4:3': '4:3', '16:9': '16:9', full: C(530, 'Full Screen'), integer: C(531, 'Integer Scaling'), square: C(1413, 'Square Pixels') };
   const filters = { sharp: C(532, 'Sharp'), smooth: C(533, 'Smooth'), pixel: C(534, 'Pixel Perfect'), crt: C(777, 'CRT Effect') };
   const accuracies = { fast: C(1315, 'Fast'), accurate: C(1316, 'Accurate') };
-  const paks = { '': C(1340, 'Rumble Pak'), memory: C(1341, 'Controller Pak') };
+  const paks = { rumble: C(1340, 'Rumble Pak'), memory: C(1341, 'Controller Pak') };
   const resolutions = { auto: C(52, 'Auto'), '1x': C(1379, '1x'), '2x': C(1380, '2x'), custom: C(315, 'Custom') };
   const cores = (s.cores || '').split(/[ ,]/).filter(Boolean);
-  const set = (key, value) => act('game.set', { id, system, key, value }, { topics: ['game_settings'] });
+  const topic = sys ? 'system_settings' : 'game_settings';
+  const set = (key, value) => (sys ? act('system.set', { system, key, value }, { topics: [topic] })
+    : act('game.set', { id, system, key, value }, { topics: [topic] }));
   const pick = async (key, title, options, cur) => { const v = await choose(title, options, cur); if (v !== null) await set(key, v); };
+  const coreInh = inh(s.system_core, s.system_core, s.core_default);
+  const aspectInh = inh(s.system_aspect, aspects[s.system_aspect], C(531, 'Integer Scaling'));
+  const filterInh = inh(s.system_filter, filters[s.system_filter], filters[s.filter_default] || '');
+  const accInh = inh(s.system_accuracy, accuracies[s.system_accuracy], accuracies[s.accuracy_default] || accuracies.fast);
+  const resInh = inh(s.system_resolution, resolutions[s.system_resolution], resolutions[s.resolution_default] || resolutions['1x']);
+  const pakOptions = s.system_pak
+    ? [{ value: '', label: C(1448, 'System ({0})', paks[s.system_pak]) }, { value: 'rumble', label: paks.rumble }, { value: 'memory', label: paks.memory }]
+    : [{ value: '', label: paks.rumble }, { value: 'memory', label: paks.memory }];
+  const pakValue = s.pak ? paks[s.pak] : s.system_pak ? C(1448, 'System ({0})', paks[s.system_pak]) : paks.rumble;
   return {
-    title: C(524, 'Game Settings'), back: 'library/game/' + id, topics: [],
+    title: sys ? sysName : C(524, 'Game Settings'), kicker: sys ? C(1454, 'System Settings') : '',
+    back: sys ? 'gaming/systems' : 'library/game/' + id, topics: [],
     nodes: [group(
-      row({ key: 'core', title: C(525, 'Emulator'), value: s.core_override || def(s.core_default), chevron: true, disabled: cores.length < 2,
-        on: () => pick('core', C(525, 'Emulator'), [{ value: '', label: def(s.core_default) }, ...cores.map((c) => ({ value: c, label: c }))], s.core_override) }),
-      row({ key: 'aspect', title: C(526, 'Aspect Ratio'), value: s.aspect ? aspects[s.aspect] || s.aspect : def(C(531, 'Integer Scaling')), chevron: true,
-        on: () => pick('aspect', C(526, 'Aspect Ratio'), [{ value: '', label: def(C(531, 'Integer Scaling')) }, ...Object.entries(aspects).map(([value, label]) => ({ value, label }))], s.aspect) }),
-      row({ key: 'filter', title: C(527, 'Video Filter'), value: s.filter ? filters[s.filter] : def(filters[s.filter_default] || ''), chevron: true,
-        on: () => pick('filter', C(527, 'Video Filter'), [{ value: '', label: def(filters[s.filter_default] || '') }, ...['sharp', 'smooth', 'pixel'].map((v) => ({ value: v, label: filters[v] }))], s.filter) }),
+      !sys && cores.length ? row({ key: 'sys', title: C(1452, '{0} Settings', sysName), detail: C(1453, 'Settings shared by every game of this system'),
+        chevron: true, on: () => go('gaming/systems/' + system) }) : null,
+      row({ key: 'core', title: C(525, 'Emulator'), value: s.core_override || coreInh, chevron: true, disabled: cores.length < 2,
+        on: () => pick('core', C(525, 'Emulator'), [{ value: '', label: coreInh }, ...cores.map((c) => ({ value: c, label: c }))], s.core_override) }),
+      row({ key: 'aspect', title: C(526, 'Aspect Ratio'), value: s.aspect ? aspects[s.aspect] || s.aspect : aspectInh, chevron: true,
+        on: () => pick('aspect', C(526, 'Aspect Ratio'), [{ value: '', label: aspectInh }, ...Object.entries(aspects).map(([value, label]) => ({ value, label }))], s.aspect) }),
+      row({ key: 'filter', title: C(527, 'Video Filter'), value: s.filter ? filters[s.filter] : filterInh, chevron: true,
+        on: () => pick('filter', C(527, 'Video Filter'), [{ value: '', label: filterInh }, ...['sharp', 'smooth', 'pixel'].map((v) => ({ value: v, label: filters[v] }))], s.filter) }),
       s.accuracy_supported === '1' ? row({ key: 'accuracy', title: C(1314, 'Emulation Accuracy'),
         detail: ['dreamcast', 'naomi', 'atomiswave'].includes(system) ? C(1383, 'Fast can draw smoke and glass wrong') : C(1317, 'Choose Accurate if the game misbehaves'),
-        value: s.accuracy ? accuracies[s.accuracy] : def(accuracies[s.accuracy_default] || accuracies.fast), chevron: true,
-        on: () => pick('accuracy', C(1314, 'Emulation Accuracy'), [{ value: '', label: def(accuracies[s.accuracy_default] || accuracies.fast) }, ...Object.entries(accuracies).map(([value, label]) => ({ value, label }))], s.accuracy) }) : null,
+        value: s.accuracy ? accuracies[s.accuracy] : accInh, chevron: true,
+        on: () => pick('accuracy', C(1314, 'Emulation Accuracy'), [{ value: '', label: accInh }, ...Object.entries(accuracies).map(([value, label]) => ({ value, label }))], s.accuracy) }) : null,
       s.pak_supported === '1' ? row({ key: 'pak', title: C(1339, 'Controller Accessory'), detail: C(1342, 'One fits at a time: choose Controller Pak if the game saves on it'),
-        value: s.pak === 'memory' ? paks.memory : paks[''], chevron: true,
-        on: () => pick('pak', C(1339, 'Controller Accessory'), Object.entries(paks).map(([value, label]) => ({ value, label })), s.pak || '') }) : null,
+        value: pakValue, chevron: true, on: () => pick('pak', C(1339, 'Controller Accessory'), pakOptions, s.pak || '') }) : null,
       s.resolution_supported === '1' ? row({ key: 'resolution', title: C(454, 'Resolution'),
         detail: s.resolution_default === 'auto' ? C(1381, 'Auto: 1x on the console, 2x on a TV') : C(1382, '2x is sharper but can slow the game down'),
-        value: s.resolution ? resolutions[s.resolution] : def(resolutions[s.resolution_default] || resolutions['1x']), chevron: true,
-        on: () => pick('resolution', C(454, 'Resolution'), [{ value: '', label: def(resolutions[s.resolution_default] || resolutions['1x']) }, { value: '1x', label: resolutions['1x'] }, { value: '2x', label: resolutions['2x'] }], s.resolution) }) : null,
-      row({ key: 'reset', title: C(535, 'Reset Game Settings'), detail: C(536, 'Changes apply the next time the game starts'),
-        arm: { prompt: C(598, 'Press again to reset') }, on: () => act('game.reset', { id }, { topics: ['game_settings'] }) }))],
+        value: s.resolution ? resolutions[s.resolution] : resInh, chevron: true,
+        on: () => pick('resolution', C(454, 'Resolution'), [{ value: '', label: resInh }, { value: '1x', label: resolutions['1x'] }, { value: '2x', label: resolutions['2x'] }], s.resolution) }) : null,
+      sys && +s.games > 0 ? row({ key: 'games', title: C(1450, 'Apply to All Games'), detail: C(1449, '{0} games use their own settings', s.games),
+        arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('system.reset_games', { system }, { topics: [topic] }) }) : null,
+      sys ? row({ key: 'reset', title: C(1451, 'Reset System Settings'), detail: C(536, 'Changes apply the next time the game starts'),
+        arm: { prompt: C(598, 'Press again to reset') }, on: () => act('system.reset', { system }, { topics: [topic] }) })
+        : row({ key: 'reset', title: C(535, 'Reset Game Settings'), detail: C(536, 'Changes apply the next time the game starts'),
+          arm: { prompt: C(598, 'Press again to reset') }, on: () => act('game.reset', { id }, { topics: [topic] }) }))],
+  };
+}
+
+/* Gaming → System Settings: the systems with games and their emulator. */
+async function systemsPage() {
+  const lib = await get('library');
+  const list = (await Promise.all(rows(lib.system).map(async (x) => {
+    const s = await get('system_settings', { system: x[0] }, true).catch(() => ({}));
+    return (s.cores || '') ? { id: x[0], name: x[1], core: s.core } : null;
+  }))).filter(Boolean);
+  return {
+    title: C(1454, 'System Settings'), back: 'gaming', topics: ['library'],
+    nodes: [list.length ? group(...list.map((x) => row({ key: x.id, title: x.name, value: x.core, chevron: true, on: () => go('gaming/systems/' + x.id) })))
+      : empty(C(398, 'No games yet'), '')],
   };
 }
 
@@ -1308,6 +1344,7 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
   if (path[0] === 'hotkeys') return hotkeysPage();
   if (path[0] === 'overlay') return overlayPage();
   if (path[0] === 'sync') return syncPage();
+  if (path[0] === 'systems') return path[1] ? settingsPage(null, path[1]) : systemsPage();
   const [emu, ra, ss, lib, jobs, sync] = await Promise.all([get('emu_settings'), get('ra'), get('scraper'), get('library'), get('jobs'),
     get('sync').catch(() => ({}))]);
   const set = (key, value) => act('emu.set', { key, value }, { topics: ['emu_settings'] });
@@ -1334,7 +1371,8 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
       } }),
     row({ key: 'bez', title: C(775, 'Bezels'), detail: C(776, 'Frames the game when it does not fill the screen'), toggle: on01(emu.bezels), set: (v) => set('bezels', v ? '1' : '0') }),
     row({ key: 'crt', title: C(777, 'CRT Effect'), detail: C(778, 'Scanlines for consoles played on TVs'), toggle: on01(emu.crt), set: (v) => set('crt', v ? '1' : '0') }),
-    row({ key: 'ramenu', title: C(1391, 'RetroArch in the Quick Menu'), detail: C(1392, "Opens RetroArch's own menu during a game"), toggle: on01(emu.retroarch_menu), set: (v) => set('retroarch_menu', v ? '1' : '0') })),
+    row({ key: 'ramenu', title: C(1391, 'RetroArch in the Quick Menu'), detail: C(1392, "Opens RetroArch's own menu during a game"), toggle: on01(emu.retroarch_menu), set: (v) => set('retroarch_menu', v ? '1' : '0') }),
+    row({ key: 'systems', title: C(1454, 'System Settings'), detail: C(1455, 'Emulator and picture for all the games of a system'), chevron: true, on: () => go('gaming/systems') })),
   section(C(704, 'LIBRARY'), 'device'), group(
     row({ key: 'scan', title: C(804, 'Scan for New Games'), detail: C(805, 'Finds games copied to the SD card since the last scan'), busy: scanning,
       value: scanning ? C(410, 'Searching for games…') : '', disabled: scanning, on: () => act('lib.scan') }),

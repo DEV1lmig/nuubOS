@@ -257,6 +257,8 @@ pub fn topic(t: &str, q: &dyn Fn(&str) -> String) -> R {
         "search" => kv(&sock_timeout("libraryd", &format!("SEARCH\t{}", plain(&q("spec"), 512)?), Duration::from_secs(8))?),
         "details" => kv(&sock("libraryd", &format!("DETAILS\t{}", game_id(&q("id"))?))?),
         "game_settings" => kv(&sock("emud", &format!("GAME_SETTINGS\t{}\t{}", game_id(&q("id"))?, token(&q("system"))?))?),
+        /* System Settings (GitHub #12): what every game of a system inherits. */
+        "system_settings" => kv(&sock("emud", &format!("SYSTEM_SETTINGS\t{}", token(&q("system"))?))?),
         "files" => {
             let p = files::user_path(&q("path")).ok_or("path")?;
             kv(&tool_ok("nuubos-filesctl", &["list", &p])?)
@@ -510,6 +512,13 @@ pub fn action(b: &Value) -> R {
             ok()
         }
         "game.reset" => { sock_ok("emud", &format!("GAME_RESET\t{}", game_id(&a("id"))?))?; ok() }
+        "system.set" => {
+            sock_ok("emud", &format!("SYSTEM_SET\t{}\t{}\t{}", token(&a("system"))?,
+                one_of(&a("key"), &["core", "aspect", "filter", "accuracy", "pak", "resolution"])?, plain(&a("value"), 64)?))?;
+            ok()
+        }
+        "system.reset" => { sock_ok("emud", &format!("SYSTEM_RESET\t{}", token(&a("system"))?))?; ok() }
+        "system.reset_games" => { sock_ok("emud", &format!("SYSTEM_RESET_GAMES\t{}", token(&a("system"))?))?; ok() }
 
         /* RetroAchievements and metadata. Passwords go on stdin. */
         "ra.login" => {

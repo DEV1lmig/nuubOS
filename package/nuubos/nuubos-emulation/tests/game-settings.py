@@ -281,6 +281,37 @@ try:
     cmd('emud.sock', 'GAME_RESET\t' + psx)
     open(t + '/hdmi-enabled', 'w').write('disabled\n')
 
+    # System Settings (GitHub #12): a game's unset key follows its system.
+    sysdir = '%s/users/%s/appdata/nuubos-emulation/systems' % (ud, user)
+    ss = cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx')
+    check('system defaults', 'core=pcsx_rearmed\n' in ss and 'resolution=\n' in ss and 'games=0\n' in ss)
+    check('system rejects bad value', cmd('emud.sock', 'SYSTEM_SET\tpsx\tresolution\t4x').startswith('ERR'))
+    check('system rejects bad name', cmd('emud.sock', 'SYSTEM_SETTINGS\t../x').startswith('ERR'))
+    check('system set', cmd('emud.sock', 'SYSTEM_SET\tpsx\tresolution\t2x').startswith('OK')
+          and cmd('emud.sock', 'SYSTEM_SET\tpsx\taspect\t16:9').startswith('OK')
+          and open(sysdir + '/psx.conf').read() == 'aspect=16:9\nresolution=2x\n')
+    gs = cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx)
+    check('game lists its system values', 'resolution=\n' in gs and 'system_resolution=2x\n' in gs
+          and 'system_aspect=16:9\n' in gs and 'aspect=\n' in gs)
+    check('game follows its system', psx_session(False) == 'enabled'
+          and 'aspect_ratio_index = "1"' in open(t + '/last-session.cfg').read())
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tresolution\t1x' % psx)
+    check('game choice wins over the system', psx_session(False) == 'disabled')
+    check('system counts the games with their own', 'games=1\n' in cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx'))
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tcpu_level\t2' % psx)
+    open('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, psx), 'a').write('nds_layout=hybrid\n')
+    check('system resets its games', cmd('emud.sock', 'SYSTEM_RESET_GAMES\tpsx') == 'OK 1\n'
+          and 'games=0\n' in cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx')
+          and open('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, psx)).read() == 'nds_layout=hybrid\n')
+    snes_ss = cmd('emud.sock', 'SYSTEM_SET\tsnes\tcore\tbsnes')
+    check('system emulator is the game default', snes_ss.startswith('OK')
+          and 'core_default=bsnes\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
+    check('other system untouched', 'system_core=\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tn64' % game))
+    check('system reset', cmd('emud.sock', 'SYSTEM_RESET\tpsx').startswith('OK')
+          and cmd('emud.sock', 'SYSTEM_RESET\tsnes').startswith('OK') and os.listdir(sysdir) == [])
+    cmd('emud.sock', 'GAME_RESET\t' + psx)
+    open(t + '/hdmi-enabled', 'w').write('disabled\n')
+
     check('reset', cmd('emud.sock', 'GAME_RESET\t' + game).startswith('OK'))
     check('reset removes file', not os.path.exists('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)))
     check('inherited again', 'core=snes9x\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))

@@ -792,7 +792,29 @@ fn main() {
                 (&s(ui, 454), &s(ui, 528).replace("{0}", &s(ui, 52)), &s(ui, 1381), true, -1),
                 (&s(ui, 535), "", &s(ui, 536), false, -1)]));
         })),
+        /* System Settings (GitHub #12): a game inheriting its system, then
+         * the system's page inside the shell. */
+        ("game_settings_system", Box::new(|ui| {
+            ui.set_gen_index(0);
+            let sys = s(ui, 1448);
+            ui.set_gen_rows(gen(&[(&s(ui, 1452).replace("{0}", "PlayStation"), "", &s(ui, 1453), true, -1),
+                (&s(ui, 525), &sys.replace("{0}", "swanstation"), "", true, -1),
+                (&s(ui, 1253), "", "", true, -1),
+                (&s(ui, 526), &sys.replace("{0}", "4:3"), "", true, -1), (&s(ui, 527), &s(ui, 534), "", true, -1),
+                (&s(ui, 454), &sys.replace("{0}", &s(ui, 1380)), &s(ui, 1381), true, -1),
+                (&s(ui, 535), "", &s(ui, 536), false, -1)]));
+        })),
+        ("game_settings_system_page", Box::new(|ui| {
+            ui.set_gen_index(5); ui.set_settings_system_scope(true);
+            ui.set_gen_section(s(ui, 1452).replace("{0}", "PlayStation").into());
+            ui.set_gen_rows(gen(&[(&s(ui, 525), "swanstation", "", true, -1),
+                (&s(ui, 526), "4:3", "", true, -1), (&s(ui, 527), &s(ui, 528).replace("{0}", &s(ui, 532)), "", true, -1),
+                (&s(ui, 454), &s(ui, 1380), &s(ui, 1381), true, -1),
+                (&s(ui, 1450), "", &s(ui, 1449).replace("{0}", "3"), false, -1),
+                (&s(ui, 1451), "", &s(ui, 536), false, -1)]));
+        })),
         ("game_settings_dreamcast", Box::new(|ui| {
+            ui.set_gen_section(s(ui, 524).into()); ui.set_settings_system_scope(false);
             ui.set_gen_index(4);
             ui.set_details_title("Dead or Alive 2".into());
             ui.set_details_subtitle("Dreamcast".into());
@@ -823,6 +845,26 @@ fn main() {
             ui.set_gen_rows(gen(&[("PlayStation", &s(ui, 66), "", true, -1), ("Sega Saturn", &s(ui, 577), &p, true, -1),
                 ("Game Boy", &s(ui, 579), "", true, -1), ("Mega-CD / Sega CD", &s(ui, 577), &p, true, -1),
                 ("Neo Geo", &s(ui, 578), &p, true, -1), ("Atari Lynx", &s(ui, 579), "", true, -1)]));
+        })),
+        /* Settings → Gaming → System Settings (76) and a system (77). */
+        ("systems_list", Box::new(|ui| {
+            ui.set_settings_open(true); ui.set_gen_select(true); ui.set_details_active(false);
+            ui.set_settings_selected_index(3); ui.set_settings_view(76); ui.set_gen_index(1); ui.set_gen_scroll(0);
+            ui.set_gen_split(0); ui.set_gen_notice("".into());
+            ui.set_gen_section(s(ui, 1454).into());
+            ui.set_gen_rows(gen(&[("Game Boy Advance", "mgba", "", true, -1), ("PlayStation", "swanstation", "", true, -1),
+                ("Nintendo 64", "parallel_n64_nuubos", "", true, -1), ("Dreamcast", "flycast_nuubos", "", true, -1),
+                ("Nintendo DS", "melonds_nuubos", "", true, -1)]));
+        })),
+        ("system_settings", Box::new(|ui| {
+            ui.set_settings_view(77); ui.set_gen_index(3);
+            ui.set_gen_section("Nintendo 64".into());
+            ui.set_gen_rows(gen(&[(&s(ui, 525), &s(ui, 528).replace("{0}", "parallel_n64_nuubos"), "", true, -1),
+                (&s(ui, 526), &s(ui, 528).replace("{0}", &s(ui, 531)), "", true, -1),
+                (&s(ui, 527), &s(ui, 528).replace("{0}", &s(ui, 532)), "", true, -1),
+                (&s(ui, 1339), &s(ui, 1341), &s(ui, 1342), true, -1),
+                (&s(ui, 454), &s(ui, 528).replace("{0}", &s(ui, 1379)), &s(ui, 1382), true, -1),
+                (&s(ui, 1451), "", &s(ui, 536), false, -1)]));
         })),
         ("achievements", Box::new(|ui| {
             ui.set_settings_open(true); ui.set_gen_select(true); ui.set_details_active(false); ui.set_settings_selected_index(3); ui.set_settings_view(54); ui.set_gen_index(2); ui.set_gen_scroll(0); ui.set_gen_split(0);

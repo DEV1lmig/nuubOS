@@ -4818,7 +4818,7 @@ fn handle_settings_action(
         return;
     }
     if (52..=66).contains(&view) || view == filesui::RECOVERY_VIEW || view == tsui::VIEW
-        || view == storageui::DATA_VIEW {
+        || view == storageui::DATA_VIEW || view == gameui::SYSTEMS_VIEW || view == gameui::SYSTEM_VIEW {
         gameui::handle_page(ui, view, action);
         return;
     }

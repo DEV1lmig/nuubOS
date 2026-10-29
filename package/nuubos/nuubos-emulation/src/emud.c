@@ -53,7 +53,9 @@
  * <system> <key> <value> (empty value = inherit) and GAME_RESET <game>
  * change them. Only overrides are stored, per user, in
  * /userdata/users/<id>/appdata/nuubos-emulation/games/<game>.conf. They
- * apply at the next launch: core choice, aspect ratio and video filter on
+ * apply at the next launch. System Settings (GitHub #12): the same keys
+ * per system in .../nuubos-emulation/systems/<system>.conf; a key the game
+ * leaves unset follows its system: core choice, aspect ratio and video filter on
  * top of the user's RetroArch configuration, and the emulation accuracy of
  * melonDS-nuubOS and Flycast (translucent sorting) and the 3D render resolution (resolution_options) in the
  * user's core options for the session. RetroArch saves its whole
@@ -193,6 +195,8 @@
 #define STATE_USERS "/state/users"
 #endif
 #define GAME_SETTINGS_SUBDIR "appdata/nuubos-emulation/games"
+/* System Settings (GitHub #12): the same keys for every game of a system. */
+#define SYSTEM_SETTINGS_SUBDIR "appdata/nuubos-emulation/systems"
 #define EMU_SETTINGS_FILE "appdata/nuubos-emulation/settings.conf"
 #define ACHIEVEMENTS_FILE "secrets/retroachievements.conf"
 #define PROFILE_FILE "profile.conf"
@@ -1779,14 +1783,12 @@ static void overrides_path(const char *user, const char *game, char *out, size_t
 	snprintf(out, size, USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR "/%s.conf", user, game);
 }
 
-static void load_overrides(const char *user, const char *game, struct game_overrides *o)
+static void load_overrides_at(const char *path, struct game_overrides *o)
 {
-	char path[PATH_MAX];
 	char line[PATH_MAX + 32];
 	FILE *fp;
 
 	memset(o, 0, sizeof(*o));
-	overrides_path(user, game, path, sizeof(path));
 	fp = fopen(path, "r");
 	if (!fp)
 		return;
@@ -1825,21 +1827,67 @@ static void load_overrides(const char *user, const char *game, struct game_overr
 	fclose(fp);
 }
 
-static int save_overrides(const char *user, const char *game, const struct game_overrides *o)
+static void load_overrides(const char *user, const char *game, struct game_overrides *o)
 {
 	char path[PATH_MAX];
+
+	overrides_path(user, game, path, sizeof(path));
+	load_overrides_at(path, o);
+}
+
+static void system_overrides_path(const char *user, const char *system, char *out, size_t size)
+{
+	snprintf(out, size, USERS_DIR "/%s/" SYSTEM_SETTINGS_SUBDIR "/%s.conf", user, system);
+}
+
+static void load_system_overrides(const char *user, const char *system, struct game_overrides *o)
+{
+	char path[PATH_MAX];
+
+	system_overrides_path(user, system, path, sizeof(path));
+	load_overrides_at(path, o);
+}
+
+/* The keys a system can set (System Settings); the rest are the game's
+ * own (layout, stylus, cheats, CPU step). */
+static bool system_keys_set(const struct game_overrides *o)
+{
+	return o->core[0] || o->aspect[0] || o->filter[0] || o->accuracy[0] || o->n64_pak[0] || o->resolution[0];
+}
+
+static void clear_system_keys(struct game_overrides *o)
+{
+	o->core[0] = o->aspect[0] = o->filter[0] = o->accuracy[0] = o->n64_pak[0] = o->resolution[0] = '\0';
+}
+
+/* What a game inherits: its own value, else its system's. */
+static void inherit_system(struct game_overrides *o, const struct game_overrides *sys)
+{
+	if (!o->core[0])
+		copy_text(o->core, sizeof(o->core), sys->core);
+	if (!o->aspect[0])
+		copy_text(o->aspect, sizeof(o->aspect), sys->aspect);
+	if (!o->filter[0])
+		copy_text(o->filter, sizeof(o->filter), sys->filter);
+	if (!o->accuracy[0])
+		copy_text(o->accuracy, sizeof(o->accuracy), sys->accuracy);
+	if (!o->n64_pak[0])
+		copy_text(o->n64_pak, sizeof(o->n64_pak), sys->n64_pak);
+	if (!o->resolution[0])
+		copy_text(o->resolution, sizeof(o->resolution), sys->resolution);
+}
+
+static int save_overrides_at(const char *dir, const char *path, const struct game_overrides *o)
+{
 	char tmp[PATH_MAX + 8];
-	char dir[PATH_MAX];
 	FILE *fp;
 	int rc = 0;
 
-	overrides_path(user, game, path, sizeof(path));
-	/* Nothing overridden: no file, the game inherits everything. */
+	/* Nothing overridden: no file, everything is inherited. */
 	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
 	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] && !o->nds_corner[0] &&
 	    !o->n64_pak[0] && !o->resolution[0] && !o->cpu_level[0])
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
-	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
 	if (mkdir_p(dir) != 0)
 		return -1;
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
@@ -1879,6 +1927,26 @@ static int save_overrides(const char *user, const char *game, const struct game_
 	if (rc != 0)
 		unlink(tmp);
 	return rc;
+}
+
+static int save_overrides(const char *user, const char *game, const struct game_overrides *o)
+{
+	char path[PATH_MAX];
+	char dir[PATH_MAX];
+
+	overrides_path(user, game, path, sizeof(path));
+	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
+	return save_overrides_at(dir, path, o);
+}
+
+static int save_system_overrides(const char *user, const char *system, const struct game_overrides *o)
+{
+	char path[PATH_MAX];
+	char dir[PATH_MAX];
+
+	system_overrides_path(user, system, path, sizeof(path));
+	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" SYSTEM_SETTINGS_SUBDIR, user);
+	return save_overrides_at(dir, path, o);
 }
 
 static bool valid_aspect(const char *v)
@@ -4149,6 +4217,13 @@ static const char *launch(const char *game, const char *mode, const char *net)
 			  core_path, sizeof(core_path)))
 		return "no-core";
 	load_overrides(session.user, game, &overrides);
+	{
+		struct game_overrides sys;
+
+		/* What the game leaves unset comes from its System Settings. */
+		load_system_overrides(session.user, session.system, &sys);
+		inherit_system(&overrides, &sys);
+	}
 	load_achievements(session.user, &achievements);
 	session.hardcore = achievements.enabled && achievements.hardcore;
 	if (session.hardcore && !strncmp(mode, "slot:", 5))
@@ -5072,16 +5147,72 @@ static bool session_running(struct client *c)
 	return false;
 }
 
+/* Games of a system with their own value for a System Settings key; with
+ * reset those values go (the game follows its system again; its layout,
+ * stylus, cheats stay). */
+static int system_games(const char *user, const char *system, bool reset)
+{
+	char dir[PATH_MAX];
+	char path[PATH_MAX + 300];
+	char command[96];
+	char answer[PATH_MAX + 128];
+	struct dirent *e;
+	DIR *d;
+	int n = 0;
+
+	snprintf(dir, sizeof(dir), USERS_DIR "/%s/" GAME_SETTINGS_SUBDIR, user);
+	if (!(d = opendir(dir)))
+		return 0;
+	while ((e = readdir(d))) {
+		struct game_overrides o;
+		char game[64];
+		char *dot;
+		size_t len;
+
+		copy_text(game, sizeof(game), e->d_name);
+		if (!(dot = strstr(game, ".conf")) || dot[5])
+			continue;
+		*dot = '\0';
+		if (!valid_game(game))
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		load_overrides_at(path, &o);
+		if (!system_keys_set(&o))
+			continue;
+		snprintf(command, sizeof(command), "RESOLVE\t%s", game);
+		len = strlen(system);
+		if (library_request(command, answer, sizeof(answer)) != 0 || strncmp(answer, "OK ", 3) ||
+		    strncmp(answer + 3, system, len) || answer[3 + len] != '\t')
+			continue;
+		n++;
+		if (reset) {
+			clear_system_keys(&o);
+			if (save_overrides(user, game, &o) != 0)
+				log_msg("emud: resetting the settings of %s failed", game);
+		}
+	}
+	closedir(d);
+	return n;
+}
+
 /* GAME_SETTINGS <game> <system> | GAME_SET <game> <system> <key> <value> |
- * GAME_RESET <game>, for the active user. */
+ * GAME_RESET <game>; System Settings (GitHub #12): SYSTEM_SETTINGS
+ * <system> | SYSTEM_SET <system> <key> <value> | SYSTEM_RESET <system> |
+ * SYSTEM_RESET_GAMES <system> (the games' own values of these keys go);
+ * for the active user. A game's unset key follows its system, a system's
+ * the default. GAME_SETTINGS also lists the system's values (system_*),
+ * SYSTEM_SETTINGS the games with their own values (games=). */
 static void handle_game_settings(struct client *c, const char *verb, char *arg)
 {
 	char *fields[4] = { arg, NULL, NULL, NULL };
+	bool scope_system = !strncmp(verb, "SYSTEM_", 7);
+	const char *game = NULL, *system;
+	char *key, *value;
 	char user[64];
 	char cores[512];
 	char def_core[64];
 	char def_path[PATH_MAX];
-	struct game_overrides o;
+	struct game_overrides o, sys;
 	int n = 1;
 
 	for (char *p = arg; *p && n < 4; p++)
@@ -5089,27 +5220,55 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 			*p = '\0';
 			fields[n++] = p + 1;
 		}
-	if (!valid_game(fields[0])) {
-		reply(c, "ERR game\n");
-		return;
+	if (scope_system) {
+		system = fields[0];
+		key = fields[1];
+		value = fields[2];
+	} else {
+		game = fields[0];
+		system = fields[1];
+		key = fields[2];
+		value = fields[3];
+		if (!valid_game(game)) {
+			reply(c, "ERR game\n");
+			return;
+		}
 	}
 	if (!read_active_user(user, sizeof(user))) {
 		reply(c, "ERR no-user\n");
 		return;
 	}
-	load_overrides(user, fields[0], &o);
 	if (!strcmp(verb, "GAME_RESET")) {
 		memset(&o, 0, sizeof(o));
-		reply(c, save_overrides(user, fields[0], &o) == 0 ? "OK\n" : "ERR storage\n");
+		reply(c, save_overrides(user, game, &o) == 0 ? "OK\n" : "ERR storage\n");
 		return;
 	}
-	if (!fields[1] || !fields[1][0] || strchr(fields[1], '/')) {
+	if (!system || !system[0] || strchr(system, '/') || system[0] == '.') {
 		reply(c, "ERR system\n");
 		return;
 	}
-	available_cores(fields[1], cores, sizeof(cores));
-	if (!strcmp(verb, "GAME_SETTINGS")) {
-		char out[1280];
+	memset(&sys, 0, sizeof(sys));
+	if (scope_system) {
+		load_system_overrides(user, system, &o);
+	} else {
+		load_overrides(user, game, &o);
+		load_system_overrides(user, system, &sys);
+	}
+	if (!strcmp(verb, "SYSTEM_RESET")) {
+		memset(&o, 0, sizeof(o));
+		reply(c, save_system_overrides(user, system, &o) == 0 ? "OK\n" : "ERR storage\n");
+		return;
+	}
+	if (!strcmp(verb, "SYSTEM_RESET_GAMES")) {
+		char out[32];
+
+		snprintf(out, sizeof(out), "OK %d\n", system_games(user, system, true));
+		reply(c, out);
+		return;
+	}
+	available_cores(system, cores, sizeof(cores));
+	if (!strcmp(verb, "GAME_SETTINGS") || !strcmp(verb, "SYSTEM_SETTINGS")) {
+		char out[1536];
 		char accuracy_default[16];
 		char res_value[64];
 		const char *res_default = "";
@@ -5121,9 +5280,12 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 
 		/* filter_default: what an empty filter gives (write_presentation) */
 		load_settings(user, &settings);
-		system_screen(fields[1], screen, sizeof(screen));
+		system_screen(system, screen, sizeof(screen));
 		def_core[0] = '\0';
-		(void)resolve_core(fields[1], def_core, sizeof(def_core), def_path, sizeof(def_path));
+		(void)resolve_core(system, def_core, sizeof(def_core), def_path, sizeof(def_path));
+		/* A game's default emulator is its system's choice. */
+		if (sys.core[0] && list_has(cores, sys.core))
+			copy_text(def_core, sizeof(def_core), sys.core);
 		effective = o.core[0] && list_has(cores, o.core) ? o.core : def_core;
 		/* Emulation accuracy: melonDS-nuubOS and Flycast; the default is
 		 * the user's core option (nuubOS ships "fast" for melonDS, per
@@ -5131,11 +5293,11 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 		snprintf(def_path, sizeof(def_path),
 			 USERS_DIR "/%s/appdata/retroarch/retroarch-core-options.cfg", user);
 		if (flycast_core(effective)) {
-			char value[64];
+			char option[64];
 
 			copy_text(accuracy_default, sizeof(accuracy_default),
-				  read_core_option(def_path, FLYCAST_SORTING, value, sizeof(value)) &&
-				  !strcmp(value, FLYCAST_SORTING_ACCURATE) ? "accurate" : "fast");
+				  read_core_option(def_path, FLYCAST_SORTING, option, sizeof(option)) &&
+				  !strcmp(option, FLYCAST_SORTING_ACCURATE) ? "accurate" : "fast");
 		} else if (!read_core_option(def_path, "melonds_accuracy", accuracy_default,
 					     sizeof(accuracy_default))) {
 			copy_text(accuracy_default, sizeof(accuracy_default), "fast");
@@ -5156,45 +5318,57 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 			       "aspect=%s\nfilter=%s\nfilter_default=%s\n"
 			       "accuracy_supported=%d\naccuracy=%s\naccuracy_default=%s\n"
 			       "pak_supported=%d\npak=%s\n"
-			       "resolution_supported=%d\nresolution=%s\nresolution_default=%s\nend=1\n",
+			       "resolution_supported=%d\nresolution=%s\nresolution_default=%s\n"
+			       "system_core=%s\nsystem_aspect=%s\nsystem_filter=%s\nsystem_accuracy=%s\n"
+			       "system_pak=%s\nsystem_resolution=%s\ngames=%d\nend=1\n",
 			       effective, def_core, o.core, cores, o.aspect, o.filter,
 			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp",
 			       !strcmp(effective, MELONDS_NUUBOS) || flycast_core(effective),
 			       o.accuracy, accuracy_default,
-			       !strcmp(fields[1], "n64"), o.n64_pak,
-			       res != NULL, o.resolution, res_default);
+			       !strcmp(system, "n64"), o.n64_pak,
+			       res != NULL, o.resolution, res_default,
+			       sys.core[0] && list_has(cores, sys.core) ? sys.core : "", sys.aspect, sys.filter,
+			       sys.accuracy, sys.n64_pak, sys.resolution,
+			       scope_system ? system_games(user, system, false) : 0);
 		if (len > 0 && write_all(c->fd, out, (size_t)len) != 0)
 			close_client(c);
 		return;
 	}
-	/* GAME_SET; an empty value (inherit) arrives without its field: the
-	 * request line loses its trailing tab with the other white space. */
-	if (!fields[2]) {
+	/* GAME_SET / SYSTEM_SET; an empty value (inherit) arrives without its
+	 * field: the request line loses its trailing tab with the other white
+	 * space. */
+	if (!key) {
 		reply(c, "ERR args\n");
 		return;
 	}
-	if (!fields[3])
-		fields[3] = fields[2] + strlen(fields[2]);
-	if (!strcmp(fields[2], "core") && (!fields[3][0] || list_has(cores, fields[3])))
-		copy_text(o.core, sizeof(o.core), fields[3]);
-	else if (!strcmp(fields[2], "aspect") && (!fields[3][0] || valid_aspect(fields[3])))
-		copy_text(o.aspect, sizeof(o.aspect), fields[3]);
-	else if (!strcmp(fields[2], "filter") && (!fields[3][0] || valid_filter(fields[3])))
-		copy_text(o.filter, sizeof(o.filter), fields[3]);
-	else if (!strcmp(fields[2], "accuracy") &&
-		 (!fields[3][0] || !strcmp(fields[3], "fast") || !strcmp(fields[3], "accurate")))
-		copy_text(o.accuracy, sizeof(o.accuracy), fields[3]);
-	else if (!strcmp(fields[2], "pak") &&
-		 (!fields[3][0] || !strcmp(fields[3], "rumble") || !strcmp(fields[3], "memory")))
-		copy_text(o.n64_pak, sizeof(o.n64_pak), strcmp(fields[3], "rumble") ? fields[3] : "");
-	else if (!strcmp(fields[2], "resolution") &&
-		 (!fields[3][0] || !strcmp(fields[3], "1x") || !strcmp(fields[3], "2x")))
-		copy_text(o.resolution, sizeof(o.resolution), fields[3]);
+	if (!value)
+		value = key + strlen(key);
+	if (!strcmp(key, "core") && (!value[0] || list_has(cores, value)))
+		copy_text(o.core, sizeof(o.core), value);
+	else if (!strcmp(key, "aspect") && (!value[0] || valid_aspect(value)))
+		copy_text(o.aspect, sizeof(o.aspect), value);
+	else if (!strcmp(key, "filter") && (!value[0] || valid_filter(value)))
+		copy_text(o.filter, sizeof(o.filter), value);
+	else if (!strcmp(key, "accuracy") &&
+		 (!value[0] || !strcmp(value, "fast") || !strcmp(value, "accurate")))
+		copy_text(o.accuracy, sizeof(o.accuracy), value);
+	else if (!strcmp(key, "pak") &&
+		 (!value[0] || !strcmp(value, "rumble") || !strcmp(value, "memory")))
+		/* A game under a system set to Controller Pak keeps an explicit
+		 * Rumble Pak; a system's rumble is the default (empty). */
+		copy_text(o.n64_pak, sizeof(o.n64_pak),
+			  !strcmp(value, "rumble") && (scope_system || !sys.n64_pak[0]) ? "" : value);
+	else if (!strcmp(key, "resolution") &&
+		 (!value[0] || !strcmp(value, "1x") || !strcmp(value, "2x")))
+		copy_text(o.resolution, sizeof(o.resolution), value);
 	else {
 		reply(c, "ERR value\n");
 		return;
 	}
-	reply(c, save_overrides(user, fields[0], &o) == 0 ? "OK\n" : "ERR storage\n");
+	if (scope_system)
+		reply(c, save_system_overrides(user, system, &o) == 0 ? "OK\n" : "ERR storage\n");
+	else
+		reply(c, save_overrides(user, game, &o) == 0 ? "OK\n" : "ERR storage\n");
 }
 
 /* Cheats are refused in hardcore mode and with netplay. */
@@ -5880,7 +6054,9 @@ static void handle_command(struct client *c, char *line)
 		handle_hotkey(arg);
 		reply(c, "OK\n");
 	} else if ((!strcmp(line, "GAME_SETTINGS") || !strcmp(line, "GAME_SET") ||
-		    !strcmp(line, "GAME_RESET")) && arg) {
+		    !strcmp(line, "GAME_RESET") || !strcmp(line, "SYSTEM_SETTINGS") ||
+		    !strcmp(line, "SYSTEM_SET") || !strcmp(line, "SYSTEM_RESET") ||
+		    !strcmp(line, "SYSTEM_RESET_GAMES")) && arg) {
 		handle_game_settings(c, line, arg);
 	} else if (!strcmp(line, "SETTINGS")) {
 		handle_settings(c, NULL, NULL);
