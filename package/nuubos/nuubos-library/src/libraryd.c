@@ -75,7 +75,9 @@
 /* This console's identity among the user's consoles (created once). */
 #define CONSOLE_ID_FILE STATE_ROOT "/config/console-id"
 /* Library view of the console (device setting): SHOW_UNAVAILABLE=1 lists
- * games whose file is gone or on a games card that is not inserted. */
+ * games whose file is gone or on a games card that is not inserted;
+ * WRAP_ROWS=1 makes Home's rows go round from the last item to the first
+ * (GitHub #28, on by default: user decision 2026-10-29). */
 #define LIBRARY_CONFIG STATE_ROOT "/config/nuubos-library.conf"
 #define ACTIVE_DIR RUN_ROOT "/user"
 #define ACTIVE_FILE ACTIVE_DIR "/active"
@@ -267,6 +269,7 @@ static long long boot_scan_deadline_ms;
 /* Unavailable games in the lists (off by default, user request 2026-10-20:
  * they cluttered the library). Search, counts and previews never had them. */
 static bool show_unavailable;
+static bool wrap_rows = true;
 
 /* Games added or available again since the last SCAN request found idle. */
 static size_t scan_new;
@@ -1384,14 +1387,17 @@ static char *find_cover(int sys, const char *rel)
 /*
  * The system of a file: its nearest folder named after a system when that
  * system takes the file, else the only system taking its extension, else a
- * header sniff for shared disc/cartridge formats.
+ * header sniff for shared disc/cartridge formats. A file in a system's
+ * folder that the system does not take is none: the data of a game in
+ * another format (GitHub #31: the .col stages of a PSP port were listed as
+ * ColecoVision games).
  */
 static int classify(const char *rel, const char *name, int folder_sys)
 {
 	int sys;
 
-	if (folder_sys >= 0 && system_accepts(folder_sys, name))
-		return folder_sys;
+	if (folder_sys >= 0)
+		return system_accepts(folder_sys, name) ? folder_sys : -1;
 	sys = system_by_extension(name);
 	if (sys >= 0)
 		return sys;
@@ -1585,7 +1591,7 @@ static void *scan_main(void *arg)
 		free(ctx.refs.items[i]);
 	free(ctx.refs.items);
 	if (skipped)
-		log_msg("scan: %zu files with a shared format outside a system folder were skipped",
+		log_msg("scan: %zu files no system takes there were skipped (shared format outside a system folder, or another system's file in one)",
 			skipped);
 	scan_output = ctx.out;
 	while (write(scan_pipe[1], &byte, 1) < 0 && errno == EINTR)
@@ -1719,6 +1725,31 @@ static void load_catalog(void)
  */
 static bool referenced_elsewhere(const char *rel, const struct game *self);
 
+/* A file in a system's folder that this system does not take (classify):
+ * an entry of an older scan that is no game (GitHub #31). */
+static bool outside_its_folder(const char *rel)
+{
+	char dir[PATH_MAX];
+	const char *name;
+	char *save = NULL;
+	int folder_sys = -1;
+
+	if (!strncmp(rel, SD2_PREFIX, strlen(SD2_PREFIX)))
+		rel += strlen(SD2_PREFIX);
+	name = strrchr(rel, '/');
+	if (!name || (size_t)(name - rel) >= sizeof(dir))
+		return false;
+	memcpy(dir, rel, (size_t)(name - rel));
+	dir[name - rel] = '\0';
+	for (char *part = strtok_r(dir, "/", &save); part; part = strtok_r(NULL, "/", &save)) {
+		int here = system_by_folder(part);
+
+		if (here >= 0)
+			folder_sys = here;
+	}
+	return folder_sys >= 0 && !system_accepts(folder_sys, name + 1);
+}
+
 static bool reconcile(struct scan_result *scan)
 {
 	size_t added = 0, back = 0, gone = 0, changed = 0, duplicates = 0, absorbed = 0;
@@ -1797,10 +1828,10 @@ static bool reconcile(struct scan_result *scan)
 		char path[PATH_MAX];
 
 		/* Its file is still there but now belongs to another game (a
-		 * disc of a set, a file a playlist lists): the entry goes
-		 * rather than staying unavailable. */
+		 * disc of a set, a file a playlist lists) or to no system: the
+		 * entry goes rather than staying unavailable. */
 		if (!g->seen && rom_path(path, sizeof(path), g->rel) && regular_file(path) &&
-		    referenced_elsewhere(g->rel, g)) {
+		    (referenced_elsewhere(g->rel, g) || outside_its_folder(g->rel))) {
 			free(g->rel);
 			free(g->title);
 			free(g->cover);
@@ -2158,11 +2189,15 @@ static void load_library_config(void)
 	FILE *fp = fopen(LIBRARY_CONFIG, "r");
 
 	show_unavailable = false;
+	wrap_rows = true;
 	if (!fp)
 		return;
-	while (fgets(line, sizeof(line), fp))
+	while (fgets(line, sizeof(line), fp)) {
 		if (!strncmp(line, "SHOW_UNAVAILABLE=", 17))
 			show_unavailable = atoi(line + 17) != 0;
+		else if (!strncmp(line, "WRAP_ROWS=", 10))
+			wrap_rows = atoi(line + 10) != 0;
+	}
 	fclose(fp);
 }
 
@@ -2171,7 +2206,8 @@ static int save_library_config(void)
 	char text[64];
 
 	mkdir_p(STATE_ROOT "/config");
-	snprintf(text, sizeof(text), "SHOW_UNAVAILABLE=%d\n", show_unavailable ? 1 : 0);
+	snprintf(text, sizeof(text), "SHOW_UNAVAILABLE=%d\nWRAP_ROWS=%d\n", show_unavailable ? 1 : 0,
+		 wrap_rows ? 1 : 0);
 	return write_atomic(LIBRARY_CONFIG, text, strlen(text));
 }
 
@@ -2564,8 +2600,8 @@ static void build_status(struct strbuf *b)
 		available++;
 		per_system[games[i].sys]++;
 	}
-	sb_append(b, "user=%s\nscanning=%d\ngames=%zu\nscan_new=%zu\nshow_unavailable=%d\n", active_user,
-		  scanning ? 1 : 0, available, scan_new, show_unavailable ? 1 : 0);
+	sb_append(b, "user=%s\nscanning=%d\ngames=%zu\nscan_new=%zu\nshow_unavailable=%d\nwrap_rows=%d\n",
+		  active_user, scanning ? 1 : 0, available, scan_new, show_unavailable ? 1 : 0, wrap_rows ? 1 : 0);
 	/* Where new games go (Web administration uploads): the games card
 	 * while it can be written, else USERDATA. */
 	sb_append(b, "games_root=%s\n", sd2_writable ? sd2_roms : ROMS_ROOT);
@@ -3198,6 +3234,10 @@ static void handle_command(struct client *c, char *line)
 		send_status(c);
 	} else if (!strcmp(line, "SHOW_UNAVAILABLE") && arg && (!strcmp(arg, "0") || !strcmp(arg, "1"))) {
 		show_unavailable = arg[0] == '1';
+		reply(c, save_library_config() ? "ERR persistence\n" : "OK\n");
+		notify_all();
+	} else if (!strcmp(line, "WRAP_ROWS") && arg && (!strcmp(arg, "0") || !strcmp(arg, "1"))) {
+		wrap_rows = arg[0] == '1';
 		reply(c, save_library_config() ? "ERR persistence\n" : "OK\n");
 		notify_all();
 	} else if (!strcmp(line, "SCAN")) {

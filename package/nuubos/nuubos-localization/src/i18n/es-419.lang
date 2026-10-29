@@ -1465,3 +1465,5 @@
 1464=Salto de cuadros
 1465=Auto (hasta 3)
 1466=Auto salta cuadros solo cuando el juego se pone lento
+1467=Filas en bucle
+1468=En el inicio, después del último elemento se vuelve al primero

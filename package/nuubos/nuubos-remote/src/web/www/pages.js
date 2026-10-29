@@ -1414,6 +1414,8 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
       value: scanning ? C(410, 'Searching for games…') : '', disabled: scanning, on: () => act('lib.scan') }),
     row({ key: 'unav', title: C(1319, 'Show Unavailable Games'), detail: C(1320, 'Games whose file is missing or on an SD2 card that is not inserted'),
       toggle: on01(lib.show_unavailable), set: (v) => act('lib.unavailable', { v }, { topics: ['library'] }) }),
+    row({ key: 'wrap', title: C(1467, 'Wrap Around Rows'), detail: C(1468, 'On Home, going past the last item returns to the first'),
+      toggle: on01(lib.wrap_rows), set: (v) => act('lib.wrap', { v }, { topics: ['library'] }) }),
     row({ key: 'src', title: C(792, 'Metadata Source'), value: src[0], detail: C(src[1], SOURCE_DETAILS[src[1]]), chevron: true,
       on: () => pickAndAct(C(792, 'Metadata Source'), Object.entries(SOURCES).map(([value, s]) => ({ value, label: s[0], detail: C(s[1], SOURCE_DETAILS[s[1]]) })), ss.provider, 'scraper.provider') }),
     /* Cover Region (GitHub #10); TheGamesDB has one cover a game. */

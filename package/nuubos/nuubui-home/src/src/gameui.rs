@@ -2119,6 +2119,9 @@ fn gaming_rows(ui: &HomeWindow, st: &State) -> Vec<(String, GenRow, bool)> {
     rows.push(("unavailable".into(), toggle(tr(ui, 1319, "Show Unavailable Games"),
         crate::library::SHOW_UNAVAILABLE.load(std::sync::atomic::Ordering::Relaxed),
         tr(ui, 1320, "Games whose file is missing or on an SD2 card that is not inserted")), true));
+    rows.push(("wrap-rows".into(), toggle(tr(ui, 1467, "Wrap Around Rows"),
+        crate::library::WRAP_ROWS.load(std::sync::atomic::Ordering::Relaxed),
+        tr(ui, 1468, "On Home, going past the last item returns to the first")), true));
     let mut source = nav(tr(ui, 792, "Metadata Source"), source_name(&st.ss_provider).to_owned());
     source.detail = source_detail(ui, &st.ss_provider).into();
     rows.push(("ss-source".into(), source, true));
@@ -2338,6 +2341,12 @@ pub fn handle_gaming(ui: &HomeWindow, action: &str) {
                     crate::library::SHOW_UNAVAILABLE.store(on, std::sync::atomic::Ordering::Relaxed);
                     render_gaming(ui);
                     thread::spawn(move || { let _ = library(&format!("SHOW_UNAVAILABLE\t{}", if on { 1 } else { 0 }), false); });
+                }
+                "wrap-rows" => {
+                    let on = !crate::library::WRAP_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+                    crate::library::WRAP_ROWS.store(on, std::sync::atomic::Ordering::Relaxed);
+                    render_gaming(ui);
+                    thread::spawn(move || { let _ = library(&format!("WRAP_ROWS\t{}", if on { 1 } else { 0 }), false); });
                 }
                 "scan" if !ui.get_library_scanning() => {
                     STATE.with(|st| st.borrow_mut().lib_scan = 1);

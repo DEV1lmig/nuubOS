@@ -36,6 +36,9 @@ pub static GAME_RUNNING: AtomicBool = AtomicBool::new(false);
 pub static PORT_RUNNING: AtomicBool = AtomicBool::new(false);
 /* libraryd lists unavailable games (Settings → Gaming → LIBRARY). */
 pub static SHOW_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+/* Home's rows go round from the last item to the first (GitHub #28;
+ * libraryd device setting, on by default). */
+pub static WRAP_ROWS: AtomicBool = AtomicBool::new(true);
 /* The first library snapshot reached Home (home_covers_settled). */
 static SNAPSHOT_SEEN: AtomicBool = AtomicBool::new(false);
 /* Decoded covers kept in memory (LRU). */
@@ -254,6 +257,7 @@ fn parse_snapshot(reply: &str) -> LibSnapshot {
             "scanning" => s.scanning = value == "1",
             "scan_new" => s.scan_new = value.parse().unwrap_or(0),
             "show_unavailable" => SHOW_UNAVAILABLE.store(value == "1", Ordering::Relaxed),
+            "wrap_rows" => WRAP_ROWS.store(value == "1", Ordering::Relaxed),
             "recent" => s.recent.extend(parse_game(value)),
             "favorites_pending" => s.favorites_pending = value != "0",
             "collection" => {
@@ -1760,8 +1764,12 @@ fn move_column(ui: &HomeWindow, delta: i32) -> bool {
         ROW_COLLECTIONS => (ui.get_home_collections().row_count(), ui.get_home_collections_index()),
         _ => (ui.get_home_apps().row_count(), ui.get_home_apps_index()),
     };
-    let next = index + delta;
-    if count == 0 || next < 0 || next >= count as i32 {
+    let count = count as i32;
+    let mut next = index + delta;
+    if count > 1 && (next < 0 || next >= count) && WRAP_ROWS.load(Ordering::Relaxed) {
+        next = next.rem_euclid(count);
+    }
+    if count == 0 || next < 0 || next >= count {
         return false;
     }
     match ui.get_home_row() {

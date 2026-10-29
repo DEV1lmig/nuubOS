@@ -1465,3 +1465,5 @@
 1464=Frameskip
 1465=Auto (up to 3)
 1466=Auto skips frames only when the game slows down
+1467=Wrap Around Rows
+1468=On Home, going past the last item returns to the first

@@ -1465,3 +1465,5 @@
 1464=Pulo de quadros
 1465=Auto (até 3)
 1466=Auto pula quadros só quando o jogo fica lento
+1467=Fileiras em loop
+1468=No início, depois do último item volta para o primeiro
