@@ -813,6 +813,41 @@ fn main() {
                 (&s(ui, 1450), "", &s(ui, 1449).replace("{0}", "3"), false, -1),
                 (&s(ui, 1451), "", &s(ui, 536), false, -1)]));
         })),
+        /* Controls (user request 2026-10-29): a NES game whose top and
+         * left buttons press A and B, the B button following its system. */
+        ("game_controls", Box::new(|ui| {
+            ui.set_gen_index(2); ui.set_settings_system_scope(false);
+            ui.set_gen_section(s(ui, 1456).into());
+            let sys = s(ui, 1448);
+            let none = s(ui, 173);
+            ui.set_gen_rows(gen(&[(&s(ui, 337), &s(ui, 528).replace("{0}", "B"), "", true, -1),
+                (&s(ui, 338), &s(ui, 528).replace("{0}", "A"), "", true, -1),
+                (&s(ui, 339), "A", "", true, -1), (&s(ui, 340), &sys.replace("{0}", "B"), "", true, -1),
+                (&s(ui, 341), &s(ui, 528).replace("{0}", "↑"), "", true, -1),
+                (&s(ui, 342), &s(ui, 528).replace("{0}", "↓"), "", true, -1),
+                (&s(ui, 345), &s(ui, 528).replace("{0}", &none), "", true, -1),
+                (&s(ui, 1458), "", &s(ui, 536), false, -1)]));
+        })),
+        ("game_controls_choice", Box::new(|ui| {
+            ui.set_settings_choice_title(s(ui, 339).into());
+            let labels = [s(ui, 528).replace("{0}", &s(ui, 173)), "A".into(), "B".into(), s(ui, 352),
+                s(ui, 351), s(ui, 341), s(ui, 342), s(ui, 343), s(ui, 344), s(ui, 173)];
+            let o: Vec<SettingsChoiceEntry> = labels.iter()
+                .map(|l| SettingsChoiceEntry { value: "".into(), label: l.as_str().into() }).collect();
+            ui.set_settings_choice_options(ModelRc::from(Rc::new(VecModel::from(o))));
+            ui.set_settings_choice_index(1);
+            ui.set_settings_choice_open(true);
+        })),
+        ("game_controls_psx", Box::new(|ui| {
+            ui.set_settings_choice_open(false);
+            ui.set_gen_index(0);
+            let d = s(ui, 528);
+            ui.set_gen_rows(gen(&[(&s(ui, 337), &d.replace("{0}", &s(ui, 1459)), "", true, -1),
+                (&s(ui, 338), &d.replace("{0}", &s(ui, 1460)), "", true, -1),
+                (&s(ui, 339), &d.replace("{0}", &s(ui, 1461)), "", true, -1),
+                (&s(ui, 340), &d.replace("{0}", &s(ui, 1462)), "", true, -1),
+                (&s(ui, 351), &d.replace("{0}", &s(ui, 351)), "", true, -1)]));
+        })),
         ("game_settings_dreamcast", Box::new(|ui| {
             ui.set_gen_section(s(ui, 524).into()); ui.set_settings_system_scope(false);
             ui.set_gen_index(4);

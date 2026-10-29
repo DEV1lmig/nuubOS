@@ -345,6 +345,8 @@ struct session {
 	int stdin_fd;
 	int stdout_fd;
 	int input_fd;
+	/* Controls of the game (REMAP to inputd), "control:target,...". */
+	char remap[512];
 	char out_buf[MAX_LINE];
 	size_t out_used;
 	char user[64];
@@ -460,6 +462,64 @@ struct discovery {
 	} hosts[16];
 };
 
+/* Controls (user request 2026-10-29): what each control of the console
+ * sends to the game's pad, per game over per system ("" = inherited, the
+ * control itself; "none" = nothing). Ids are the Controllers service's, in
+ * Game Hotkeys order; inputd applies them on the game gamepads (REMAP),
+ * the hotkey chords stay on the physical controls. */
+#define REMAP_COUNT 16
+static const char *const remap_controls[REMAP_COUNT] = {
+	"menu_confirm", "menu_back", "face_north", "face_west", "menu_up", "menu_down", "menu_left",
+	"menu_right", "l1", "r1", "l2", "r2", "l3", "r3", "settings", "select",
+};
+
+/* The buttons of each system's pad, as RetroArch's pad controls the cores
+ * map them to (their input descriptors, 2026-10-29): control:label, an
+ * empty label = the control's own name (Start, Select), "#<n>" = string n.
+ * The D-pad is every system's. Systems not listed use RetroArch's names. */
+static const struct pad_layout {
+	const char *systems; /* space separated, with a space at both ends */
+	const char *buttons;
+} pad_layouts[] = {
+	{ " nes fds ", "menu_back:A,menu_confirm:B,select:,settings:" },
+	{ " snes satellaview sufami nds ",
+	  "menu_back:A,menu_confirm:B,face_north:X,face_west:Y,l1:L,r1:R,select:,settings:" },
+	{ " gb gbc megaduck ", "menu_back:A,menu_confirm:B,select:,settings:" },
+	{ " gba ", "menu_back:A,menu_confirm:B,l1:L,r1:R,select:,settings:" },
+	{ " n64 ", "menu_confirm:A,face_west:B,l2:Z,l1:L,r1:R,settings:" },
+	{ " megadrive segacd sega32x ",
+	  "face_west:A,menu_confirm:B,menu_back:C,l1:X,face_north:Y,r1:Z,select:Mode,settings:" },
+	{ " mastersystem gamegear sg1000 ", "menu_confirm:1,menu_back:2,settings:" },
+	{ " psx ", "menu_confirm:#1459,menu_back:#1460,face_north:#1461,face_west:#1462,"
+		   "l1:L1,r1:R1,l2:L2,r2:R2,l3:L3,r3:R3,select:,settings:" },
+	{ " psp ", "menu_confirm:#1459,menu_back:#1460,face_north:#1461,face_west:#1462,l1:L,r1:R,select:,settings:" },
+	{ " saturn ", "menu_confirm:A,menu_back:B,l1:C,face_west:X,face_north:Y,r1:Z,l2:L,r2:R,settings:" },
+	{ " dreamcast ", "menu_confirm:A,menu_back:B,face_west:X,face_north:Y,l2:L,r2:R,settings:" },
+	{ " pcengine pcecd ", "menu_back:I,menu_confirm:II,select:,settings:Run" },
+};
+
+static const char pad_generic[] =
+	"menu_back:A,menu_confirm:B,face_north:X,face_west:Y,l1:L,r1:R,l2:L2,r2:R2,l3:L3,r3:R3,select:,settings:";
+
+static const char *system_pad(const char *system)
+{
+	char word[40];
+
+	snprintf(word, sizeof(word), " %s ", system);
+	for (size_t i = 0; i < sizeof(pad_layouts) / sizeof(pad_layouts[0]); i++)
+		if (strstr(pad_layouts[i].systems, word))
+			return pad_layouts[i].buttons;
+	return pad_generic;
+}
+
+static int remap_index(const char *control)
+{
+	for (int i = 0; i < REMAP_COUNT; i++)
+		if (!strcmp(remap_controls[i], control))
+			return i;
+	return -1;
+}
+
 /* Explicit per-game overrides; empty = inherited. The cheats are the
  * user's choice for the game: the list (a .cht file) and the indices of
  * the cheats turned on in it ("0,4,7"). */
@@ -486,7 +546,35 @@ struct game_overrides {
 	/* Frame-rate aware CPU limit: the step the game needed, its next
 	 * launch starts there (no stutter at every launch while it climbs). */
 	char cpu_level[4];
+	/* Controls: the target of each of remap_controls. */
+	char remap[REMAP_COUNT][16];
 };
+
+static bool remap_set(const struct game_overrides *o)
+{
+	for (int i = 0; i < REMAP_COUNT; i++)
+		if (o->remap[i][0])
+			return true;
+	return false;
+}
+
+/* "control:target,..." of the controls set. */
+static void remap_list(const struct game_overrides *o, char *out, size_t size)
+{
+	size_t len = 0;
+
+	out[0] = '\0';
+	for (int i = 0; i < REMAP_COUNT; i++) {
+		int n;
+
+		if (!o->remap[i][0])
+			continue;
+		n = snprintf(out + len, size - len, "%s%s:%s", len ? "," : "", remap_controls[i], o->remap[i]);
+		if (n < 0 || (size_t)n >= size - len)
+			break;
+		len += (size_t)n;
+	}
+}
 
 /* Cores whose 3D render resolution Game Settings chooses (user decision
  * 2026-10-27): the option and its 1x (native) and 2x values, matched by the
@@ -1823,6 +1911,8 @@ static void load_overrides_at(const char *path, struct game_overrides *o)
 			copy_text(o->resolution, sizeof(o->resolution), eq);
 		else if (!strcmp(line, "cpu_level"))
 			copy_text(o->cpu_level, sizeof(o->cpu_level), eq);
+		else if (!strncmp(line, "remap_", 6) && remap_index(line + 6) >= 0)
+			copy_text(o->remap[remap_index(line + 6)], sizeof(o->remap[0]), eq);
 	}
 	fclose(fp);
 }
@@ -1848,16 +1938,18 @@ static void load_system_overrides(const char *user, const char *system, struct g
 	load_overrides_at(path, o);
 }
 
-/* The keys a system can set (System Settings); the rest are the game's
- * own (layout, stylus, cheats, CPU step). */
+/* The keys a system can set (System Settings, Controls); the rest are the
+ * game's own (layout, stylus, cheats, CPU step). */
 static bool system_keys_set(const struct game_overrides *o)
 {
-	return o->core[0] || o->aspect[0] || o->filter[0] || o->accuracy[0] || o->n64_pak[0] || o->resolution[0];
+	return o->core[0] || o->aspect[0] || o->filter[0] || o->accuracy[0] || o->n64_pak[0] || o->resolution[0] ||
+	       remap_set(o);
 }
 
 static void clear_system_keys(struct game_overrides *o)
 {
 	o->core[0] = o->aspect[0] = o->filter[0] = o->accuracy[0] = o->n64_pak[0] = o->resolution[0] = '\0';
+	memset(o->remap, 0, sizeof(o->remap));
 }
 
 /* What a game inherits: its own value, else its system's. */
@@ -1875,6 +1967,9 @@ static void inherit_system(struct game_overrides *o, const struct game_overrides
 		copy_text(o->n64_pak, sizeof(o->n64_pak), sys->n64_pak);
 	if (!o->resolution[0])
 		copy_text(o->resolution, sizeof(o->resolution), sys->resolution);
+	for (int i = 0; i < REMAP_COUNT; i++)
+		if (!o->remap[i][0])
+			copy_text(o->remap[i], sizeof(o->remap[i]), sys->remap[i]);
 }
 
 static int save_overrides_at(const char *dir, const char *path, const struct game_overrides *o)
@@ -1886,7 +1981,7 @@ static int save_overrides_at(const char *dir, const char *path, const struct gam
 	/* Nothing overridden: no file, everything is inherited. */
 	if (!o->core[0] && !o->aspect[0] && !o->filter[0] && !o->accuracy[0] &&
 	    !o->cheat_file[0] && !o->cheats[0] && !o->nds_layout[0] && !o->stylus[0] && !o->nds_corner[0] &&
-	    !o->n64_pak[0] && !o->resolution[0] && !o->cpu_level[0])
+	    !o->n64_pak[0] && !o->resolution[0] && !o->cpu_level[0] && !remap_set(o))
 		return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 	if (mkdir_p(dir) != 0)
 		return -1;
@@ -1918,6 +2013,9 @@ static int save_overrides_at(const char *dir, const char *path, const struct gam
 		fprintf(fp, "resolution=%s\n", o->resolution);
 	if (o->cpu_level[0])
 		fprintf(fp, "cpu_level=%s\n", o->cpu_level);
+	for (int i = 0; i < REMAP_COUNT; i++)
+		if (o->remap[i][0])
+			fprintf(fp, "remap_%s=%s\n", remap_controls[i], o->remap[i]);
 	if (ferror(fp))
 		rc = -1;
 	if (close_synced(fp) != 0)
@@ -2219,6 +2317,10 @@ static void send_hotkeys(void)
 	line[len++] = '\n';
 	if (write_all(session.input_fd, line, len) != 0)
 		log_msg("emud: hotkeys to inputd failed");
+	/* The game's Controls ("REMAP" alone = every control is itself). */
+	snprintf(line, sizeof(line), "REMAP %s\n", session.remap);
+	if (write_all(session.input_fd, line, strlen(line)) != 0)
+		log_msg("emud: controls to inputd failed");
 }
 
 /* ------------------------------------------------------------------ */
@@ -4223,6 +4325,7 @@ static const char *launch(const char *game, const char *mode, const char *net)
 		/* What the game leaves unset comes from its System Settings. */
 		load_system_overrides(session.user, session.system, &sys);
 		inherit_system(&overrides, &sys);
+		remap_list(&overrides, session.remap, sizeof(session.remap));
 	}
 	load_achievements(session.user, &achievements);
 	session.hardcore = achievements.enabled && achievements.hardcore;
@@ -5201,7 +5304,9 @@ static int system_games(const char *user, const char *system, bool reset)
  * SYSTEM_RESET_GAMES <system> (the games' own values of these keys go);
  * for the active user. A game's unset key follows its system, a system's
  * the default. GAME_SETTINGS also lists the system's values (system_*),
- * SYSTEM_SETTINGS the games with their own values (games=). */
+ * SYSTEM_SETTINGS the games with their own values (games=). Controls:
+ * pad= the system's buttons (pad_layouts), remap= / system_remap= the
+ * controls set ("control:target,..."), keys remap_<control> and remap. */
 static void handle_game_settings(struct client *c, const char *verb, char *arg)
 {
 	char *fields[4] = { arg, NULL, NULL, NULL };
@@ -5268,7 +5373,8 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 	}
 	available_cores(system, cores, sizeof(cores));
 	if (!strcmp(verb, "GAME_SETTINGS") || !strcmp(verb, "SYSTEM_SETTINGS")) {
-		char out[1536];
+		char out[3072];
+		char remap[512], system_remap[512];
 		char accuracy_default[16];
 		char res_value[64];
 		const char *res_default = "";
@@ -5313,6 +5419,8 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 				      !strcmp(res_value, res->x2) ? "2x" : "custom";
 		else if (res)
 			res_default = "1x";
+		remap_list(&o, remap, sizeof(remap));
+		remap_list(&sys, system_remap, sizeof(system_remap));
 		len = snprintf(out, sizeof(out),
 			       "core=%s\ncore_default=%s\ncore_override=%s\ncores=%s\n"
 			       "aspect=%s\nfilter=%s\nfilter_default=%s\n"
@@ -5320,7 +5428,8 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 			       "pak_supported=%d\npak=%s\n"
 			       "resolution_supported=%d\nresolution=%s\nresolution_default=%s\n"
 			       "system_core=%s\nsystem_aspect=%s\nsystem_filter=%s\nsystem_accuracy=%s\n"
-			       "system_pak=%s\nsystem_resolution=%s\ngames=%d\nend=1\n",
+			       "system_pak=%s\nsystem_resolution=%s\ngames=%d\n"
+			       "pad=%s\nremap=%s\nsystem_remap=%s\nend=1\n",
 			       effective, def_core, o.core, cores, o.aspect, o.filter,
 			       settings.crt && !strcmp(screen, "crt") ? "crt" : "sharp",
 			       !strcmp(effective, MELONDS_NUUBOS) || flycast_core(effective),
@@ -5329,7 +5438,8 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 			       res != NULL, o.resolution, res_default,
 			       sys.core[0] && list_has(cores, sys.core) ? sys.core : "", sys.aspect, sys.filter,
 			       sys.accuracy, sys.n64_pak, sys.resolution,
-			       scope_system ? system_games(user, system, false) : 0);
+			       scope_system ? system_games(user, system, false) : 0,
+			       system_pad(system), remap, system_remap);
 		if (len > 0 && write_all(c->fd, out, (size_t)len) != 0)
 			close_client(c);
 		return;
@@ -5361,6 +5471,13 @@ static void handle_game_settings(struct client *c, const char *verb, char *arg)
 	else if (!strcmp(key, "resolution") &&
 		 (!value[0] || !strcmp(value, "1x") || !strcmp(value, "2x")))
 		copy_text(o.resolution, sizeof(o.resolution), value);
+	/* Controls: "remap" clears them all (Reset Controls); remap_<control>
+	 * takes another control, "none" or "" (inherited). */
+	else if (!strcmp(key, "remap") && !value[0])
+		memset(o.remap, 0, sizeof(o.remap));
+	else if (!strncmp(key, "remap_", 6) && remap_index(key + 6) >= 0 &&
+		 (!value[0] || !strcmp(value, "none") || remap_index(value) >= 0))
+		copy_text(o.remap[remap_index(key + 6)], sizeof(o.remap[0]), value);
 	else {
 		reply(c, "ERR value\n");
 		return;

@@ -51,6 +51,17 @@ fn one_of(s: &str, list: &[&str]) -> Result<String, String> {
     }
 }
 
+/* Game/System Settings keys: the settings, "remap" (Reset Controls) and
+ * remap_<control> (Controls). */
+fn settings_key(s: &str) -> Result<String, String> {
+    const CONTROLS: [&str; 16] = ["menu_confirm", "menu_back", "face_north", "face_west", "menu_up", "menu_down",
+        "menu_left", "menu_right", "l1", "r1", "l2", "r2", "l3", "r3", "settings", "select"];
+    if s.strip_prefix("remap_").is_some_and(|c| CONTROLS.contains(&c)) {
+        return Ok(s.to_owned());
+    }
+    one_of(s, &["core", "aspect", "filter", "accuracy", "pak", "resolution", "remap"])
+}
+
 fn flag(s: &str) -> Result<&'static str, String> {
     match s {
         "1" | "true" => Ok("1"),
@@ -508,13 +519,13 @@ pub fn action(b: &Value) -> R {
         "emu.quit" => { sock_ok("emud", "QUIT")?; ok() }
         "game.set" => {
             sock_ok("emud", &format!("GAME_SET\t{}\t{}\t{}\t{}", game_id(&a("id"))?, token(&a("system"))?,
-                one_of(&a("key"), &["core", "aspect", "filter", "accuracy", "pak", "resolution"])?, plain(&a("value"), 64)?))?;
+                settings_key(&a("key"))?, plain(&a("value"), 64)?))?;
             ok()
         }
         "game.reset" => { sock_ok("emud", &format!("GAME_RESET\t{}", game_id(&a("id"))?))?; ok() }
         "system.set" => {
             sock_ok("emud", &format!("SYSTEM_SET\t{}\t{}\t{}", token(&a("system"))?,
-                one_of(&a("key"), &["core", "aspect", "filter", "accuracy", "pak", "resolution"])?, plain(&a("value"), 64)?))?;
+                settings_key(&a("key"))?, plain(&a("value"), 64)?))?;
             ok()
         }
         "system.reset" => { sock_ok("emud", &format!("SYSTEM_RESET\t{}", token(&a("system"))?))?; ok() }

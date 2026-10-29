@@ -371,7 +371,7 @@ async function searchResults(q) {
 page('library', 'manage', () => T('library'), async (path) => {
   const [what, arg] = path;
   if (what === 'game') return gamePage(arg, path[2]);
-  if (what === 'gamesettings') return settingsPage(arg, path[2]);
+  if (what === 'gamesettings') return settingsPage(arg, path[2], path[3] === 'controls');
   if (what === 'system') return systemPage(arg);
   if (what === 'collection') return collectionPage(arg);
   const lib = await get('library');
@@ -523,7 +523,7 @@ async function gamePage(id, from) {
 
 /* Game Settings (id) or System Settings (id = null, GitHub #12): a key a
  * game leaves unset follows its system, a system's the default. */
-async function settingsPage(id, system) {
+async function settingsPage(id, system, controls) {
   const sys = !id;
   const [s, lib] = await Promise.all([sys ? get('system_settings', { system }, true) : get('game_settings', { id, system }, true), get('library')]);
   const sysName = (rows(lib.system).find((x) => x[0] === system) || [])[1] || system;
@@ -548,6 +548,35 @@ async function settingsPage(id, system) {
     ? [{ value: '', label: C(1448, 'System ({0})', paks[s.system_pak]) }, { value: 'rumble', label: paks.rumble }, { value: 'memory', label: paks.memory }]
     : [{ value: '', label: paks.rumble }, { value: 'memory', label: paks.memory }];
   const pakValue = s.pak ? paks[s.pak] : s.system_pak ? C(1448, 'System ({0})', paks[s.system_pak]) : paks.rumble;
+  /* Controls (user request 2026-10-29): what each control of the console
+   * presses on the system's pad; the D-pad is every system's. */
+  const here = sys ? 'gaming/systems/' + system : 'library/gamesettings/' + id + '/' + system;
+  const list = (v) => (v || '').split(',').filter((p) => p.includes(':')).map((p) => p.split(':'));
+  const pad = list(s.pad), own = list(s.remap), sysRemap = list(s.system_remap);
+  const DPAD = ['menu_up', 'menu_down', 'menu_left', 'menu_right'];
+  const padLabel = (t) => {
+    if (t === 'none') return C(173, 'None');
+    if (DPAD.includes(t)) return ['↑', '↓', '←', '→'][DPAD.indexOf(t)];
+    const x = pad.find((p) => p[0] === t);
+    return x && x[1].startsWith('#') ? C(+x[1].slice(1), '') : x && x[1] ? x[1] : controlName(t);
+  };
+  const padDefault = (c) => (DPAD.includes(c) || pad.some((p) => p[0] === c) ? padLabel(c) : C(173, 'None'));
+  const remapOf = (l, c) => (l.find((p) => p[0] === c) || [])[1] || '';
+  const remapInh = (c) => inh(remapOf(sysRemap, c), padLabel(remapOf(sysRemap, c)), padDefault(c));
+  if (controls) {
+    const targets = [...pad.map((p) => p[0]), ...DPAD, 'none'];
+    return {
+      title: C(1456, 'Controls'), kicker: sys ? sysName : C(524, 'Game Settings'), back: here, topics: [],
+      nodes: [group(
+        ...CONTROLS.map(([c]) => row({ key: 'ctl:' + c, title: controlName(c), chevron: true,
+          value: remapOf(own, c) ? padLabel(remapOf(own, c)) : remapInh(c),
+          on: () => pick('remap_' + c, controlName(c), [{ value: '', label: remapInh(c) },
+            ...targets.map((t) => ({ value: t, label: DPAD.includes(t) ? controlName(t) : padLabel(t) }))], remapOf(own, c)) })),
+        row({ key: 'ctl-reset', title: C(1458, 'Reset Controls'), detail: C(536, 'Changes apply the next time the game starts'), disabled: !own.length,
+          arm: { prompt: C(598, 'Press again to reset') }, on: () => set('remap', '') }))],
+    };
+  }
+  const controlsValue = own.length ? C(1463, 'Custom') : sysRemap.length ? C(1448, 'System ({0})', C(1463, 'Custom')) : '';
   return {
     title: sys ? sysName : C(524, 'Game Settings'), kicker: sys ? C(1454, 'System Settings') : '',
     back: sys ? 'gaming/systems' : 'library/game/' + id, topics: [],
@@ -570,6 +599,8 @@ async function settingsPage(id, system) {
         detail: s.resolution_default === 'auto' ? C(1381, 'Auto: 1x on the console, 2x on a TV') : C(1382, '2x is sharper but can slow the game down'),
         value: s.resolution ? resolutions[s.resolution] : resInh, chevron: true,
         on: () => pick('resolution', C(454, 'Resolution'), [{ value: '', label: resInh }, { value: '1x', label: resolutions['1x'] }, { value: '2x', label: resolutions['2x'] }], s.resolution) }) : null,
+      cores.length ? row({ key: 'controls', title: C(1456, 'Controls'), detail: C(1457, 'Choose what each button does in the game'),
+        value: controlsValue, chevron: true, on: () => go(here + '/controls') }) : null,
       sys && +s.games > 0 ? row({ key: 'games', title: C(1450, 'Apply to All Games'), detail: C(1449, '{0} games use their own settings', s.games),
         arm: { prompt: C(191, 'Press again to confirm') }, on: () => act('system.reset_games', { system }, { topics: [topic] }) }) : null,
       sys ? row({ key: 'reset', title: C(1451, 'Reset System Settings'), detail: C(536, 'Changes apply the next time the game starts'),
@@ -1344,7 +1375,7 @@ page('gaming', 'settings', () => C(702, 'Gaming'), async (path) => {
   if (path[0] === 'hotkeys') return hotkeysPage();
   if (path[0] === 'overlay') return overlayPage();
   if (path[0] === 'sync') return syncPage();
-  if (path[0] === 'systems') return path[1] ? settingsPage(null, path[1]) : systemsPage();
+  if (path[0] === 'systems') return path[1] ? settingsPage(null, path[1], path[2] === 'controls') : systemsPage();
   const [emu, ra, ss, lib, jobs, sync] = await Promise.all([get('emu_settings'), get('ra'), get('scraper'), get('library'), get('jobs'),
     get('sync').catch(() => ({}))]);
   const set = (key, value) => act('emu.set', { key, value }, { topics: ['emu_settings'] });

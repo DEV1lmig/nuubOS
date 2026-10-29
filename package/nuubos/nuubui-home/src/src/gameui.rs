@@ -118,6 +118,12 @@ struct Details {
     system_pak: String,
     system_resolution: String,
     games: i32,
+    /* Controls (user request 2026-10-29): the system's pad buttons
+     * (control, label: "" = the control's name, "#n" = string n) and the
+     * controls set, own and the system's (control, target). */
+    pad: Vec<(String, String)>,
+    remap: Vec<(String, String)>,
+    system_remap: Vec<(String, String)>,
     /* nuubos-biosctl: missing required firmware for the system. */
     bios_missing: bool,
 }
@@ -154,6 +160,8 @@ struct State {
      * shell from a game's settings (51 with sys_scope). */
     sys: Details,
     sys_scope: bool,
+    /* The Controls sub-page of Game Settings (51) or a system's page (77). */
+    controls: bool,
     /* Page 76: (id, name, effective emulator) of the systems with games. */
     systems: Vec<(String, String, String)>,
     /* The row page 76 lands on once loaded (back from a system). */
@@ -360,9 +368,17 @@ fn parse_game_settings(reply: &str, d: &mut Details) {
             "system_pak" => d.system_pak = value.into(),
             "system_resolution" => d.system_resolution = value.into(),
             "games" => d.games = value.parse().unwrap_or(0),
+            "pad" => d.pad = pairs_list(value),
+            "remap" => d.remap = pairs_list(value),
+            "system_remap" => d.system_remap = pairs_list(value),
             _ => {}
         }
     }
+}
+
+/* "a:b,c:d" -> [(a, b), (c, d)] */
+fn pairs_list(value: &str) -> Vec<(String, String)> {
+    value.split(',').filter_map(|p| p.split_once(':')).map(|(a, b)| (a.to_owned(), b.to_owned())).collect()
 }
 
 fn parse_bios(reply: &str) -> (Vec<BiosSystem>, Vec<BiosFile>) {
@@ -606,6 +622,16 @@ fn settings_rows(ui: &HomeWindow, st: &State, d: &Details, system: bool, rows: &
         .into();
         rows.push(("resolution".into(), r, true));
     }
+    /* Emulated games only (ports and applications have no game pad). */
+    if !d.cores.is_empty() {
+        let custom = tr(ui, 1463, "Custom");
+        let value = if !d.remap.is_empty() { custom }
+            else if !d.system_remap.is_empty() { tr_arg(ui, 1448, "System ({0})", &custom) }
+            else { String::new() };
+        let mut r = nav(tr(ui, 1456, "Controls"), value);
+        r.detail = tr(ui, 1457, "Choose what each button does in the game").into();
+        rows.push(("controls".into(), r, true));
+    }
     if system {
         if d.games > 0 {
             rows.push(("sys-games".into(), row(tr(ui, 1450, "Apply to All Games"), String::new(),
@@ -622,6 +648,91 @@ fn settings_rows(ui: &HomeWindow, st: &State, d: &Details, system: bool, rows: &
     }
 }
 
+/* Controls: the D-pad is every system's. */
+const DPAD: [&str; 4] = ["menu_up", "menu_down", "menu_left", "menu_right"];
+
+/* The name on the system's pad of the game control `target`; the D-pad
+ * as arrows (row values stay short: "Default (D-Pad Up)" did not fit). */
+fn pad_label(ui: &HomeWindow, d: &Details, target: &str) -> String {
+    if target == "none" {
+        return tr(ui, 173, "None");
+    }
+    if let Some(i) = DPAD.iter().position(|c| *c == target) {
+        return ["↑", "↓", "←", "→"][i].to_owned();
+    }
+    match d.pad.iter().find(|(c, _)| c == target).map(|(_, l)| l.as_str()) {
+        Some(l) if l.starts_with('#') => tr(ui, l[1..].parse().unwrap_or(0), ""),
+        Some(l) if !l.is_empty() => l.to_owned(),
+        _ => crate::control_label(ui, target),
+    }
+}
+
+/* What a control does untouched: itself, when the system's pad has it. */
+fn pad_default(ui: &HomeWindow, d: &Details, control: &str) -> String {
+    if DPAD.contains(&control) || d.pad.iter().any(|(c, _)| c == control) {
+        pad_label(ui, d, control)
+    } else {
+        tr(ui, 173, "None")
+    }
+}
+
+fn remap_get<'a>(list: &'a [(String, String)], control: &str) -> &'a str {
+    list.iter().find(|(c, _)| c == control).map(|(_, t)| t.as_str()).unwrap_or("")
+}
+
+/* The value of a control's row: its own target, else the system's, else
+ * itself. */
+fn remap_value(ui: &HomeWindow, d: &Details, control: &str) -> String {
+    let own = remap_get(&d.remap, control);
+    if !own.is_empty() {
+        return pad_label(ui, d, own);
+    }
+    let sys = remap_get(&d.system_remap, control);
+    inherited_label(ui, sys, pad_label(ui, d, sys), pad_default(ui, d, control))
+}
+
+/* The Controls page: each control of the console and the button of the
+ * system's pad it presses. */
+fn controls_rows(ui: &HomeWindow, st: &State, d: &Details, rows: &mut Vec<(String, GenRow, bool)>) {
+    for control in HOTKEY_CONTROLS {
+        rows.push((format!("ctl:{control}"), nav(crate::control_label(ui, control), remap_value(ui, d, control)), true));
+    }
+    rows.push(("ctl-reset".into(), row(tr(ui, 1458, "Reset Controls"), String::new(),
+        armed_detail(&st.armed, "ctl-reset", tr(ui, 598, "Press again to reset"),
+            tr(ui, 536, "Changes apply the next time the game starts"))), !d.remap.is_empty()));
+}
+
+fn open_remap_choice(ui: &HomeWindow, control: &str) {
+    let d = scope_details(ui);
+    let sys = remap_get(&d.system_remap, control);
+    let mut options = vec![(String::new(), inherited_label(ui, sys, pad_label(ui, &d, sys), pad_default(ui, &d, control)))];
+    for (c, _) in &d.pad {
+        options.push((c.clone(), pad_label(ui, &d, c)));
+    }
+    for c in DPAD {
+        options.push((c.to_owned(), crate::control_label(ui, c)));
+    }
+    options.push(("none".into(), tr(ui, 173, "None")));
+    open_settings_choice(ui, &format!("game-remap:{control}"), &crate::control_label(ui, control), options,
+        remap_get(&d.remap, control));
+}
+
+/* Into or out of the Controls sub-page. */
+fn show_controls(ui: &HomeWindow, on: bool) {
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.controls = on;
+        st.armed.clear();
+    });
+    ui.set_gen_index(0);
+    ui.set_gen_scroll(0);
+    render(ui);
+    if !on {
+        focus(ui, "controls");
+        render(ui);
+    }
+}
+
 /* ---------------------------------------------------------------- */
 /* Pages                                                            */
 /* ---------------------------------------------------------------- */
@@ -635,6 +746,9 @@ fn build_rows(ui: &HomeWindow, st: &State, view: i32) -> Vec<(String, GenRow, bo
     let mut rows: Vec<(String, GenRow, bool)> = Vec::new();
     let d = &st.details;
     match view {
+        51 | SYSTEM_VIEW if st.controls => {
+            controls_rows(ui, st, if view == SYSTEM_VIEW || st.sys_scope { &st.sys } else { d }, &mut rows)
+        }
         51 if st.sys_scope => settings_rows(ui, st, &st.sys, true, &mut rows),
         51 => settings_rows(ui, st, d, false, &mut rows),
         SYSTEM_VIEW => settings_rows(ui, st, &st.sys, true, &mut rows),
@@ -1037,6 +1151,7 @@ pub(crate) fn render(ui: &HomeWindow) {
     let rows = STATE.with(|st| build_rows(ui, &st.borrow(), view));
     let section = match view {
         50 => STATE.with(|st| st.borrow().details.system_name.clone()),
+        51 | SYSTEM_VIEW if STATE.with(|st| st.borrow().controls) => tr(ui, 1456, "Controls"),
         51 if STATE.with(|st| st.borrow().sys_scope) =>
             STATE.with(|st| tr_arg(ui, 1452, "{0} Settings", &st.borrow().sys.system_name)),
         51 => tr(ui, 524, "Game Settings"),
@@ -1338,7 +1453,11 @@ pub fn start_sheet_action(ui: &HomeWindow, action: &str) {
 }
 
 pub fn leave_details(ui: &HomeWindow) {
-    STATE.with(|st| st.borrow_mut().sys_scope = false);
+    STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        st.sys_scope = false;
+        st.controls = false;
+    });
     ui.set_settings_system_scope(false);
     ACTIVE.store(false, Ordering::SeqCst);
     navigate_settings_view(ui, 0);
@@ -1604,6 +1723,13 @@ fn settings_confirm(ui: &HomeWindow, key: &str) -> bool {
         "accuracy" => open_accuracy_choice(ui),
         "pak" => open_pak_choice(ui),
         "resolution" => open_resolution_choice(ui),
+        "controls" => show_controls(ui, true),
+        k if k.starts_with("ctl:") => open_remap_choice(ui, &k[4..]),
+        "ctl-reset" => {
+            if arm_or(ui, "ctl-reset") {
+                game_set(ui, "remap", String::new());
+            }
+        }
         "sys-games" => {
             if arm_or(ui, "sys-games") {
                 let system = STATE.with(|st| st.borrow().sys.system.clone());
@@ -1635,6 +1761,7 @@ pub fn apply_choice(ui: &HomeWindow, context: &str, value: String) {
         "game-accuracy" => game_set(ui, "accuracy", value),
         "game-pak" => game_set(ui, "pak", value),
         "game-resolution" => game_set(ui, "resolution", value),
+        c if c.starts_with("game-remap:") => game_set(ui, &format!("remap_{}", &c[11..]), value),
         "emu-slots" => emu_set(ui, "slots", value),
         "emu-position" => emu_set(ui, "position", value),
         "game-fill" => start_bulk(ui, value),
@@ -1703,7 +1830,11 @@ fn details_confirm(ui: &HomeWindow, key: &str) {
         "collections" => open_collections(ui),
         "tags" => open_tags(ui),
         "settings" => {
-            STATE.with(|st| st.borrow_mut().sys_scope = false);
+            STATE.with(|st| {
+                let mut st = st.borrow_mut();
+                st.sys_scope = false;
+                st.controls = false;
+            });
             ui.set_settings_system_scope(false);
             show(ui, 51);
         }
@@ -1827,7 +1958,9 @@ pub fn handle_details_action(ui: &HomeWindow, action: &str, settings_active: &Ar
         "menu_up" | "menu_down" | "menu_left" | "menu_right" if page => details_move(ui, action),
         "menu_up" | "menu_down" => move_selection(ui, action),
         "menu_back" => {
-            if ui.get_settings_view() == 51 && STATE.with(|st| st.borrow().sys_scope) {
+            if ui.get_settings_view() == 51 && STATE.with(|st| st.borrow().controls) {
+                show_controls(ui, false);
+            } else if ui.get_settings_view() == 51 && STATE.with(|st| st.borrow().sys_scope) {
                 /* Back from the system to the game, its values reloaded. */
                 STATE.with(|st| st.borrow_mut().sys_scope = false);
                 ui.set_settings_system_scope(false);
@@ -2725,7 +2858,11 @@ fn page_confirm(ui: &HomeWindow, view: i32, key: &str) {
             let id = k[4..].to_owned();
             let name = STATE.with(|st| st.borrow().systems.iter().find(|s| s.0 == id).map(|s| s.1.clone()))
                 .unwrap_or_default();
-            STATE.with(|st| st.borrow_mut().sys = Details { system: id.clone(), system_name: name.clone(), ..Default::default() });
+            STATE.with(|st| {
+                let mut st = st.borrow_mut();
+                st.sys = Details { system: id.clone(), system_name: name.clone(), ..Default::default() };
+                st.controls = false;
+            });
             show(ui, SYSTEM_VIEW);
             load_system(ui, id, name);
         }
@@ -2853,6 +2990,7 @@ pub fn handle_page(ui: &HomeWindow, view: i32, action: &str) {
             STATE.with(|st| st.borrow_mut().bios_system.clear());
             match view {
                 53 => show(ui, 52),
+                SYSTEM_VIEW if STATE.with(|st| st.borrow().controls) => show_controls(ui, false),
                 SYSTEM_VIEW => {
                     /* Back on the system's row, its emulator refreshed. */
                     let id = STATE.with(|st| st.borrow().sys.system.clone());

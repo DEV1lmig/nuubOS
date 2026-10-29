@@ -1301,14 +1301,31 @@ static void finish_power_wait(void)
 
 static void process_input_link(void)
 {
+	static char line[64];
+	static size_t used;
 	char buf[128];
 	ssize_t n = read(session.input_fd, buf, sizeof(buf));
 
-	/* Hotkeys (emulation chords) mean nothing to a port: ignored. */
 	if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
 		/* inputd restarted: take the gamepads again. */
 		close(session.input_fd);
+		used = 0;
 		session.input_fd = input_gamepads_on();
+		return;
+	}
+	/* Quit (H + Start) ends the port like a game; the other emulation
+	 * chords mean nothing to a port: ignored. */
+	for (ssize_t i = 0; i < n; i++) {
+		if (buf[i] == '\n') {
+			line[used] = '\0';
+			if (!strcmp(line, "HOTKEY quit"))
+				request_quit();
+			used = 0;
+		} else if (used + 1 < sizeof(line)) {
+			line[used++] = buf[i];
+		} else {
+			used = 0;
+		}
 	}
 }
 

@@ -312,6 +312,54 @@ try:
     cmd('emud.sock', 'GAME_RESET\t' + psx)
     open(t + '/hdmi-enabled', 'w').write('disabled\n')
 
+    # Controls (user request 2026-10-29): per system, per game, sent to
+    # inputd as REMAP after the hotkeys.
+    input_lines = []
+    isrv = socket.socket(socket.AF_UNIX)
+    isrv.bind(run + '/inputd.sock')
+    isrv.listen(8)
+    def input_conn(conn):
+        f = conn.makefile('rw')
+        for line in f:
+            input_lines.append(line.strip())
+            if line.startswith('GAMEPADS ON'):
+                f.write('OK\n'); f.flush()
+            elif line.startswith('BIND GET'):
+                f.write('304\n'); f.flush()
+    def fake_inputd():
+        while True:
+            try:
+                conn, _ = isrv.accept()
+            except OSError:
+                return
+            threading.Thread(target=input_conn, args=(conn,), daemon=True).start()
+    threading.Thread(target=fake_inputd, daemon=True).start()
+    def remap_sent():
+        del input_lines[:]
+        psx_session(False)
+        return [l for l in input_lines if l.startswith('REMAP')]
+    gs = cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx)
+    check('controls: system pad listed', 'pad=menu_confirm:#1459,menu_back:#1460,' in gs and 'remap=\n' in gs)
+    check('controls: generic pad', 'pad=menu_back:A,menu_confirm:B,face_north:X,' in cmd('emud.sock', 'SYSTEM_SETTINGS\tcps2'))
+    check('controls: none by default', remap_sent() == ['REMAP'])
+    check('controls: bad values refused', cmd('emud.sock', 'SYSTEM_SET\tpsx\tremap_l1\tquick_menu').startswith('ERR')
+          and cmd('emud.sock', 'SYSTEM_SET\tpsx\tremap_x\tl1').startswith('ERR'))
+    check('controls: system set', cmd('emud.sock', 'SYSTEM_SET\tpsx\tremap_face_west\tmenu_confirm').startswith('OK')
+          and cmd('emud.sock', 'SYSTEM_SET\tpsx\tremap_l3\tnone').startswith('OK')
+          and open(sysdir + '/psx.conf').read() == 'remap_face_west=menu_confirm\nremap_l3=none\n')
+    gs = cmd('emud.sock', 'GAME_SETTINGS\t%s\tpsx' % psx)
+    check('controls: game lists the system', 'system_remap=face_west:menu_confirm,l3:none\n' in gs and 'remap=\n' in gs)
+    check('controls: game follows its system', remap_sent() == ['REMAP face_west:menu_confirm,l3:none'])
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tremap_face_west\tface_west' % psx)
+    cmd('emud.sock', 'GAME_SET\t%s\tpsx\tremap_face_north\tmenu_back' % psx)
+    check('controls: game wins', remap_sent() == ['REMAP face_north:menu_back,face_west:face_west,l3:none'])
+    check('controls: system counts the game', 'games=1\n' in cmd('emud.sock', 'SYSTEM_SETTINGS\tpsx'))
+    check('controls: reset all', cmd('emud.sock', 'GAME_SET\t%s\tpsx\tremap\t' % psx).startswith('OK')
+          and remap_sent() == ['REMAP face_west:menu_confirm,l3:none'])
+    cmd('emud.sock', 'SYSTEM_RESET\tpsx')
+    isrv.close()
+    os.unlink(run + '/inputd.sock')
+
     check('reset', cmd('emud.sock', 'GAME_RESET\t' + game).startswith('OK'))
     check('reset removes file', not os.path.exists('%s/users/%s/appdata/nuubos-emulation/games/%s.conf' % (ud, user, game)))
     check('inherited again', 'core=snes9x\n' in cmd('emud.sock', 'GAME_SETTINGS\t%s\tsnes' % game))
