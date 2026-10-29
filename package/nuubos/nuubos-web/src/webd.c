@@ -254,7 +254,10 @@ static bool save_entries(const char *user, const char *name, const struct entry 
 		return false;
 	for (size_t i = 0; i < n; i++)
 		fprintf(fp, "%s\t%s\n", e[i].url, e[i].title);
-	if (fclose(fp) != 0 || rename(tmp, path) != 0) {
+	/* fsync: /userdata is exFAT, an unsynced file renamed into place comes
+	 * back empty after a crash. */
+	if (fflush(fp) != 0 || fsync(fileno(fp)) != 0 || fclose(fp) != 0 ||
+	    rename(tmp, path) != 0) {
 		unlink(tmp);
 		return false;
 	}
