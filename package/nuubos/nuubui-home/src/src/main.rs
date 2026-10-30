@@ -841,6 +841,7 @@ struct AudioProductState {
     volume: i32,
     volume_supported: bool,
     bluetooth_available: bool,
+    usb_available: bool,
     headphones_available: bool,
     hdmi_available: bool,
     speaker_available: bool,
@@ -857,6 +858,7 @@ impl Default for AudioProductState {
             volume: 100,
             volume_supported: true,
             bluetooth_available: false,
+            usb_available: false,
             headphones_available: false,
             hdmi_available: false,
             speaker_available: true,
@@ -871,6 +873,7 @@ fn audio_output_label(ui: &HomeWindow, output: &str) -> String {
     match output {
         "auto" => tr(ui, 122, "Automatic"),
         "bluetooth" => tr(ui, 331, "Bluetooth Audio"),
+        "usb" => tr(ui, 1469, "USB Audio"),
         "analog" => tr(ui, 332, "Analog Audio"),
         "headphones" => tr(ui, 330, "Headphones"),
         "hdmi" => "HDMI".to_owned(),
@@ -896,6 +899,7 @@ fn apply_audio_product_state(ui: &HomeWindow, state: AudioProductState) {
     ui.set_audio_volume(state.volume);
     ui.set_audio_volume_supported(state.volume_supported);
     ui.set_audio_bluetooth_available(state.bluetooth_available);
+    ui.set_audio_usb_available(state.usb_available);
     ui.set_audio_headphones_available(state.headphones_available);
     ui.set_audio_hdmi_available(state.hdmi_available);
     ui.set_audio_speaker_available(state.speaker_available);
@@ -2151,15 +2155,17 @@ fn refresh_audio(ui: &HomeWindow) {
             let (mode, selected, volume, volume_supported,
                  bluetooth_available, headphones_available,
                  hdmi_available, speaker_available,
-                 system_volume, home_music_volume, home_music_playing):
-                (String, String, i32, bool, bool, bool, bool, bool, i32, i32, bool) =
-                proxy.call("GetSnapshot", &())?;
+                 system_volume, home_music_volume, home_music_playing,
+                 usb_available, _usb_microphone_available):
+                (String, String, i32, bool, bool, bool, bool, bool, i32, i32, bool, bool, bool) =
+                proxy.call("GetSnapshot2", &())?;
             Ok(AudioProductState {
                 mode,
                 selected,
                 volume,
                 volume_supported,
                 bluetooth_available,
+                usb_available,
                 headphones_available,
                 hdmi_available,
                 speaker_available,
@@ -2272,7 +2278,7 @@ fn start_audio_product_listener(ui: &HomeWindow) {
             }
         }
 
-        let mut signals = match proxy.receive_signal("StateChanged") {
+        let mut signals = match proxy.receive_signal("StateChanged2") {
             Ok(signals) => signals,
             Err(error) => {
                 eprintln!("home: Audio signal failed={error}");
@@ -2284,11 +2290,12 @@ fn start_audio_product_listener(ui: &HomeWindow) {
         for message in &mut signals {
             let state = message
                 .body()
-                .deserialize::<(String, String, i32, bool, bool, bool, bool, bool, i32, i32, bool)>();
+                .deserialize::<(String, String, i32, bool, bool, bool, bool, bool, i32, i32, bool, bool, bool)>();
             let Ok((mode, selected, volume, volume_supported,
                     bluetooth_available, headphones_available,
                     hdmi_available, speaker_available,
-                    system_volume, home_music_volume, home_music_playing)) = state else {
+                    system_volume, home_music_volume, home_music_playing,
+                    usb_available, _usb_microphone_available)) = state else {
                 eprintln!("home: invalid Audio StateChanged payload");
                 continue;
             };
@@ -2298,6 +2305,7 @@ fn start_audio_product_listener(ui: &HomeWindow) {
                 volume,
                 volume_supported,
                 bluetooth_available,
+                usb_available,
                 headphones_available,
                 hdmi_available,
                 speaker_available,
@@ -2450,6 +2458,10 @@ fn open_audio_output_dropdown(ui: &HomeWindow) {
 
     if ui.get_audio_bluetooth_available() {
         options.push(("bluetooth".to_owned(), tr(ui, 331, "Bluetooth Audio")));
+    }
+
+    if ui.get_audio_usb_available() {
+        options.push(("usb".to_owned(), tr(ui, 1469, "USB Audio")));
     }
 
     /* Speaker/headphones are one physical analog route.  Jack insertion

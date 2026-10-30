@@ -1506,8 +1506,8 @@ async function overlayPage() {
 
 page('display', 'settings', () => C(7, 'Display & Audio'), async () => {
   const [d, a] = await Promise.all([get('display'), get('audio')]);
-  const outputs = { auto: C(122, 'Automatic'), analog: C(332, 'Analog Audio'), bluetooth: C(331, 'Bluetooth Audio'), hdmi: 'HDMI' };
-  const sel = { speaker: C(240, 'Speaker'), headphones: C(330, 'Headphones'), bluetooth: C(331, 'Bluetooth Audio'), hdmi: 'HDMI' };
+  const outputs = { auto: C(122, 'Automatic'), analog: C(332, 'Analog Audio'), bluetooth: C(331, 'Bluetooth Audio'), usb: C(1469, 'USB Audio'), hdmi: 'HDMI' };
+  const sel = { speaker: C(240, 'Speaker'), headphones: C(330, 'Headphones'), bluetooth: C(331, 'Bluetooth Audio'), usb: C(1469, 'USB Audio'), hdmi: 'HDMI' };
   const vol = a['volume.' + a.selected];
   const nodes = [section(C(728, 'DISPLAY'), 'device'), group(
     d.hdmi ? row({ key: 'bri', title: C(127, 'Brightness'), value: C(132, 'Internal display inactive'), disabled: true })
@@ -1518,6 +1518,7 @@ page('display', 'settings', () => C(7, 'Display & Audio'), async () => {
     row({ key: 'out', title: C(133, 'Audio Output'), value: (a.mode === 'auto' ? C(122, 'Automatic') + ' • ' : '') + (sel[a.selected] || a.selected), chevron: true, on: () => {
       const opts = [{ value: 'auto', label: outputs.auto }];
       if (a['available.bluetooth'] === '1') opts.push({ value: 'bluetooth', label: outputs.bluetooth });
+      if (a['available.usb'] === '1') opts.push({ value: 'usb', label: outputs.usb });
       opts.push({ value: 'analog', label: outputs.analog });
       if (a['available.hdmi'] === '1') opts.push({ value: 'hdmi', label: outputs.hdmi });
       return pickAndAct(C(133, 'Audio Output'), opts, a.mode, 'audio.output');
